@@ -4,7 +4,12 @@
 
 /* The glibc sched.h includes this guarded type after declaring its constants.
  * Define the extended POSIX form first while retaining the Linux declarations
- * through include_next below. */
+ * through include_next below. Clang warns when this wrapper is reached through
+ * a quoted include next to the primary source; the next-file search is unchanged. */
+#if defined(__clang__)
+# pragma clang diagnostic push
+# pragma clang diagnostic ignored "-Winclude-next-absolute-path"
+#endif
 #include_next <time.h>
 
 #ifndef _BITS_TYPES_STRUCT_SCHED_PARAM
@@ -20,6 +25,9 @@ struct sched_param
 #endif
 
 #include_next <sched.h>
+#if defined(__clang__)
+# pragma clang diagnostic pop
+#endif
 
 #ifndef SCHED_SPORADIC
 # define SCHED_SPORADIC 4

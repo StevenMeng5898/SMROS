@@ -1,0 +1,3268 @@
+===== utc 2026-11-20T11:05:59Z =====
+===== toolchain =====
+VERUS_RELEASE_TAG=release/0.2026.04.19.6f7d4de
+VERUS_RELEASE_ID=0.2026.04.19.6f7d4de
+VERUS_RUST_TOOLCHAIN=1.95.0-x86_64-unknown-linux-gnu
+VSTD_CRATE_VERSION=0.0.0-2026-04-19-0121
+===== verus --version =====
+Verus
+  Version: 0.2026.04.19.6f7d4de
+  Profile: release
+  Platform: linux_x86_64
+  Toolchain: 1.95.0-x86_64-unknown-linux-gnu
+
+===== command =====
+/agent/repos/SMROS/.tools/verus/current/verus verification/syscall/src/lib.rs --crate-type=lib --triggers-mode=silent --no-report-long-running --time-expanded --output-json
+===== output =====
+{
+  "func-details": {
+    "vstd::view::impl&%49::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CLONE_NEWNS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::array::impl&%20::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_domain_supported": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_path_mode_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_within_window": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_guest_trap_is_mem": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::strictly_cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_ACCMODE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MAX_IOV": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_address_logic_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AF_PACKET": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%47::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_write_state_args_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_fd_target_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AT_REMOVEDIR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SOCK_RAW": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_fd_target_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_bridge_layout_matches_exception_frame": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_namespace_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_PIPE_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_SYSCALL_LINUX_THRESHOLD_U64": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_syscall_from_raw": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_ipc_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%11::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_msg_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_RENAME_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_interrupt_vector_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_range_availability_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%4::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_signal_action_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_usize_options_within_mask_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_handle_next_generation": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::signal_mask_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AT_EMPTY_PATH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CLONE_NEWUSER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_dup3_args_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%14::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_arg_from_reg": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%34::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::lemma_array_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_SAVED_REG_WORDS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::wait_satisfied_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_DEBUGLOG_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_record_lock_rules_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_clock_update_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_UNLINK_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CLONE_NEWUTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_some": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%15::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::page_aligned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_EVENT_SIGNAL_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_interrupt_vector_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::impl&%1::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_domain_supported_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::channel_buffers_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::overflowing_ranges_are_not_treated_as_window_members": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_syscall_interface_known_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_handle_encode": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::spec_unwrap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_CLOCK_OPT_AUTO_START": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MEMFD_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AF_LOCAL": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AF_INET": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%25::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_sigset_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_type_supported_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%0::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::VecAdditionalSpecFns::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_signal_mask_exec_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_poll_count_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_GUEST_TRAP_BELL": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_syscall_interface_known": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%37::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_domain_type_supported_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AF_UNIX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_DEBUGLOG_CREATE_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AF_NETLINK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_read_state_args_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%1::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_user_range_covers_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::impl&%0::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MAX_IPC_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CLONE_NEWNET": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::page_aligned_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_trigger": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_signal_mask": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::is_zircon_syscall_number": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_poll_events_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%12::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::spec_vec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_HYPERVISOR_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_CLOCK_UPDATE_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_entry_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_fcntl_cmd_supported": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_decreases_to_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%19::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_time_debug_system_exception_exec_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_EVENTPAIR_SIGNALED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LinuxRange::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_debuglog_create_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_open_is_directory_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_handle_decode": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::array_len_matches_n": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SOCK_TYPE_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::signal_mask_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::wait_satisfied": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_GUEST_TRAP_IO": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_mqueue_attr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::impl&%2::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_signal_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_ipc_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::View::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_fcntl_cmd_supported_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_lseek_whence_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_CLOEXEC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_RENAME_NOREPLACE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%17::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_clock_nanosleep_flags_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%17::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fixed_linux_mmap_request_ok_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SOCK_NONBLOCK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_overlaps_is_symmetric": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_index_decreases": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_handle_fd_slot": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_none": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_memfd_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_futex_rules_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MAX_POLL_FDS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_hypervisor_exec_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_linux_signal_ipc_misc_net_exec_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::VERUS_LINUX_MAX_SIGNAL": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::axiom_array_has_resolved": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CLONE_NEWIPC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::is_linux_syscall_number": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_buffer_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_overlaps": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_SYSCALL_ARG_COUNT_LINUX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::handle_invalid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_lseek_whence_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_syscall_interface_known": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_POLL_ALLOWED_EVENTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_clock_id_supported_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_hypervisor_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_syscall_from_raw_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_VCPU_IO_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_EXCEPTION_CHANNEL_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%41::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_iov_bytes_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_open_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_index_decreases": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_RDWR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_RENAME_EXCHANGE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_STAT_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%7::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_domain_type_supported": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::DeepView::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_fd_range_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_system_event_kind_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%46::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_getrandom_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%16::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_signal_action_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_new_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_mqueue_name_shape": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%5::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_new_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_syscall_number_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_riscv_syscall_return_pc": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%1::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::axiom_array_ext_equal": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_guest_trap_is_bell": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_entry_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%7::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MAPPING_LIMIT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ObjectType::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_zircon_logic_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_ipc_count_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_spec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_addr_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end_spec_returns_sum_when_it_fits": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_within_window_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%26::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_syscall_number_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_FCNTL_STATUS_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_linux_mmap_fd_access": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::ArrayAdditionalSpecFns::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_GUEST_TRAP_KIND_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_fd_range_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CLONE_NEWCGROUP": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::Clone::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MAX_SEMAPHORES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%8::wrapping_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%48::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_GUEST_PHYS_LIMIT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_ext_equal_deep": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_STATX_BASIC_STATS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_i16_options_within_mask_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_AT_SYMLINK_NOFOLLOW": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::eventpair_signal_mask": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_guest_trap_range_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::boxed::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fixed_linux_mmap_request_stays_inside_linux_window": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%27::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_USER_SIGNAL_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_DIRECTORY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_EXCL": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_syscall_interface_known_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end_spec_rejects_overflow": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_read_state_args_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_GUEST_TRAP_MEM": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_VCPU_ENTRY_ALIGNMENT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_handle_authorize": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::signal_update_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_iov_count_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_end_before_start_means_no_overlap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_range_available": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_timer_deadline_expired": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_errno_return_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_RENAME_WHITEOUT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_SYSCALL_NUMBER_REG_INDEX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_open_access_mode_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_errno_code_to_u64": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%8::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_fcntl_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%20::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fixed_linux_mmap_request_ok": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_clock_id_supported": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_RDONLY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_system_event_kind_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_guest_trap_alignment_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_arg_from_u64": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_VCPU_STATE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_vcpu_write_state_args_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MAPPING_BASE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_OPEN_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_el0_user_range": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_poll_count_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SOCK_DGRAM": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_start_after_end_means_no_overlap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_overlaps_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SOCK_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%18::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_iov_bytes_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_ZIRCON_SYSCALL_BASE_U64": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_CREAT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_SAVED_REG_COUNT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SEEK_MAX_WHENCE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::signal_update": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_guest_trap_alignment_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_debuglog_io_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_u32_options_within_mask_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SIGSET_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%27::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_GETRANDOM_ALLOWED_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%35::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::handle_invalid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_pipe_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_guest_trap_range_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%21::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_EVENT_SIGNALED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::uaccess_zero_length_does_not_consult_the_pointer": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_timer_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_range_available_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%30::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::wrapping::u32_specs::wrapping_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_copy_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%9::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_addr_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_socket_type_supported": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_timer_deadline_expired_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_user_range_covers": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_buffer_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_dup3_args_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_ext_equal": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_SYSCALL_ARG_COUNT_ZIRCON": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_bridge_route_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_ends_before_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::u32_options_within_mask_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_open_is_directory": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_regular_file_mmap_span": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%25::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_SAVED_REG_FRAME_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%24::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_WRONLY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_ACCESS_MODE_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_stat_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_iov_count_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_MAX_MSG_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_NONBLOCK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_TIMER_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_STDIO_FD_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_num_from_regs": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::array_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_stat_mask_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_exception_channel_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_deep_view_proof": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_open_access_mode_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_rename_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_clock_create_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%36::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SOCK_CLOEXEC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%31::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::array::impl&%0::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CLONE_NEWPID": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_sys_result_return_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_riscv_sstatus_spp_set": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::no_overlap_with_mappings_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_SYSTEM_EVENT_KIND_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::new": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PAGE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CONTAINER_NAMESPACE_FLAGS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_has_resolved": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%2::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_EVENTPAIR_SIGNAL_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::u64_options_within_mask_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_guest_trap_kind_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::el0_user_range_plausible_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_sys_result_to_u64_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_sigset_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_TRUNC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::shm_path_binary_search": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%3::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_riscv_frame_aligned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::syscall_linux_file_dir_fd_poll_stat_exec_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::event_signal_mask": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::no_overlap_with_mappings": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%6::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_unlink_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::saved_reg_arg_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::channel_buffers_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_O_APPEND": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_VCPU_INTERRUPT_VECTOR_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_EXCEPTION_CHANNEL_DEBUGGER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_clock_id_supported_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_SOCK_STREAM": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_clock_nanosleep_flags_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_VCPU_STATE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ZX_VCPU_IO": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SMROS_INVALID_HANDLE_U32": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_task_lifecycle_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_ipc_count_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::zircon_clock_id_supported": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_msg_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_signal_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    }
+  },
+  "verification-results": {
+    "encountered-error": false,
+    "encountered-vir-error": false,
+    "success": true,
+    "verified": 296,
+    "errors": 0,
+    "is-verifying-entire-crate": true
+  },
+  "times-ms": {
+    "verus-build": {
+      "profile": "release",
+      "version": "0.2026.04.19.6f7d4de"
+    },
+    "num-threads": 1,
+    "total": 5732,
+    "estimated-cpu-time": 5732,
+    "rust": {
+      "total": 722,
+      "init-and-types": 152,
+      "trait-conflicts": 28,
+      "compile": 540
+    },
+    "verification": {
+      "total": 4936,
+      "vir": {
+        "total": 398,
+        "hir": 166,
+        "import": 125,
+        "rust-to-vir": 38
+      }
+    },
+    "total-verify": 4498,
+    "total-verify-module-times": [
+      {
+        "module": "",
+        "time": 4498
+      }
+    ],
+    "air": {
+      "total": 2963,
+      "module-times": [
+        {
+          "module": "",
+          "time": 2963
+        }
+      ]
+    },
+    "smt": {
+      "total": 988,
+      "smt-init": 30,
+      "rlimit-init": 15969,
+      "smt-init-module-times": [
+        {
+          "module": "",
+          "time": 30,
+          "time-micros": 30499,
+          "rlimit": 15969
+        }
+      ],
+      "smt-run": 958,
+      "rlimit-run": 4088558,
+      "smt-run-module-times": [
+        {
+          "module": "",
+          "time": 958,
+          "time-micros": 958819,
+          "rlimit": 4088558,
+          "function-breakdown": [
+            {
+              "function": "lib::LINUX_CLONE_NEWCGROUP",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SOCK_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::checked_end",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8215,
+              "rlimit": 61295,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_GUEST_TRAP_IO",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::signal_update",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3952,
+              "rlimit": 18936,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_RENAME_NOREPLACE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_fcntl_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4013,
+              "rlimit": 19897,
+              "success": true
+            },
+            {
+              "function": "lib::linux_poll_events_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4114,
+              "rlimit": 19983,
+              "success": true
+            },
+            {
+              "function": "lib::linux_copy_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4292,
+              "rlimit": 19824,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MAX_IPC_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_vcpu_entry_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4424,
+              "rlimit": 21244,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_SYSCALL_LINUX_THRESHOLD_U64",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 62,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_linux_signal_ipc_misc_net_exec_smoke",
+              "mode:": "exec",
+              "time": 83,
+              "time-micros": 83048,
+              "rlimit": 212210,
+              "success": true
+            },
+            {
+              "function": "lib::range_within_window",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6935,
+              "rlimit": 65228,
+              "success": true
+            },
+            {
+              "function": "lib::linux_socket_domain_supported",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5210,
+              "rlimit": 27518,
+              "success": true
+            },
+            {
+              "function": "lib::linux_task_lifecycle_smoke",
+              "mode:": "proof",
+              "time": 5,
+              "time-micros": 5022,
+              "rlimit": 29674,
+              "success": true
+            },
+            {
+              "function": "lib::linux_poll_count_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4275,
+              "rlimit": 24445,
+              "success": true
+            },
+            {
+              "function": "lib::linux_stat_mask_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4082,
+              "rlimit": 19883,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_vcpu_read_state_args_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4551,
+              "rlimit": 19951,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CLONE_NEWNS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SOCK_TYPE_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_PIPE_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::page_aligned",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4464,
+              "rlimit": 27154,
+              "success": true
+            },
+            {
+              "function": "lib::wait_satisfied",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4037,
+              "rlimit": 19901,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CLONE_NEWNET",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_exception_channel_options_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4207,
+              "rlimit": 19901,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_linux_file_dir_fd_poll_stat_exec_smoke",
+              "mode:": "exec",
+              "time": 196,
+              "time-micros": 196393,
+              "rlimit": 455067,
+              "success": true
+            },
+            {
+              "function": "lib::linux_range_availability_smoke",
+              "mode:": "proof",
+              "time": 28,
+              "time-micros": 28786,
+              "rlimit": 135346,
+              "success": true
+            },
+            {
+              "function": "lib::range_end_before_start_means_no_overlap",
+              "mode:": "proof",
+              "time": 3,
+              "time-micros": 3864,
+              "rlimit": 17210,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_EXCEPTION_CHANNEL_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_futex_rules_smoke",
+              "mode:": "proof",
+              "time": 15,
+              "time-micros": 15872,
+              "rlimit": 35966,
+              "success": true
+            },
+            {
+              "function": "lib::verified_riscv_sstatus_spp_set",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 68,
+              "rlimit": 104,
+              "success": true
+            },
+            {
+              "function": "lib::user_signal_mask",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 241,
+              "rlimit": 276,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_RENAME_WHITEOUT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_TIMER_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_riscv_syscall_return_pc",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4189,
+              "rlimit": 25074,
+              "success": true
+            },
+            {
+              "function": "lib::linux_dup3_args_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4042,
+              "rlimit": 19592,
+              "success": true
+            },
+            {
+              "function": "lib::uaccess_zero_length_does_not_consult_the_pointer",
+              "mode:": "proof",
+              "time": 5,
+              "time-micros": 5474,
+              "rlimit": 39753,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_guest_trap_is_bell",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 44,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_fd_target_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4504,
+              "rlimit": 19775,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MAPPING_LIMIT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 801,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_INVALID_HANDLE_U32",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SOCK_STREAM",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_FCNTL_STATUS_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MAX_SEMAPHORES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CLONE_NEWUTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_handle_authorize",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4044,
+              "rlimit": 20093,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_SYSCALL_NUMBER_REG_INDEX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CLONE_NEWPID",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_getrandom_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4028,
+              "rlimit": 19885,
+              "success": true
+            },
+            {
+              "function": "lib::linux_socket_addr_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4209,
+              "rlimit": 19796,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SOCK_NONBLOCK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_clock_nanosleep_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4123,
+              "rlimit": 19978,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_CLOCK_UPDATE_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ObjectType::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 440,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_syscall_interface_known",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4179,
+              "rlimit": 19723,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_POLL_ALLOWED_EVENTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_open_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4710,
+              "rlimit": 19840,
+              "success": true
+            },
+            {
+              "function": "lib::PAGE_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 68,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_num_from_regs",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4295,
+              "rlimit": 22542,
+              "success": true
+            },
+            {
+              "function": "lib::event_signal_mask",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1059,
+              "rlimit": 3776,
+              "success": true
+            },
+            {
+              "function": "lib::range_overlaps",
+              "mode:": "exec",
+              "time": 11,
+              "time-micros": 11883,
+              "rlimit": 134370,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_vcpu_write_state_args_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4725,
+              "rlimit": 26937,
+              "success": true
+            },
+            {
+              "function": "lib::channel_buffers_valid",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5026,
+              "rlimit": 27274,
+              "success": true
+            },
+            {
+              "function": "lib::linux_unlink_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4158,
+              "rlimit": 19824,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_DEBUGLOG_CREATE_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_signal_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4004,
+              "rlimit": 19787,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CLONE_NEWIPC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_ipc_count_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4038,
+              "rlimit": 19884,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_zircon_logic_smoke",
+              "mode:": "proof",
+              "time": 146,
+              "time-micros": 146469,
+              "rlimit": 372441,
+              "success": true
+            },
+            {
+              "function": "lib::linux_open_is_directory",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4197,
+              "rlimit": 19899,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MAX_IOV",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_clock_update_options_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4651,
+              "rlimit": 20017,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AF_UNIX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::overflowing_ranges_are_not_treated_as_window_members",
+              "mode:": "proof",
+              "time": 4,
+              "time-micros": 4854,
+              "rlimit": 26172,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_EVENTPAIR_SIGNAL_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_buffer_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4038,
+              "rlimit": 19737,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MAX_MSG_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_GETRANDOM_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_ACCMODE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_path_mode_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4165,
+              "rlimit": 19904,
+              "success": true
+            },
+            {
+              "function": "lib::is_linux_syscall_number",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4132,
+              "rlimit": 19589,
+              "success": true
+            },
+            {
+              "function": "lib::linux_iov_bytes_valid",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6063,
+              "rlimit": 38799,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_GUEST_TRAP_KIND_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_timer_deadline_expired",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4043,
+              "rlimit": 19837,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_EVENTPAIR_SIGNALED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_signal_mask_exec_smoke",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4862,
+              "rlimit": 22752,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_address_logic_smoke",
+              "mode:": "proof",
+              "time": 6,
+              "time-micros": 6340,
+              "rlimit": 37279,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_VCPU_ENTRY_ALIGNMENT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MAPPING_BASE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_memfd_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4530,
+              "rlimit": 19918,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SOCK_RAW",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AF_NETLINK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_fd_range_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4028,
+              "rlimit": 19754,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_VCPU_STATE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_VCPU_IO_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_open_access_mode_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4251,
+              "rlimit": 20127,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AT_EMPTY_PATH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_fcntl_cmd_supported",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5250,
+              "rlimit": 28763,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_guest_trap_range_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4301,
+              "rlimit": 22677,
+              "success": true
+            },
+            {
+              "function": "lib::verified_handle_encode",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4405,
+              "rlimit": 21816,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_HYPERVISOR_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_SAVED_REG_COUNT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 40,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_CLOCK_OPT_AUTO_START",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_lseek_whence_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4201,
+              "rlimit": 19781,
+              "success": true
+            },
+            {
+              "function": "lib::linux_rename_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4031,
+              "rlimit": 19824,
+              "success": true
+            },
+            {
+              "function": "lib::linux_sys_result_to_u64_model",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4466,
+              "rlimit": 30334,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SOCK_DGRAM",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_SAVED_REG_WORDS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SIGSET_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::checked_end_spec_returns_sum_when_it_fits",
+              "mode:": "proof",
+              "time": 5,
+              "time-micros": 5089,
+              "rlimit": 32111,
+              "success": true
+            },
+            {
+              "function": "lib::range_overlaps_is_symmetric",
+              "mode:": "proof",
+              "time": 5,
+              "time-micros": 5254,
+              "rlimit": 28310,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_syscall_from_raw",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5162,
+              "rlimit": 30356,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_ZIRCON_SYSCALL_BASE_U64",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 41,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_bridge_layout_matches_exception_frame",
+              "mode:": "proof",
+              "time": 0,
+              "time-micros": 931,
+              "rlimit": 3460,
+              "success": true
+            },
+            {
+              "function": "lib::verified_riscv_frame_aligned",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 45,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_syscall_interface_known",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4133,
+              "rlimit": 19771,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_vcpu_interrupt_vector_valid",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3983,
+              "rlimit": 19860,
+              "success": true
+            },
+            {
+              "function": "lib::verified_mqueue_attr",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 45,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_iov_count_valid",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3998,
+              "rlimit": 19707,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_debuglog_io_options_valid",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3877,
+              "rlimit": 19901,
+              "success": true
+            },
+            {
+              "function": "lib::shm_path_binary_search",
+              "mode:": "exec",
+              "time": 20,
+              "time-micros": 20930,
+              "rlimit": 271419,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_RENAME_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_hypervisor_exec_smoke",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6216,
+              "rlimit": 31544,
+              "success": true
+            },
+            {
+              "function": "lib::linux_ipc_size_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4224,
+              "rlimit": 19856,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_guest_trap_kind_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4467,
+              "rlimit": 19790,
+              "success": true
+            },
+            {
+              "function": "lib::verified_linux_mmap_fd_access",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 280,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_OPEN_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CONTAINER_NAMESPACE_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_GUEST_TRAP_MEM",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AF_INET",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 23,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_CREAT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_SYSTEM_EVENT_KIND_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_STAT_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::no_overlap_with_mappings",
+              "mode:": "exec",
+              "time": 17,
+              "time-micros": 17050,
+              "rlimit": 125524,
+              "success": true
+            },
+            {
+              "function": "lib::is_zircon_syscall_number",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4890,
+              "rlimit": 27971,
+              "success": true
+            },
+            {
+              "function": "lib::signal_mask_allowed",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4128,
+              "rlimit": 20417,
+              "success": true
+            },
+            {
+              "function": "lib::linux_socket_domain_type_supported",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5381,
+              "rlimit": 31081,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_VCPU_INTERRUPT_VECTOR_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_clock_id_supported",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4017,
+              "rlimit": 19629,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_NONBLOCK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_clock_create_options_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4162,
+              "rlimit": 19981,
+              "success": true
+            },
+            {
+              "function": "lib::linux_msg_size_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4025,
+              "rlimit": 19723,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_arg_from_u64",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 264,
+              "rlimit": 347,
+              "success": true
+            },
+            {
+              "function": "lib::linux_pipe_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4040,
+              "rlimit": 19824,
+              "success": true
+            },
+            {
+              "function": "lib::fixed_linux_mmap_request_stays_inside_linux_window",
+              "mode:": "proof",
+              "time": 3,
+              "time-micros": 3519,
+              "rlimit": 16020,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MEMFD_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_el0_user_range",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6086,
+              "rlimit": 63978,
+              "success": true
+            },
+            {
+              "function": "lib::verified_handle_fd_slot",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 44,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_handle_next_generation",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4151,
+              "rlimit": 20392,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_EXCL",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_handle_decode",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5171,
+              "rlimit": 22843,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_guest_trap_alignment_valid",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5992,
+              "rlimit": 32071,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_arg_from_reg",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5174,
+              "rlimit": 34844,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_hypervisor_options_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4386,
+              "rlimit": 19901,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_VCPU_IO",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_EVENT_SIGNAL_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_mqueue_name_shape",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4225,
+              "rlimit": 19831,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AF_LOCAL",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_RENAME_EXCHANGE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SEEK_MAX_WHENCE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_debuglog_create_options_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4069,
+              "rlimit": 19901,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_SYSCALL_ARG_COUNT_LINUX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_system_event_kind_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4155,
+              "rlimit": 19856,
+              "success": true
+            },
+            {
+              "function": "lib::VERUS_LINUX_MAX_SIGNAL",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_APPEND",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_CLOEXEC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_user_range_covers",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5042,
+              "rlimit": 25860,
+              "success": true
+            },
+            {
+              "function": "lib::checked_end_spec_rejects_overflow",
+              "mode:": "proof",
+              "time": 4,
+              "time-micros": 4972,
+              "rlimit": 26302,
+              "success": true
+            },
+            {
+              "function": "lib::range_start_after_end_means_no_overlap",
+              "mode:": "proof",
+              "time": 4,
+              "time-micros": 4251,
+              "rlimit": 17208,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_MAX_POLL_FDS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_errno_code_to_u64",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5062,
+              "rlimit": 28112,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_DIRECTORY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_time_debug_system_exception_exec_smoke",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 713,
+              "rlimit": 2946,
+              "success": true
+            },
+            {
+              "function": "lib::linux_record_lock_rules_smoke",
+              "mode:": "proof",
+              "time": 0,
+              "time-micros": 38,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_GUEST_PHYS_LIMIT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::syscall_bridge_route_smoke",
+              "mode:": "proof",
+              "time": 4,
+              "time-micros": 4032,
+              "rlimit": 18670,
+              "success": true
+            },
+            {
+              "function": "lib::verified_regular_file_mmap_span",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4953,
+              "rlimit": 34675,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_ACCESS_MODE_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AF_PACKET",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_RDONLY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AT_SYMLINK_NOFOLLOW",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_WRONLY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_UNLINK_ALLOWED_FLAGS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_sigset_size_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4116,
+              "rlimit": 19573,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_TRUNC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_stat_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4138,
+              "rlimit": 19824,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_timer_options_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4142,
+              "rlimit": 19909,
+              "success": true
+            },
+            {
+              "function": "lib::linux_clock_id_supported",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3832,
+              "rlimit": 18363,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_USER_SIGNAL_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::zircon_guest_trap_is_mem",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_CLOCK_UPDATE_OPTION_SYNTHETIC_VALUE_VALID",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_EXCEPTION_CHANNEL_DEBUGGER",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_VCPU_STATE_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LinuxRange::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 48,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fixed_linux_mmap_request_ok",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8075,
+              "rlimit": 91965,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_EVENT_SIGNALED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_CLOCK_UPDATE_OPTION_REFERENCE_VALUE_VALID",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_GUEST_TRAP_BELL",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_SAVED_REG_FRAME_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_STDIO_FD_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_range_available",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4167,
+              "rlimit": 22815,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CLONE_NEWUSER",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::eventpair_signal_mask",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 948,
+              "rlimit": 3797,
+              "success": true
+            },
+            {
+              "function": "lib::handle_invalid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4159,
+              "rlimit": 19794,
+              "success": true
+            },
+            {
+              "function": "lib::linux_socket_type_supported",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4146,
+              "rlimit": 20226,
+              "success": true
+            },
+            {
+              "function": "lib::linux_signal_action_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4083,
+              "rlimit": 19930,
+              "success": true
+            },
+            {
+              "function": "lib::linux_namespace_flags_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4339,
+              "rlimit": 19824,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_SOCK_CLOEXEC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_O_RDWR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SMROS_SYSCALL_ARG_COUNT_ZIRCON",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_AT_REMOVEDIR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_STATX_BASIC_STATS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ZX_DEBUGLOG_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "verus": {
+    "profile": "release",
+    "version": "0.2026.04.19.6f7d4de",
+    "platform": {
+      "os": "linux",
+      "arch": "x86_64"
+    },
+    "toolchain": "1.95.0-x86_64-unknown-linux-gnu",
+    "commit": "6f7d4dec0d6720202cc5221de95f1ef29cfd788d"
+  }
+}
+===== exit 0 =====

@@ -1,0 +1,2980 @@
+===== utc 2026-11-20T11:06:12Z =====
+===== toolchain =====
+VERUS_RELEASE_TAG=release/0.2026.04.19.6f7d4de
+VERUS_RELEASE_ID=0.2026.04.19.6f7d4de
+VERUS_RUST_TOOLCHAIN=1.95.0-x86_64-unknown-linux-gnu
+VSTD_CRATE_VERSION=0.0.0-2026-04-19-0121
+===== verus --version =====
+Verus
+  Version: 0.2026.04.19.6f7d4de
+  Profile: release
+  Platform: linux_x86_64
+  Toolchain: 1.95.0-x86_64-unknown-linux-gnu
+
+===== command =====
+/agent/repos/SMROS/.tools/verus/current/verus verification/user_level/src/lib.rs --crate-type=lib --triggers-mode=silent --no-report-long-running --time-expanded --output-json
+===== output =====
+{
+  "func-details": {
+    "lib::USER_THREAD_TIME_SLICE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%46::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_dma_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_new_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::kernel_success_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_syscall_should_advance_elr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_pci_id_match": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_MAGIC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%18::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%15::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_RUNNER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::Clone::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_trigger": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_pfn_to_paddr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::UserProcessSlotModel::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_INFO_GETPID_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_class_data_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_rx_frame_len_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%27::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_PHDR_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::El0KernelObservation::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%6::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_module_license_ok_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_range_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_fxfs_file_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_ext_equal_deep": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_EXIT_WRITE_RESULT_MISMATCH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_range_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::spec_vec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_MAX_NAME_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_saturating_sub": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_INIT_PARENT_PID": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_append_size_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_page_up": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_pci_id_match_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SYS_GETPID": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_COMPONENT_MANAGER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_F_VERSION_1": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_EXIT_OK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_driver_features_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_COMPONENT_START": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_identity_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_DEVICE_BLOCK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_index_decreases": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::find_empty_user_process_slot": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ascii_shell_input_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_mmio_slot_base": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_id_match": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_block_accepted_features_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_dns_label_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_write_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_EXIT_MMAP_RESULT_MISMATCH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_file_copy_len_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%4::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_decreases_to_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_shell_logic_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_mmio_slot_base_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_EXIT_GETPID_LOG_WRITE_MISMATCH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%27::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_id_match_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_id_table_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::View::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_page_down": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_MACHINE_AARCH64": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dns_label_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_vaddr_range_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_rx_packet_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_rights_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_NAMESPACE_RIGHTS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SYS_WRITE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_rx_frame_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_MMAP_BASE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_of_match_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%53::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_QUEUE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_machine_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%16::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_capacity_bytes_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::boxed::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_probe_status_ok": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_entry_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_STACK_PAGES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_BANNER_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DATA_VADDR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_FXFS_MAX_FILE_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::pages_to_kb_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%8::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%8::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_range_valid_direct": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%5::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%21::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_chrdev_minor_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_fxfs_dirent_capacity_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_INFO_MMAP_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_svc_protocol_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_driver_features": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%31::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PAGE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_linux_ddk_logic_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_vaddr_range_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_type_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::VecAdditionalSpecFns::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_none": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_HEAP_VADDR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%19::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_ETHERNET_FRAME_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_id_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_BLK_F_CONFIG_WCE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_BLOCK_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_file_copy_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%24::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%9::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_checked_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_IPC_VERSION": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%1::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_test_syscall_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%22::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_rx_output_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_machine_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_VERSION_LEGACY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_probe_status_ok_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_phdr_table_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_mmio_slot_base_direct": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%2::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_MMAP_LIMIT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_name_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_test_exit_code_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_ipc_header_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_level_mod_has_no_extra_pure_runtime_obligation": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_tx_frame_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::DeepView::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_NET_F_STATUS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_dns_host_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%7::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_BLK_F_FLUSH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_id_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_STACK_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::decimal_digit_value_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_of_match": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dns_label_byte_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%11::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::pfn_to_paddr_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_dirent_capacity_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_return_active_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_block_accepted_features": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_IOREMAP_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_virtio_device_present_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%20::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_VIRTIO_ID_ANY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_RIGHTS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_VENDOR_QEMU": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_tx_frame_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::bump_alloc_next_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ipv4_octet_step_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%25::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%36::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_el0_thread_state": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_ipc_message_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_dns_label_byte_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_RUNNER_LOAD_ELF": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_NET_F_MAC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_segment_mapping_range": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_DEVICE_NET": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_decimal_digit_value": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_BUS_PLATFORM": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_driver_logic_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SYS_MMAP": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_mul_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_magic_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_dma_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_TYPE_DYN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_MAX_PHDRS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_fxfs_append_size": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%12::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_svc_rights_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_MMIO_SLOT_COUNT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_FILESYSTEM_DESCRIBE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_new_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_net_accepted_features_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::align_up_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%49::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_virtio_completion_timed_out": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_fxfs_seek_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_capacity_bytes": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_sub": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_component_return_active": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::parse_digit_step_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_fxfs_node_capacity_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_HEADER_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_page_offset": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_some": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_virtio_device_present": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_fxfs_write_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_el0_spsr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_identity_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_header_bounds_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_FXFS_MAX_NODES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_stack_top_u64": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_FXFS_MAX_DIRENTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_NET_BUFFER_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%0::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_EXIT_GETPID_RESULT_MISMATCH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_fxfs_replay_count_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_ETHERNET_HEADER_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_chrdev_minor_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_module_license_ok": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_NET_HDR_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_start_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%17::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_segment_bounds_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_ioremap_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_PROCESS_CAPACITY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::main_rs_allocator_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_bus_kind_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%7::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_process_layout_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%1::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_irq_number_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_ipv4_octet_step": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_seek_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_has_resolved": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_queue_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_virtio_id_match": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_IPC_MESSAGE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_component_thread_launch_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_ETHERNET_MTU": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_node_capacity_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_version_is_modern": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::page_offset_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%0::is_some": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_ioremap_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::saturating_sub_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_TYPE_EXEC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_namespace_rights_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_MMIO_BASE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::mmap_result_ok_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_replay_count_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_pages_to_kb": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_version_is_modern_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::main_bump_alloc_next": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%14::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_irq_shared": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::page_down_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::record_el0_kernel_syscall_result_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_HEAP_PAGES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_el1h_spsr_masked": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_thread_launch_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_component_start_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%47::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_BUS_VIRTIO": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_CODE_VADDR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_EXIT_MMAP_LOG_WRITE_MISMATCH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_usage_percent": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_feature_present": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_FILESYSTEM": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_queue_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::namespace_rights_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_VIRTIO_VERSION_MODERN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%30::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_svc_ipc_message_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%3::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::impl&%0::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_PCI_ANY_ID": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_IRQ_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_svc_name_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_version_supported": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::usage_percent_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::page_up_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%52::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_DRIVER_MMIO_STRIDE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_type_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_deep_view_proof": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_protocol_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_DMA_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_kernel_success": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_entry_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_BUS_PCI": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_header_bounds_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%17::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dns_host_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::KERNEL_HEAP_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%13::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_id_table_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DEFAULT_STACK_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_svc_ipc_header_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_spec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_irq_number_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::linux_bus_kind_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_COMPLETE_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_MISC_DYNAMIC_MINOR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_segment_mapping_range_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_ext_equal": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_capacity_bytes_direct": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_index_decreases": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::find_user_process_by_pid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::uptime_parts_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_component_fxfs_exec_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SYS_EXIT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_file_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_test_exit_code_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_version_supported_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_block_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%26::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_uptime_parts": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_STACK_VADDR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::EL0_TEST_EXIT_COMPLETE_LOG_WRITE_MISMATCH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_parse_digit_step": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::new": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%8::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_class_data_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_CHRDEV_MINOR_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_magic_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_IPC_MAGIC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_phdr_table_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_rx_packet_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_sub_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_LINUX_IRQF_SHARED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_elf_segment_bounds_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::stack_top_u64_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_ascii_shell_input": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::strictly_cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_mmap_result_ok": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%23::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_virtio_net_accepted_features": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::spec_unwrap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::main_align_up": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%37::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_net_rx_output_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%48::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%41::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    }
+  },
+  "verification-results": {
+    "encountered-error": false,
+    "encountered-vir-error": false,
+    "success": true,
+    "verified": 202,
+    "errors": 0,
+    "is-verifying-entire-crate": true
+  },
+  "times-ms": {
+    "verus-build": {
+      "profile": "release",
+      "version": "0.2026.04.19.6f7d4de"
+    },
+    "num-threads": 1,
+    "total": 2177,
+    "estimated-cpu-time": 2177,
+    "rust": {
+      "total": 279,
+      "init-and-types": 114,
+      "trait-conflicts": 29,
+      "compile": 135
+    },
+    "verification": {
+      "total": 1859,
+      "vir": {
+        "total": 251,
+        "hir": 41,
+        "import": 119,
+        "rust-to-vir": 35
+      }
+    },
+    "total-verify": 1572,
+    "total-verify-module-times": [
+      {
+        "module": "",
+        "time": 1572
+      }
+    ],
+    "air": {
+      "total": 801,
+      "module-times": [
+        {
+          "module": "",
+          "time": 801
+        }
+      ]
+    },
+    "smt": {
+      "total": 585,
+      "smt-init": 16,
+      "rlimit-init": 12603,
+      "smt-init-module-times": [
+        {
+          "module": "",
+          "time": 16,
+          "time-micros": 16668,
+          "rlimit": 12603
+        }
+      ],
+      "smt-run": 569,
+      "rlimit-run": 3167242,
+      "smt-run-module-times": [
+        {
+          "module": "",
+          "time": 569,
+          "time-micros": 569429,
+          "rlimit": 3167242,
+          "function-breakdown": [
+            {
+              "function": "lib::USER_DRIVER_MMIO_STRIDE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_IPC_MESSAGE_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_NET_BUFFER_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_STACK_VADDR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_IRQ_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_test_syscall_smoke",
+              "mode:": "proof",
+              "time": 3,
+              "time-micros": 3418,
+              "rlimit": 17424,
+              "success": true
+            },
+            {
+              "function": "lib::USER_FXFS_MAX_NODES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_NET_F_STATUS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 35,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_VIRTIO_ID_ANY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_HEAP_VADDR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 41,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_CHRDEV_MINOR_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_MAX_PHDRS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_EXIT_MMAP_LOG_WRITE_MISMATCH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_PCI_ANY_ID",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::KERNEL_HEAP_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 88,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_block_range_valid_direct",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 90,
+              "rlimit": 238,
+              "success": true
+            },
+            {
+              "function": "lib::driver_block_capacity_bytes_direct",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 437,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_ascii_shell_input",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2672,
+              "rlimit": 11879,
+              "success": true
+            },
+            {
+              "function": "lib::user_checked_mul",
+              "mode:": "exec",
+              "time": 14,
+              "time-micros": 14694,
+              "rlimit": 57714,
+              "success": true
+            },
+            {
+              "function": "lib::user_pages_to_kb",
+              "mode:": "exec",
+              "time": 11,
+              "time-micros": 11688,
+              "rlimit": 52431,
+              "success": true
+            },
+            {
+              "function": "lib::user_usage_percent",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6556,
+              "rlimit": 33311,
+              "success": true
+            },
+            {
+              "function": "lib::user_dns_label_len_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2852,
+              "rlimit": 12302,
+              "success": true
+            },
+            {
+              "function": "lib::user_svc_name_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2505,
+              "rlimit": 12294,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_EXIT_GETPID_LOG_WRITE_MISMATCH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_header_bounds_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2252,
+              "rlimit": 12355,
+              "success": true
+            },
+            {
+              "function": "lib::main_rs_allocator_smoke",
+              "mode:": "proof",
+              "time": 4,
+              "time-micros": 4901,
+              "rlimit": 28929,
+              "success": true
+            },
+            {
+              "function": "lib::verified_virtio_completion_timed_out",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 54,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_PROCESS_CAPACITY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 96,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_INFO_MMAP_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_VERSION_MODERN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_F_VERSION_1",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_BUS_VIRTIO",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_ipv4_octet_step",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4792,
+              "rlimit": 25148,
+              "success": true
+            },
+            {
+              "function": "lib::user_mmap_result_ok",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4194,
+              "rlimit": 14799,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_machine_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2472,
+              "rlimit": 12146,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_IRQF_SHARED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_ioremap_len_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2542,
+              "rlimit": 12035,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_block_accepted_features",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2068,
+              "rlimit": 10247,
+              "success": true
+            },
+            {
+              "function": "lib::driver_block_capacity_bytes",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3128,
+              "rlimit": 12702,
+              "success": true
+            },
+            {
+              "function": "lib::USER_FXFS_MAX_DIRENTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_svc_ipc_header_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2586,
+              "rlimit": 12438,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_type_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2395,
+              "rlimit": 12722,
+              "success": true
+            },
+            {
+              "function": "lib::user_component_thread_launch_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2481,
+              "rlimit": 12096,
+              "success": true
+            },
+            {
+              "function": "lib::SYS_MMAP",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_dns_host_len_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2576,
+              "rlimit": 12332,
+              "success": true
+            },
+            {
+              "function": "lib::linux_bus_kind_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2432,
+              "rlimit": 13864,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_net_accepted_features",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5244,
+              "rlimit": 16882,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_MISC_DYNAMIC_MINOR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_RIGHTS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_IOREMAP_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_BLK_F_FLUSH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 46,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_COMPLETE_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_uptime_parts",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3913,
+              "rlimit": 18458,
+              "success": true
+            },
+            {
+              "function": "lib::user_fxfs_dirent_capacity_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2506,
+              "rlimit": 12408,
+              "success": true
+            },
+            {
+              "function": "lib::user_el0_thread_state",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 61,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_fxfs_append_size",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3970,
+              "rlimit": 24565,
+              "success": true
+            },
+            {
+              "function": "lib::USER_THREAD_TIME_SLICE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_BUS_PCI",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_kernel_success",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3214,
+              "rlimit": 20011,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_COMPONENT_MANAGER",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PAGE_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 43,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_block_len_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2569,
+              "rlimit": 11908,
+              "success": true
+            },
+            {
+              "function": "lib::driver_block_id_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2441,
+              "rlimit": 12172,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_FILESYSTEM_DESCRIBE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_EXIT_OK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_svc_rights_valid",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 47,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_fxfs_replay_count_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2713,
+              "rlimit": 12287,
+              "success": true
+            },
+            {
+              "function": "lib::user_syscall_should_advance_elr",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_fxfs_file_size_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2487,
+              "rlimit": 12255,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_identity_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2523,
+              "rlimit": 12446,
+              "success": true
+            },
+            {
+              "function": "lib::user_dns_label_byte_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2641,
+              "rlimit": 12428,
+              "success": true
+            },
+            {
+              "function": "lib::USER_NAMESPACE_RIGHTS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_TYPE_EXEC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_EXIT_WRITE_RESULT_MISMATCH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_STACK_PAGES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_BANNER_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_IPC_VERSION",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_of_match",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2174,
+              "rlimit": 11657,
+              "success": true
+            },
+            {
+              "function": "lib::DEFAULT_STACK_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_version_supported",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2375,
+              "rlimit": 13671,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_COMPONENT_START",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_net_rx_packet_len_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2477,
+              "rlimit": 14186,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_MAX_NAME_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::main_bump_alloc_next",
+              "mode:": "exec",
+              "time": 22,
+              "time-micros": 22400,
+              "rlimit": 220792,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_DMA_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_page_down",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6887,
+              "rlimit": 46400,
+              "success": true
+            },
+            {
+              "function": "lib::user_pfn_to_paddr",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9853,
+              "rlimit": 33890,
+              "success": true
+            },
+            {
+              "function": "lib::user_saturating_sub",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2674,
+              "rlimit": 16591,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_segment_mapping_range",
+              "mode:": "exec",
+              "time": 35,
+              "time-micros": 35036,
+              "rlimit": 385992,
+              "success": true
+            },
+            {
+              "function": "lib::El0KernelObservation::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 36,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_svc_protocol_allowed",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2671,
+              "rlimit": 14069,
+              "success": true
+            },
+            {
+              "function": "lib::user_fxfs_seek_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2454,
+              "rlimit": 13461,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_phdr_table_valid",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3972,
+              "rlimit": 18165,
+              "success": true
+            },
+            {
+              "function": "lib::SYS_EXIT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_TYPE_DYN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_FILESYSTEM",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_mmio_slot_base_direct",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3049,
+              "rlimit": 17792,
+              "success": true
+            },
+            {
+              "function": "lib::user_test_exit_code_model",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3255,
+              "rlimit": 16952,
+              "success": true
+            },
+            {
+              "function": "lib::driver_net_rx_output_len_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2244,
+              "rlimit": 13197,
+              "success": true
+            },
+            {
+              "function": "lib::USER_MMAP_LIMIT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_MMIO_SLOT_COUNT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 33,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_probe_status_ok",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2190,
+              "rlimit": 11740,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_ETHERNET_MTU",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_fxfs_node_capacity_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2777,
+              "rlimit": 12408,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_DEVICE_BLOCK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_IPC_MAGIC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_BLK_F_CONFIG_WCE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_id_table_end",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2940,
+              "rlimit": 11918,
+              "success": true
+            },
+            {
+              "function": "lib::user_process_layout_smoke",
+              "mode:": "proof",
+              "time": 3,
+              "time-micros": 3883,
+              "rlimit": 27878,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_ETHERNET_HEADER_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_MMAP_BASE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_dma_size_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2539,
+              "rlimit": 12041,
+              "success": true
+            },
+            {
+              "function": "lib::user_svc_ipc_message_size_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2324,
+              "rlimit": 12136,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_VENDOR_QEMU",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::main_align_up",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8293,
+              "rlimit": 52531,
+              "success": true
+            },
+            {
+              "function": "lib::USER_CODE_VADDR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_NET_F_MAC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_stack_top_u64",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3805,
+              "rlimit": 26002,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DATA_VADDR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_page_offset",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6267,
+              "rlimit": 46153,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_RUNNER",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_DEVICE_NET",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_MMIO_BASE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_EXIT_MMAP_RESULT_MISMATCH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_queue_size_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2557,
+              "rlimit": 14715,
+              "success": true
+            },
+            {
+              "function": "lib::linux_virtio_id_match",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2273,
+              "rlimit": 13498,
+              "success": true
+            },
+            {
+              "function": "lib::linux_virtio_device_present",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2305,
+              "rlimit": 11705,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_NET_HDR_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 35,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_checked_end",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4705,
+              "rlimit": 32322,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_VERSION_LEGACY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_block_range_valid",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3215,
+              "rlimit": 14614,
+              "success": true
+            },
+            {
+              "function": "lib::linux_chrdev_minor_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2676,
+              "rlimit": 13765,
+              "success": true
+            },
+            {
+              "function": "lib::linux_irq_shared",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 52,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_net_tx_frame_len_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4564,
+              "rlimit": 36853,
+              "success": true
+            },
+            {
+              "function": "lib::user_el0_spsr",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 35,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_vaddr_range_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2854,
+              "rlimit": 16698,
+              "success": true
+            },
+            {
+              "function": "lib::record_el0_kernel_syscall_result_model",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3879,
+              "rlimit": 17101,
+              "success": true
+            },
+            {
+              "function": "lib::linux_module_license_ok",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2730,
+              "rlimit": 11712,
+              "success": true
+            },
+            {
+              "function": "lib::find_user_process_by_pid",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8918,
+              "rlimit": 63064,
+              "success": true
+            },
+            {
+              "function": "lib::user_component_fxfs_exec_smoke",
+              "mode:": "exec",
+              "time": 97,
+              "time-micros": 97906,
+              "rlimit": 417451,
+              "success": true
+            },
+            {
+              "function": "lib::linux_file_copy_len",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2541,
+              "rlimit": 13639,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_magic_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2478,
+              "rlimit": 12844,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_ETHERNET_FRAME_MAX",
+              "mode:": "spec",
+              "time": 1,
+              "time-micros": 1231,
+              "rlimit": 7612,
+              "success": true
+            },
+            {
+              "function": "lib::user_namespace_rights_valid",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 47,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_STACK_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SYS_GETPID",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_page_up",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10101,
+              "rlimit": 98901,
+              "success": true
+            },
+            {
+              "function": "lib::SYS_WRITE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_driver_features",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2229,
+              "rlimit": 12091,
+              "success": true
+            },
+            {
+              "function": "lib::user_el1h_spsr_masked",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_linux_ddk_logic_smoke",
+              "mode:": "exec",
+              "time": 17,
+              "time-micros": 17696,
+              "rlimit": 59265,
+              "success": true
+            },
+            {
+              "function": "lib::linux_id_match",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2561,
+              "rlimit": 13540,
+              "success": true
+            },
+            {
+              "function": "lib::user_shell_logic_smoke",
+              "mode:": "proof",
+              "time": 7,
+              "time-micros": 7792,
+              "rlimit": 60756,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_HEADER_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 47,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_BLOCK_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_irq_number_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2572,
+              "rlimit": 12071,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_entry_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2440,
+              "rlimit": 12084,
+              "success": true
+            },
+            {
+              "function": "lib::USER_FXFS_MAX_FILE_BYTES",
+              "mode:": "spec",
+              "time": 1,
+              "time-micros": 1656,
+              "rlimit": 5757,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_MAGIC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_parse_digit_step",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6301,
+              "rlimit": 54607,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_INFO_GETPID_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_EXIT_COMPLETE_LOG_WRITE_MISMATCH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::linux_pci_id_match",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2719,
+              "rlimit": 14581,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_PHDR_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 32,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_feature_present",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 44,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_INIT_PARENT_PID",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 36,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_driver_logic_smoke",
+              "mode:": "exec",
+              "time": 73,
+              "time-micros": 73906,
+              "rlimit": 295052,
+              "success": true
+            },
+            {
+              "function": "lib::user_component_return_active",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2172,
+              "rlimit": 12085,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_MACHINE_AARCH64",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_LINUX_BUS_PLATFORM",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_level_mod_has_no_extra_pure_runtime_obligation",
+              "mode:": "proof",
+              "time": 0,
+              "time-micros": 584,
+              "rlimit": 2301,
+              "success": true
+            },
+            {
+              "function": "lib::USER_DRIVER_VIRTIO_QUEUE_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 35,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::EL0_TEST_EXIT_GETPID_RESULT_MISMATCH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_component_start_allowed",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2559,
+              "rlimit": 13189,
+              "success": true
+            },
+            {
+              "function": "lib::user_decimal_digit_value",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3323,
+              "rlimit": 17293,
+              "success": true
+            },
+            {
+              "function": "lib::driver_net_rx_frame_len",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3612,
+              "rlimit": 22509,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_segment_bounds_valid",
+              "mode:": "exec",
+              "time": 4,
+              "time-micros": 4022,
+              "rlimit": 31511,
+              "success": true
+            },
+            {
+              "function": "lib::user_elf_class_data_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2316,
+              "rlimit": 12619,
+              "success": true
+            },
+            {
+              "function": "lib::UserProcessSlotModel::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 43,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_HEAP_PAGES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_mmio_slot_base",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3499,
+              "rlimit": 18124,
+              "success": true
+            },
+            {
+              "function": "lib::driver_virtio_version_is_modern",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2208,
+              "rlimit": 11939,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_RUNNER_LOAD_ELF",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::user_fxfs_write_end",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3881,
+              "rlimit": 26818,
+              "success": true
+            },
+            {
+              "function": "lib::find_empty_user_process_slot",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8691,
+              "rlimit": 57522,
+              "success": true
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "verus": {
+    "profile": "release",
+    "version": "0.2026.04.19.6f7d4de",
+    "platform": {
+      "os": "linux",
+      "arch": "x86_64"
+    },
+    "toolchain": "1.95.0-x86_64-unknown-linux-gnu",
+    "commit": "6f7d4dec0d6720202cc5221de95f1ef29cfd788d"
+  }
+}
+===== exit 0 =====

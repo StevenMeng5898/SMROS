@@ -8,7 +8,7 @@ unsupported case, and that every inventory line has exactly one label.
 
 ## Labels
 
-- 已证明: the file's pure logic is in a Verus harness that completed with zero errors.
+- 已证明: the file's pure logic is in a Verus harness that completed with zero errors. The raw run is `verification/logs/make-verus.log` (toolchain, command, and full JSON for each harness). `make verus-coverage` checks the inventory only; it does not check that a proof succeeded.
 - 待证明: in scope, but the file itself is not fully verified. A shared model may already cover part of it.
 - 公理或可信计算基: assembly, exception entry, or a device register path that Verus does not compile.
 - 规范假设: a stated assumption of the specification rather than an implementation proof.
@@ -109,7 +109,7 @@ unsupported case, and that every inventory line has exactly one label.
     Global charge table and interrupt masking. Pure admission is proven in kernel_budget_logic_shared.rs; this file is not compiled by Verus.
 - `src/kernel_lowlevel/kernel_budget_logic_shared.rs`
   - 已证明
-    Heap and per-process admission, mmap metadata size, and uncharge. Verified in the kernel_lowlevel harness.
+    The file is included beside `verus!` so the runtime wrappers stay ordinary Rust. The four macro bodies expand inside the kernel_lowlevel harness. admit_heap, admit_process, and uncharge match their specs. mmap metadata is proved only when `per_page > 0` and the product does not overflow; that restriction is the function precondition. Raw log: `verification/logs/verus-kernel-lowlevel.log`.
 - `src/kernel_lowlevel/lowlevel_logic.rs`
   - 待证明
 - `src/kernel_lowlevel/lowlevel_logic_shared.rs`
@@ -226,7 +226,8 @@ unsupported case, and that every inventory line has exactly one label.
 - `src/syscall/linux_record_lock.rs`
   - 待证明
 - `src/syscall/linux_record_lock_logic_shared.rs`
-  - 已证明
+  - 待证明
+    Included beside the syscall harness, not inside `verus!`. Only the overlap and conflict macros are smoked. `LinuxRecordLockTable`, waiters, and normalize are not in the Verus AST.
 - `src/syscall/linux_riscv_syscall_context.rs`
   - 待证明
     Unsafe trap-frame read/write stays trusted. Alignment, return PC, and SSTATUS.SPP are proven in the shared predicate file.

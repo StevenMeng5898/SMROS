@@ -3335,7 +3335,13 @@ fn verified_credit_after_elapsed(credit: i32, elapsed: u64) -> (out: i32)
     smros_sched_credit_after_elapsed_body!(credit, elapsed)
 }
 
-proof fn kernel_object_mod_has_no_pure_runtime_obligation() {
+pub const KERNEL_OBJECT_RS_FILES: usize = 32;
+pub const KERNEL_OBJECT_MODULES_DECLARED_IN_MOD_RS: usize = 22;
+
+proof fn kernel_object_module_inventory() {
+    assert(KERNEL_OBJECT_RS_FILES == 32);
+    assert(KERNEL_OBJECT_MODULES_DECLARED_IN_MOD_RS == 22);
+    assert(KERNEL_OBJECT_RS_FILES == KERNEL_OBJECT_MODULES_DECLARED_IN_MOD_RS + 10);
 }
 
 } // verus!

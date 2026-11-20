@@ -12,12 +12,17 @@ Labels match the Verus audit:
 - 超出范围: not part of the kernel TCB for this C audit.
 - 未覆盖: present and not otherwise classified.
 
-Standard conformance test programs are out of scope for this inventory and for
-the rest of SMROS. That includes posixtest, the Open POSIX Test Suite, and
-similar suites in any language, including `scripts/posix/runtime/` and
-`tests/guest/`. Their sources are not edited, reformatted, patched, or
-generated over, and they are not formally proved. Running them, including
-`posixtest all` and `hermes test-all`, remains ordinary kernel verification.
+The upstream Open POSIX Test Suite is pinned in
+`third_party/posixtest/source.lock.json` and checked out under `target/posix`.
+That checkout and the existing `third_party/posixtest/patches/` series are not
+modified and are not listed here or in `docs/VERUS_COVERAGE.md`.
+`scripts/posix/runtime/` is the SMROS compat layer, same class as the DDK
+compat layer, and is 待证明. `tests/guest/` is SMROS's own guest probes, not
+the upstream suite and not kernel TCB; those files stay 待证明 rather than
+超出范围. `benchmarks/` is a performance suite, not a conformance suite, and
+stays 未覆盖 until a C proof is assigned. Demos stay 超出范围:
+`include/smros/examples/hello_linux.c` and
+`src/user_level/apps/tensor_neon_mul.c`.
 
 Priority for the in-scope DDK layer is CBMC for bounds, overflow, and null
 dereference. ACSL with Frama-C Wp is appropriate once a function contract can
@@ -27,71 +32,71 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
 ## Classified C and C++ Files
 
 - `benchmarks/dhrystone_smros/dhry.h`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/dhrystone_smros/dhry_1.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/dhrystone_smros/dhry_2.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/dhrystone_smros/main.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/dhrystone_smros/smros_dhry.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/dhrystone_smros/smros_dhry.h`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/channels.cc`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/freestanding.cc`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/handles.cc`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/main.cc`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/perftest.h`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/smros_zircon.h`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/time.cc`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/fuchsia_microbenchmarks_smros/vmo.cc`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/arith.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/fstime.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/hanoi.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/main.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/pipe.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/smros_unix.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/smros_unix.h`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `benchmarks/unixbench_smros/syscall.c`
-  - 超出范围
-    Host or guest benchmark, not kernel TCB.
+  - 未覆盖
+    Performance test, not a conformance suite. Not yet assigned a C proof.
 - `include/asm/io.h`
   - 待证明
     MMIO accessors used by the compat layer. Priority CBMC for width and null.
@@ -165,14 +170,14 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
   - 超出范围
     Sample driver, not kernel TCB.
 - `scripts/posix/runtime/include/sched.h`
-  - 超出范围
-    Standard conformance test program (POSIX test runtime). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS POSIX compat header. Not yet discharged. The upstream suite under `target/posix` is not this file.
 - `scripts/posix/runtime/include/unistd.h`
-  - 超出范围
-    Standard conformance test program (POSIX test runtime). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS POSIX compat header. Not yet discharged. The upstream suite under `target/posix` is not this file.
 - `scripts/posix/runtime/smros_posix_compat.c`
-  - 超出范围
-    Standard conformance test program (POSIX test runtime). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS POSIX compat runtime. Not yet discharged. The upstream suite under `target/posix` is not this file.
 - `src/user_level/apps/pthread_mutex_futex.c`
   - 待证明
     EL0 futex mutex demo. Secondary CBMC target. Kernel futex proofs stay on the Verus track.
@@ -189,29 +194,29 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
   - 待证明
     PCI config and BAR helpers in the DDK compat layer. Priority CBMC.
 - `tests/guest/f1_seccomp.c`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/f2_landlock.c`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/f3_pkey.c`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/f4_iouring.c`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/f5_ptrace.c`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/fail_closed.h`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/g1_stopcont.c`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/g1b_stop.c`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/poc_common.h`
-  - 超出范围
-    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
