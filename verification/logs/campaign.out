@@ -1,0 +1,87 @@
+SMROS VM launcher already reachable on 127.0.0.1:7070 (fingerprint matches)
+qemu pid 607974
+PROMPT
+POSIX_COMPLETED
+POSIX_STATUS
+HERMES_DONE
+
+/dev/hello: Hello from SMROS Linux DDK
+Host test ut iteration=99: PASS Running_unittests_src/lib.rs_(agent/repos/SMROS/target/host-tests/x86_64-unknown-linux-gnu/debug/deps/smros_host_tests-ae31431a82469bcb)
+Host test it iteration=99: PASS Running_tests/integration_contracts.rs_(agent/repos/SMROS/target/host-tests/x86_64-unknown-linux-gnu/debug/deps/integration_contracts-d81c7d985e7c31c6)
+Hermes test-all iteration 100/100 op=qml render heap_used=3280000 heap_free=265155456 heap_largest=211844384
+[38;2;244;251;248m[48;2;7;16;19m  SMROS Qt/QML Vehicle Cluster  |  LVGL renderer                                    [0m
+[38;2;255;176;0m[48;2;7;16;19m  <         Gear D    Mode Comfort        >>                                        [0m
+[38;2;54;77;82m[48;2;7;16;19m  +----------------------------+    +------------------+    +-----------------------[0m
+[38;2;54;77;82m[48;2;7;16;19m  |                            |    |                  |    |                       [0m
+[38;2;244;251;248m[48;2;7;16;19m  | Speed 88 km/h              |    |      LANE        |    | RPM 3200        |     [0m
+[38;2;0;166;166m[48;2;7;16;19m  | [#######-------------]       |    |     /----\       |    | [########-----------[0m
+[38;2;54;77;82m[48;2;7;16;19m  |      LVGL arc meter        |    |    | SMROS |      |    |      LVGL arc meter  [0m
+[38;2;137;158;163m[48;2;7;16;19m  |        FxFS PPM            |    |     \____/       |    |        Qt window QML  [0m
+[38;2;54;77;82m[48;2;7;16;19m  +----------------------------+    +------------------+    +-----------------------[0m
+[38;2;72;190;123m[48;2;7;16;19m  Range 326 km  [#############-----]     Battery 78% [##############----]           [0m
+[38;2;244;251;248m[48;2;7;16;19m  Warning ADAS ready  Source /data/qml-cluster/InstrumentCluster.qml                [0m
+[0m
+image=/data/qml-cluster/cluster.ppm size=480x270 bytes=388815 widgets=12 renderer=smros-lvgl-native
+Host test ut iteration=100: PASS Running_unittests_src/lib.rs_(agent/repos/SMROS/target/host-tests/x86_64-unknown-linux-gnu/debug/deps/smros_host_tests-ae31431a82469bcb)
+Host test it iteration=100: PASS Running_tests/integration_contracts.rs_(agent/repos/SMROS/target/host-tests/x86_64-unknown-linux-gnu/debug/deps/integration_contracts-d81c7d985e7c31c6)
+Hermes test-all phase el0
+Host stage PASS LOG_/agent/repos/SMROS/target/security/sec0-all.log
+Hermes phase el0 phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase skt
+Host stage PASS missing_required_serial_pattern:_Hermes_denied_forbidden_command:_kill
+Hermes phase skt phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase st
+Host stage PASS missing_required_serial_pattern:_Hermes_denied_forbidden_command:_kill
+Hermes phase st phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase posix-tool-test
+Host stage PASS test_fork_11_patch_ports_ltp_record_lock_assertion_without_weakening_(test_source.RepositoryPatchTests.test_fork_11_patch_ports_ltp_record_lock_assertion_withou
+Hermes phase posix-tool-test phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase posix-fetch
+Host stage PASS no-output
+Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase posix-audit
+Host stage PASS discovered-c=1979_shell=176_stub=147_excluded=94_runtime=53_test=169_generator=0_helper=7
+Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase posix-build
+Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119862709
+Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase posix-stage
+Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119862674
+Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase posix-baseline
+Host stage PASS reference_selected=1600_reference_passed=1397_reference_nonpass=203
+Hermes phase posix-baseline phase=done pass=1397 fail=203 unavailable=0
+Hermes test-all phase launcher-test
+Host stage PASS OK
+Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase verus
+Host stage PASS verification_results::_176_verified,_0_errors
+Hermes phase verus phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase fuzzsc seed=1 iterations=1 time=1
+Hermes fuzzsc completed=1/1
+Hermes phase fuzzsc phase=done pass=1 fail=0 unavailable=0
+Hermes test-all phase shm-mode fuzzsc seed=1 iterations=1 time=1
+Hermes phase shm-mode pass mode=040755
+Report: /data/hermes/tests/latest.log
+Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
+Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0
+Hermes phase guest phase=done pass=7 fail=0 unavailable=0
+Hermes phase el0 phase=done pass=1 fail=0 unavailable=0
+Hermes phase skt phase=done pass=1 fail=0 unavailable=0
+Hermes phase st phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-tool-test phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-baseline phase=done pass=1397 fail=203 unavailable=0
+Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
+Hermes phase verus phase=done pass=1 fail=0 unavailable=0
+Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
+Hermes phase fuzzsc phase=done pass=1 fail=0 unavailable=0
+Hermes phase shm-mode pass mode=040755
+Replay: hermes test-all seed=1 iterations=100
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1397/203/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 shm-mode=pass overall=PASS
+Hermes test-all result: PASS
+smros:/> EXIT:0
+WRAPPER:0
