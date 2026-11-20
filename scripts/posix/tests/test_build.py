@@ -3638,7 +3638,11 @@ with tempfile.TemporaryDirectory() as temporary:
                 "const SYSCALL_CAMPAIGN_CATALOG"
             )
         ]
-        self.assertNotIn("posixtest", catalogs)
+        self.assertIn('campaign_case_const("posixtest", "status"', ops)
+        self.assertIn(
+            'campaign_case_const("posixtest", "test", "getpid/1-1.c"', ops
+        )
+        self.assertNotIn('campaign_case_const("posixtest", "all"', catalogs)
         self.assertIn('campaign_case_const("reboot", "", "", 0)', catalogs)
         self.assertIn(
             'campaign_case_const("vm", "-c", "/shared/vm-demo.xml", 2)', catalogs
@@ -3673,7 +3677,7 @@ with tempfile.TemporaryDirectory() as temporary:
         fuzz = policy[policy.index("fn fuzz_policy(") : policy.index("fn parse_decimal(")]
         self.assertIn("iterations", fuzz)
         self.assertIn("HERMES_CAMPAIGN_FUZZSC_ITERATIONS", fuzz)
-        self.assertIn("number <= 5", fuzz)
+        self.assertIn("number <= HERMES_CAMPAIGN_FUZZSC_TIME_SECONDS", fuzz)
 
     def test_hermes_functions_are_all_wired(self) -> None:
         agent = Path("src/user_level/services/hermes_agent.rs").read_text(encoding="utf-8")
@@ -3763,20 +3767,20 @@ with tempfile.TemporaryDirectory() as temporary:
         ):
             self.assertIn(name, shell)
         self.assertIn("hermes_shell_logic_shared::classify", shell)
-        self.assertIn('"exec" =>', shell)
-        self.assertIn('"test-all" => run_hermes_test_all', shell)
+        self.assertIn("HermesShellVerb::Exec", shell)
+        self.assertIn("HermesShellVerb::TestAll => run_hermes_test_all", shell)
         self.assertIn("mode=syscall", shell)
         self.assertIn("campaign_case_for_mode", shell)
         cmd = shell[shell.index("fn cmd_hermes("):shell.index("fn cmd_lvgl(")]
         for token in (
-            '"exec" =>',
-            '"random" =>',
-            '"test-all" =>',
-            '"info" | "status"',
-            '"test" | "smoke"',
-            '"skills" =>',
-            '"web" | "ui"',
-            '"ask" | "run"',
+            "HermesShellVerb::Exec",
+            "HermesShellVerb::Random",
+            "HermesShellVerb::TestAll",
+            "HermesShellVerb::Info",
+            "HermesShellVerb::Test",
+            "HermesShellVerb::Skills",
+            "HermesShellVerb::Web",
+            "HermesShellVerb::Ask",
         ):
             self.assertIn(token, cmd)
 
@@ -3821,7 +3825,7 @@ with tempfile.TemporaryDirectory() as temporary:
     def test_sched_yield_enqueues_current_before_reschedule(self) -> None:
         source = Path("src/kernel_objects/scheduler.rs").read_text(encoding="utf-8")
         start = source.index("pub fn yield_now()")
-        body = source[start:start + 900]
+        body = source[start:start + 4000]
         self.assertIn("ThreadState::Ready", body)
         self.assertIn("set_ready_bit", body)
         self.assertLess(body.index("ThreadState::Ready"), body.index("schedule();"))

@@ -10,7 +10,7 @@ HOST="${SMROS_VM_LAUNCHER_HOST:-0.0.0.0}"
 PROBE_HOST="${SMROS_VM_LAUNCHER_PROBE_HOST:-127.0.0.1}"
 LOG_FILE="${SMROS_VM_LAUNCHER_LOG:-$ROOT_DIR/smros-vm-launcher.log}"
 PID_FILE="${SMROS_VM_LAUNCHER_PID:-$ROOT_DIR/smros-vm-launcher.pid}"
-REQUIRED_VERSION=12
+REQUIRED_VERSION=13
 
 cd "$ROOT_DIR"
 COMMIT="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"

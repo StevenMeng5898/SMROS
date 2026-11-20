@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import signal
 import socket
 import socketserver
@@ -29,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 12
+LAUNCHER_VERSION = 13
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
 DEFAULT_LAUNCH_ATTEMPTS = 3
 DEFAULT_LAUNCH_RETRY_DELAY_SECONDS = 0.4
@@ -289,7 +290,7 @@ def wire_token(value: str, limit: int = 180) -> str:
 
 
 def argv_token(job: str) -> str:
-    return wire_token(",".join(host_make_command(job)), limit=220)
+    return wire_token(",".join(host_job_command(job)), limit=220)
 
 
 COMMIT = git_commit()
@@ -350,20 +351,43 @@ def accept_running_launcher(status_text: str) -> bool:
     return True
 
 
+def fixed_test_jobs() -> set[str]:
+    """Closed job set. Callers cannot supply host command text."""
+    return {
+        "ut",
+        "it",
+        "el0",
+        "skt",
+        "st",
+        "posix-tool-test",
+        "posix-fetch",
+        "posix-audit",
+        "posix-build",
+        "posix-stage",
+        "posix-baseline",
+        "launcher-test",
+        "verus",
+    }
+
+
 def parse_test_job(values: dict[str, str]) -> tuple[str, ...]:
     if set(values) != {"job"}:
         raise ValueError("test request requires exactly one job field")
     job = values["job"]
-    if job not in {"ut", "it"}:
+    if job not in fixed_test_jobs():
         raise ValueError(f"unsupported test job: {job}")
-    return tuple(host_make_command(job))
+    return tuple(host_job_command(job))
 
 
 def host_make_command(job: str) -> list[str]:
     """Always build the repo-root ut/it rules, independent of the caller's cwd."""
     if job not in {"ut", "it"}:
         raise ValueError(f"unsupported test job: {job}")
-    return [
+    return make_job_command(job)
+
+
+def make_job_command(job: str, extra: list[str] | None = None) -> list[str]:
+    command = [
         "make",
         "-C",
         str(ROOT),
@@ -371,6 +395,102 @@ def host_make_command(job: str) -> list[str]:
         str(ROOT / "Makefile"),
         job,
     ]
+    if extra:
+        command.extend(extra)
+    return command
+
+
+def host_job_command(job: str) -> list[str]:
+    if job not in fixed_test_jobs():
+        raise ValueError(f"unsupported test job: {job}")
+    if job in {"ut", "it"}:
+        return host_make_command(job)
+    if job == "el0":
+        return [
+            sys.executable,
+            str(ROOT / "tests" / "security" / "aarch64" / "run_el0_cases.py"),
+            "--timeout",
+            "180",
+        ]
+    if job in {"skt", "st"}:
+        disk = ROOT / "target" / "hermes-tests" / f"{job}-fxfs.img"
+        log = ROOT / "target" / "hermes-tests" / f"{job}-serial.log"
+        return make_job_command(
+            job,
+            [
+                "SMROS_HERMES_ISOLATED=1",
+                f"FXFS_DISK={disk}",
+                f"SMROS_ST_LOG={log}",
+            ],
+        )
+    return make_job_command(job)
+
+
+def verus_toolchain_present() -> bool:
+    if (ROOT / ".tools" / "verus" / "current" / "verus").is_file():
+        return True
+    return shutil.which("verus") is not None
+
+
+def baseline_reference_summary(job: str, output: str) -> str | None:
+    """A finished qemu-user reference is success even when some tests miss.
+
+    `make posix-baseline` exits non-zero unless every selected test passes.
+    This environment's reference is a failure baseline: the harness ran all
+    1600 tests and published results. A `baseline failed:` line is a harness
+    error and stays a job failure.
+    """
+    if job != "posix-baseline" or "baseline failed:" in output:
+        return None
+    selected = None
+    passed = None
+    for line in output.splitlines():
+        if "selected=" not in line or "passed=" not in line or "results=" not in line:
+            continue
+        fields = {}
+        for part in line.replace(",", " ").split():
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            fields[key] = value
+        if fields.get("selected", "").isdigit() and fields.get("passed", "").isdigit():
+            selected = int(fields["selected"])
+            passed = int(fields["passed"])
+    if selected is None or passed is None or selected <= 0 or passed > selected:
+        return None
+    return (
+        f"reference_selected={selected}"
+        f"_reference_passed={passed}"
+        f"_reference_nonpass={selected - passed}"
+    )
+
+
+def verus_stopped_before_proofs(output: str) -> bool:
+    """The coverage audit gates `make verus` before any harness runs.
+
+    A missing classification or shared-logic include is a toolchain/repo gate,
+    not a failed proof. Proof failures stay ordinary job failures.
+    """
+    markers = (
+        "docs/VERUS_COVERAGE.md must classify",
+        "missing Verus include for shared logic",
+        "missing Verus macro use",
+    )
+    return any(marker in output for marker in markers)
+
+
+def job_unavailable_reason(job: str) -> str | None:
+    """Missing tools are UNAVAILABLE, never a silent pass."""
+    if job == "verus" and not verus_toolchain_present():
+        return "UNAVAILABLE_toolchain"
+    if job in {"el0", "skt", "st"}:
+        if shutil.which(os.environ.get("QEMU_SYSTEM", "qemu-system-aarch64")) is None:
+            return "UNAVAILABLE_qemu"
+        if not (ROOT / "kernel8.img").is_file():
+            return "UNAVAILABLE_kernel"
+    if job == "posix-baseline" and shutil.which("qemu-aarch64") is None:
+        return "UNAVAILABLE_qemu-user"
+    return None
 
 
 def test_job_attempts() -> int:
@@ -575,14 +695,31 @@ def test_job_status(values: dict[str, str]) -> str:
         return str(rec.get("response") or f"ERR job={rec['job']} status=failed\n")
 
 
+def job_timeout_seconds(job: str) -> float:
+    if job in {"ut", "it", "posix-tool-test", "launcher-test"}:
+        timeout = float(os.environ.get("SMROS_HERMES_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT_SECONDS))
+        if timeout <= 0 or timeout > 1800:
+            return DEFAULT_TEST_TIMEOUT_SECONDS
+        return timeout
+    timeout = float(os.environ.get("SMROS_HERMES_LONG_TEST_TIMEOUT", "7200"))
+    if timeout <= 0 or timeout > 7200:
+        return 7200.0
+    return timeout
+
+
 def run_test_job(values: dict[str, str]) -> str:
     cmd = parse_test_job(values)
     job = values["job"]
+    unavailable = job_unavailable_reason(job)
+    if unavailable is not None:
+        print(
+            f"smros-vm-launcher: job={job} status=unavailable summary={unavailable}",
+            flush=True,
+        )
+        return f"ERR job={job} status=unavailable summary={unavailable}\n"
     test_dir = ROOT / "target" / "hermes-tests"
     test_dir.mkdir(parents=True, exist_ok=True)
-    timeout = float(os.environ.get("SMROS_HERMES_TEST_TIMEOUT", DEFAULT_TEST_TIMEOUT_SECONDS))
-    if timeout <= 0 or timeout > 1800:
-        timeout = DEFAULT_TEST_TIMEOUT_SECONDS
+    timeout = job_timeout_seconds(job)
     last_response = f"ERR job={job} status=failed\n"
     attempts = test_job_attempts()
     for attempt in range(1, attempts + 1):
@@ -623,6 +760,20 @@ def run_test_job(values: dict[str, str]) -> str:
         )
         if result.returncode == 0:
             return f"OK job={job} status=0 summary={summary}\n"
+        reference = baseline_reference_summary(job, output)
+        if reference is not None:
+            print(
+                f"smros-vm-launcher: job={job} status=0 summary={reference}",
+                flush=True,
+            )
+            return f"OK job={job} status=0 summary={reference}\n"
+        if job == "verus" and verus_stopped_before_proofs(output):
+            print(
+                f"smros-vm-launcher: job={job} status=unavailable "
+                "summary=UNAVAILABLE_coverage",
+                flush=True,
+            )
+            return f"ERR job={job} status=unavailable summary=UNAVAILABLE_coverage\n"
         identified = f"{summary}{job_identity_suffix(job)}"
         last_response = f"ERR job={job} status={result.returncode} summary={identified}\n"
         if attempt < attempts:

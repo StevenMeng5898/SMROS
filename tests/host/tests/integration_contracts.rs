@@ -6909,11 +6909,11 @@ fn hermes_campaign_vm_create_skips_boot_wait_when_host_launch_fails() {
         wait_pos < kill_pos && skip_pos < kill_pos,
         "both boot-wait and skip paths must still recycle with vm -k"
     );
-    assert!(launcher.contains("LAUNCHER_VERSION = 12"));
+    assert!(launcher.contains("LAUNCHER_VERSION = 13"));
     assert!(launcher.contains("launch_retry=1"));
     assert!(launcher.contains("retrying_launch("));
     assert!(launcher.contains("def code_fingerprint("));
-    assert!(starter.contains("REQUIRED_VERSION=12"));
+    assert!(starter.contains("REQUIRED_VERSION=13"));
     assert!(starter.contains("accept_running_launcher"));
     assert!(starter.contains("-u MAKEFLAGS"));
     assert!(starter.contains("LC_ALL=C"));
@@ -7034,11 +7034,13 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     assert!(client.contains("enum HermesHostTestJob"));
     assert!(client.contains("Self::Ut => \"ut\""));
     assert!(client.contains("Self::It => \"it\""));
-    assert!(!client.contains("Self::St"));
-    assert!(!client.contains("Self::Skt"));
+    assert!(client.contains("Self::St => \"st\""));
+    assert!(client.contains("Self::Skt => \"skt\""));
     assert!(client.contains("SMROS_TEST_RUN 1\\njob="));
     assert!(client.contains("SMROS_TEST_STATUS 1\\njob="));
-    assert!(launcher.contains("if job not in {\"ut\", \"it\"}"));
+    assert!(launcher.contains("def fixed_test_jobs("));
+    assert!(launcher.contains("\"skt\""));
+    assert!(launcher.contains("\"verus\""));
     assert!(!launcher.contains("shell=True"));
     assert!(launcher.contains("async_test_jobs=1"));
     assert!(launcher.contains("def start_test_job"));
@@ -7073,7 +7075,9 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     let once_body = braced_body(&client[run_once..]);
     assert!(once_body.contains("accept_hermes_test("));
     assert!(once_body.contains("poll_hermes_test("));
-    assert!(once_body.contains("HERMES_TEST_WAIT_NANOS"));
+    assert!(once_body.contains("wait_nanos()"));
+    assert!(client.contains("HERMES_TEST_WAIT_NANOS"));
+    assert!(client.contains("HERMES_TEST_LONG_WAIT_NANOS"));
     let accept = client
         .find("fn accept_hermes_test(")
         .expect("accept_hermes_test");
@@ -7092,7 +7096,7 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     let launch = client.find("pub fn launch(").expect("launch");
     let launch_body = braced_body(&client[launch..]);
     assert!(launch_body.contains("connect_launcher("));
-    assert!(starter.contains("REQUIRED_VERSION=12"));
+    assert!(starter.contains("REQUIRED_VERSION=13"));
     assert!(starter.contains("SMROS_VM_LAUNCHER_RESTART"));
     assert!(makefile.contains("vm-launcher-restart:"));
     assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
@@ -12406,11 +12410,13 @@ fn cli_command_surface_and_host_job_protocol_are_closed() {
     assert!(policy.contains("\"ut\" => Some(\"ut\")"));
     assert!(policy.contains("\"it\" => Some(\"it\")"));
     assert!(!policy.contains("\"skt\" => Some"));
-    assert!(launcher.contains("if job not in {\"ut\", \"it\"}"));
+    assert!(launcher.contains("def fixed_test_jobs("));
+    assert!(launcher.contains("\"skt\""));
+    assert!(launcher.contains("\"verus\""));
     assert!(launcher.contains("def bounded_test_summary"));
     assert!(launcher.contains("leaving directory"));
-    assert!(agent.contains("Hermes host jobs stay {ut,it}"));
-    assert!(agent.contains("does not run SKT"));
+    assert!(agent.contains("host jobs stay {ut,it}"));
+    assert!(agent.contains("isolated host stage"));
     assert!(agent.contains("never guest `posixtest all`"));
     for line in agent.lines() {
         let Some(rest) = line.split("_SKILL: &str = \"").nth(1) else {

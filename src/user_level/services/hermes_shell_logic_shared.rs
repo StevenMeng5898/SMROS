@@ -132,6 +132,164 @@ pub struct HermesCampaignOptions {
     pub run_posixtest: bool,
     /// Run `sectest all` once before random iterations. Default is on.
     pub run_sectest: bool,
+    /// Bit i set means extra stage i is skipped. Default is 0 (run every stage).
+    pub skip_extra: u32,
+}
+
+/// Guest and host suites orchestrated once per `hermes test-all`, outside the
+/// per-iteration `ut`/`it` jobs. Index matches `HermesSuitePhases::extra`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HermesExtraStage {
+    Guest = 0,
+    El0 = 1,
+    Skt = 2,
+    St = 3,
+    PosixTool = 4,
+    PosixFetch = 5,
+    PosixAudit = 6,
+    PosixBuild = 7,
+    PosixStage = 8,
+    PosixBaseline = 9,
+    Launcher = 10,
+    Verus = 11,
+    Testsc = 12,
+    Fuzzsc = 13,
+}
+
+pub const HERMES_EXTRA_STAGE_COUNT: usize = 14;
+pub const HERMES_GUEST_CASE_COUNT: usize = 7;
+/// `sectest all` listed probes plus the heap-fork and elf-memsz kernel cases.
+pub const HERMES_SECTEST_ALL_CASES: usize = 91;
+pub const HERMES_GUEST_CASES: [&str; HERMES_GUEST_CASE_COUNT] = [
+    "/shared/f1_seccomp.elf",
+    "/shared/f2_landlock.elf",
+    "/shared/f3_pkey.elf",
+    "/shared/f4_iouring.elf",
+    "/shared/f5_ptrace.elf",
+    "/shared/g1_stopcont.elf",
+    "/shared/g1b_stop.elf",
+];
+/// Single `sectest <id>` the campaign runs after `sectest all` and `sectest undef`.
+pub const HERMES_SECTEST_ONE_ID: &str = "el0-read-kernel-ram";
+
+/// Closing stages run after the random loop and before the shm-mode check.
+/// Bounded `fuzzsc` is last so shm-mode still observes `/dev/shm`.
+/// `make posix-run` and `make posix-report` stay out of this list: they boot a
+/// second SMROS for the same 1600-test manifest the opening `posixtest all`
+/// already executed, and that runner's guest-start check cannot share this VM.
+pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 12] = [
+    HermesExtraStage::El0,
+    HermesExtraStage::Skt,
+    HermesExtraStage::St,
+    HermesExtraStage::PosixTool,
+    HermesExtraStage::PosixFetch,
+    HermesExtraStage::PosixAudit,
+    HermesExtraStage::PosixBuild,
+    HermesExtraStage::PosixStage,
+    HermesExtraStage::PosixBaseline,
+    HermesExtraStage::Launcher,
+    HermesExtraStage::Verus,
+    HermesExtraStage::Fuzzsc,
+];
+
+impl HermesExtraStage {
+    pub const fn index(self) -> usize {
+        self as u8 as usize
+    }
+
+    pub fn from_index(index: usize) -> Option<Self> {
+        Some(match index {
+            0 => Self::Guest,
+            1 => Self::El0,
+            2 => Self::Skt,
+            3 => Self::St,
+            4 => Self::PosixTool,
+            5 => Self::PosixFetch,
+            6 => Self::PosixAudit,
+            7 => Self::PosixBuild,
+            8 => Self::PosixStage,
+            9 => Self::PosixBaseline,
+            10 => Self::Launcher,
+            11 => Self::Verus,
+            12 => Self::Testsc,
+            13 => Self::Fuzzsc,
+            _ => return None,
+        })
+    }
+}
+
+pub fn extra_stage_name(stage: HermesExtraStage) -> &'static str {
+    match stage {
+        HermesExtraStage::Guest => "guest",
+        HermesExtraStage::El0 => "el0",
+        HermesExtraStage::Skt => "skt",
+        HermesExtraStage::St => "st",
+        HermesExtraStage::PosixTool => "posix-tool-test",
+        HermesExtraStage::PosixFetch => "posix-fetch",
+        HermesExtraStage::PosixAudit => "posix-audit",
+        HermesExtraStage::PosixBuild => "posix-build",
+        HermesExtraStage::PosixStage => "posix-stage",
+        HermesExtraStage::PosixBaseline => "posix-baseline",
+        HermesExtraStage::Launcher => "launcher-test",
+        HermesExtraStage::Verus => "verus",
+        HermesExtraStage::Testsc => "testsc",
+        HermesExtraStage::Fuzzsc => "fuzzsc",
+    }
+}
+
+pub fn extra_stage_from_name(name: &str) -> Option<HermesExtraStage> {
+    (0..HERMES_EXTRA_STAGE_COUNT)
+        .find_map(|index| {
+            let stage = HermesExtraStage::from_index(index)?;
+            if extra_stage_name(stage) == name {
+                Some(stage)
+            } else {
+                None
+            }
+        })
+}
+
+pub fn extra_stage_min_pass(stage: HermesExtraStage) -> usize {
+    match stage {
+        HermesExtraStage::Guest => HERMES_GUEST_CASE_COUNT,
+        _ => 1,
+    }
+}
+
+/// Verus is the only stage that may be UNAVAILABLE without failing the campaign.
+/// A missing toolchain is reported. A proof failure is still a hard fail.
+pub fn extra_stage_allows_unavailable(stage: HermesExtraStage) -> bool {
+    matches!(stage, HermesExtraStage::Verus)
+}
+
+/// `posix-baseline` publishes the qemu-user failure baseline. A completed run
+/// with some non-passing reference tests still passes this stage. The in-guest
+/// `posixtest all` remains the 1600/1600 SMROS gate. A harness error does not.
+pub fn extra_stage_allows_reference_misses(stage: HermesExtraStage) -> bool {
+    matches!(stage, HermesExtraStage::PosixBaseline)
+}
+
+/// Host stages the launcher may run once. Per-iteration jobs stay `ut` and `it`.
+const HOST_STAGE_NAMES: &[&str] = &[
+    "el0",
+    "skt",
+    "st",
+    "posix-tool-test",
+    "posix-fetch",
+    "posix-audit",
+    "posix-build",
+    "posix-stage",
+    "posix-baseline",
+    "launcher-test",
+    "verus",
+];
+
+pub fn host_stage_name(name: &str) -> Option<&'static str> {
+    HOST_STAGE_NAMES
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == name)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -536,9 +694,24 @@ pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
     let mut posixtest_seen = false;
     let mut run_sectest = true;
     let mut sectest_seen = false;
+    let mut skip_extra = 0u32;
+    let mut extra_seen = 0u32;
 
     for arg in args {
         let (key, value) = arg.split_once('=')?;
+        if let Some(stage) = extra_stage_from_name(key) {
+            let bit = 1u32 << stage.index();
+            if extra_seen & bit != 0 {
+                return None;
+            }
+            extra_seen |= bit;
+            match value {
+                "run" => {}
+                "skip" => skip_extra |= bit,
+                _ => return None,
+            }
+            continue;
+        }
         if key == "mode" {
             if mode_seen {
                 return None;
@@ -593,6 +766,7 @@ pub fn parse_campaign_options(args: &[&str]) -> Option<HermesCampaignOptions> {
             mode,
             run_posixtest,
             run_sectest,
+            skip_extra,
         })
     } else {
         None
@@ -615,7 +789,7 @@ pub fn next_random(state: &mut u64) -> u64 {
 pub const HERMES_RESUME_PATH: &str = "/data/hermes/tests/resume.cfg";
 /// Resume text includes opening-suite counts. A full `usize` on every counter
 /// plus a 64-byte pending op still has to fit, or a reboot checkpoint is dropped.
-pub const HERMES_RESUME_TEXT_CAPACITY: usize = 1536;
+pub const HERMES_RESUME_TEXT_CAPACITY: usize = 8192;
 /// `posixtest all` on the current manifest. The opening phase passes only at
 /// this count with fail, unresolved, timeout, and launch-error all zero.
 pub const HERMES_POSIXTEST_ALL_EXPECTED: usize = 1600;
@@ -635,6 +809,8 @@ pub enum HermesSuiteDisposition {
     Legacy,
     Done,
     Skip,
+    /// Selected and not finished. A campaign that ends here fails closed.
+    Pending,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -657,12 +833,30 @@ pub struct HermesSectestPhase {
     pub xpass: usize,
     /// `sectest` printed SKIP because this kernel is not AArch64.
     pub arch_skipped: bool,
+    /// Case ids `sectest all` must execute, including heap-fork and elf-memsz.
+    pub ids_expected: usize,
+    pub ids_ran: usize,
+    /// `sectest undef` counts. A hard fail here fails the sectest phase.
+    pub undef_pass: usize,
+    pub undef_fail: usize,
+    /// One `sectest <id>` invocation, so the single-id path is not only `all`.
+    pub one_pass: usize,
+    pub one_fail: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HermesCountedPhase {
+    pub disposition: HermesSuiteDisposition,
+    pub pass: usize,
+    pub fail: usize,
+    pub unavailable: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HermesSuitePhases {
     pub posix: HermesPosixPhase,
     pub sectest: HermesSectestPhase,
+    pub extra: [HermesCountedPhase; HERMES_EXTRA_STAGE_COUNT],
 }
 
 impl HermesPosixPhase {
@@ -700,6 +894,12 @@ impl HermesSectestPhase {
             xfail: 0,
             xpass: 0,
             arch_skipped: false,
+            ids_expected: 0,
+            ids_ran: 0,
+            undef_pass: 0,
+            undef_fail: 0,
+            one_pass: 0,
+            one_fail: 0,
         }
     }
 
@@ -711,8 +911,55 @@ impl HermesSectestPhase {
             xfail: 0,
             xpass: 0,
             arch_skipped: false,
+            ids_expected: 0,
+            ids_ran: 0,
+            undef_pass: 0,
+            undef_fail: 0,
+            one_pass: 0,
+            one_fail: 0,
         }
     }
+}
+
+impl HermesCountedPhase {
+    pub const fn legacy() -> Self {
+        Self {
+            disposition: HermesSuiteDisposition::Legacy,
+            pass: 0,
+            fail: 0,
+            unavailable: 0,
+        }
+    }
+
+    pub const fn skipped() -> Self {
+        Self {
+            disposition: HermesSuiteDisposition::Skip,
+            pass: 0,
+            fail: 0,
+            unavailable: 0,
+        }
+    }
+
+    pub const fn pending() -> Self {
+        Self {
+            disposition: HermesSuiteDisposition::Pending,
+            pass: 0,
+            fail: 0,
+            unavailable: 0,
+        }
+    }
+}
+
+pub fn fresh_extra_stages(skip_extra: u32) -> [HermesCountedPhase; HERMES_EXTRA_STAGE_COUNT] {
+    let mut extra = [HermesCountedPhase::pending(); HERMES_EXTRA_STAGE_COUNT];
+    let mut index = 0usize;
+    while index < HERMES_EXTRA_STAGE_COUNT {
+        if skip_extra & (1u32 << index) != 0 {
+            extra[index] = HermesCountedPhase::skipped();
+        }
+        index += 1;
+    }
+    extra
 }
 
 impl HermesSuitePhases {
@@ -720,6 +967,7 @@ impl HermesSuitePhases {
         Self {
             posix: HermesPosixPhase::legacy(),
             sectest: HermesSectestPhase::legacy(),
+            extra: [HermesCountedPhase::legacy(); HERMES_EXTRA_STAGE_COUNT],
         }
     }
 }
@@ -729,12 +977,14 @@ pub fn suite_disposition_name(disposition: HermesSuiteDisposition) -> &'static s
         HermesSuiteDisposition::Legacy => "legacy",
         HermesSuiteDisposition::Done => "done",
         HermesSuiteDisposition::Skip => "skip",
+        HermesSuiteDisposition::Pending => "pending",
     }
 }
 
 pub fn posix_phase_pass(phase: &HermesPosixPhase) -> bool {
     match phase.disposition {
         HermesSuiteDisposition::Legacy | HermesSuiteDisposition::Skip => true,
+        HermesSuiteDisposition::Pending => false,
         HermesSuiteDisposition::Done => {
             phase.selected == HERMES_POSIXTEST_ALL_EXPECTED
                 && phase.passed == HERMES_POSIXTEST_ALL_EXPECTED
@@ -749,8 +999,54 @@ pub fn posix_phase_pass(phase: &HermesPosixPhase) -> bool {
 pub fn sectest_phase_pass(phase: &HermesSectestPhase) -> bool {
     match phase.disposition {
         HermesSuiteDisposition::Legacy | HermesSuiteDisposition::Skip => true,
-        HermesSuiteDisposition::Done => !phase.arch_skipped && phase.fail == 0 && phase.xpass == 0,
+        HermesSuiteDisposition::Pending => false,
+        HermesSuiteDisposition::Done => {
+            !phase.arch_skipped
+                && phase.fail == 0
+                && phase.xpass == 0
+                && phase.ids_expected == HERMES_SECTEST_ALL_CASES
+                && phase.ids_ran == phase.ids_expected
+                && phase.undef_fail == 0
+                && phase.undef_pass >= 1
+                && phase.one_fail == 0
+                && phase.one_pass >= 1
+        }
     }
+}
+
+pub fn counted_phase_pass(
+    phase: &HermesCountedPhase,
+    min_pass: usize,
+    allow_unavailable: bool,
+    allow_reference_misses: bool,
+) -> bool {
+    match phase.disposition {
+        HermesSuiteDisposition::Legacy | HermesSuiteDisposition::Skip => true,
+        HermesSuiteDisposition::Pending => false,
+        HermesSuiteDisposition::Done => {
+            if phase.fail != 0 {
+                return allow_reference_misses && phase.pass > 0 && phase.unavailable == 0;
+            }
+            if phase.unavailable > 0 {
+                return allow_unavailable && phase.pass == 0;
+            }
+            phase.pass >= min_pass
+        }
+    }
+}
+
+pub fn extra_phases_pass(extra: &[HermesCountedPhase; HERMES_EXTRA_STAGE_COUNT]) -> bool {
+    (0..HERMES_EXTRA_STAGE_COUNT).all(|index| {
+        let Some(stage) = HermesExtraStage::from_index(index) else {
+            return false;
+        };
+        counted_phase_pass(
+            &extra[index],
+            extra_stage_min_pass(stage),
+            extra_stage_allows_unavailable(stage),
+            extra_stage_allows_reference_misses(stage),
+        )
+    })
 }
 
 pub fn test_all_overall_pass(
@@ -768,6 +1064,7 @@ pub fn test_all_overall_pass(
         && host_passes.iter().all(|passes| *passes == iterations)
         && posix_phase_pass(&suites.posix)
         && sectest_phase_pass(&suites.sectest)
+        && extra_phases_pass(&suites.extra)
         && shm_mode_ok
 }
 
@@ -973,6 +1270,44 @@ pub fn format_resume_state(state: &HermesResumeState, out: &mut [u8]) -> Option<
             b"0"
         },
     )?;
+    push_bytes(out, &mut written, b"\nsectest_ids=")?;
+    push_u64(out, &mut written, state.suites.sectest.ids_expected as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_ids_ran=")?;
+    push_u64(out, &mut written, state.suites.sectest.ids_ran as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_undef_pass=")?;
+    push_u64(out, &mut written, state.suites.sectest.undef_pass as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_undef_fail=")?;
+    push_u64(out, &mut written, state.suites.sectest.undef_fail as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_one_pass=")?;
+    push_u64(out, &mut written, state.suites.sectest.one_pass as u64)?;
+    push_bytes(out, &mut written, b"\nsectest_one_fail=")?;
+    push_u64(out, &mut written, state.suites.sectest.one_fail as u64)?;
+    for index in 0..HERMES_EXTRA_STAGE_COUNT {
+        let Some(stage) = HermesExtraStage::from_index(index) else {
+            return None;
+        };
+        let phase = &state.suites.extra[index];
+        push_bytes(out, &mut written, b"\n")?;
+        push_bytes(out, &mut written, extra_stage_name(stage).as_bytes())?;
+        push_bytes(out, &mut written, b"=")?;
+        push_bytes(
+            out,
+            &mut written,
+            suite_disposition_name(phase.disposition).as_bytes(),
+        )?;
+        push_bytes(out, &mut written, b"\n")?;
+        push_bytes(out, &mut written, extra_stage_name(stage).as_bytes())?;
+        push_bytes(out, &mut written, b"_pass=")?;
+        push_u64(out, &mut written, phase.pass as u64)?;
+        push_bytes(out, &mut written, b"\n")?;
+        push_bytes(out, &mut written, extra_stage_name(stage).as_bytes())?;
+        push_bytes(out, &mut written, b"_fail=")?;
+        push_u64(out, &mut written, phase.fail as u64)?;
+        push_bytes(out, &mut written, b"\n")?;
+        push_bytes(out, &mut written, extra_stage_name(stage).as_bytes())?;
+        push_bytes(out, &mut written, b"_unavail=")?;
+        push_u64(out, &mut written, phase.unavailable as u64)?;
+    }
     push_bytes(out, &mut written, b"\n")?;
     Some(written)
 }
@@ -999,6 +1334,7 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
     let mut pending_op_len = 0u8;
     let mut posix = HermesPosixPhase::legacy();
     let mut sectest = HermesSectestPhase::legacy();
+    let mut extra = [HermesCountedPhase::legacy(); HERMES_EXTRA_STAGE_COUNT];
     let mut saw_posix = false;
     let mut saw_sectest = false;
 
@@ -1088,7 +1424,17 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
                     _ => return None,
                 };
             }
-            _ => {}
+            "sectest_ids" => sectest.ids_expected = parse_decimal(value)? as usize,
+            "sectest_ids_ran" => sectest.ids_ran = parse_decimal(value)? as usize,
+            "sectest_undef_pass" => sectest.undef_pass = parse_decimal(value)? as usize,
+            "sectest_undef_fail" => sectest.undef_fail = parse_decimal(value)? as usize,
+            "sectest_one_pass" => sectest.one_pass = parse_decimal(value)? as usize,
+            "sectest_one_fail" => sectest.one_fail = parse_decimal(value)? as usize,
+            other => {
+                if !parse_extra_stage_field(&mut extra, other, value)? {
+                    // Unknown keys stay ignored so older writers can add fields.
+                }
+            }
         }
     }
     if saw_posix != saw_sectest {
@@ -1119,8 +1465,39 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
         op_timeouts,
         pending_op_len,
         pending_op,
-        suites: HermesSuitePhases { posix, sectest },
+        suites: HermesSuitePhases {
+            posix,
+            sectest,
+            extra,
+        },
     })
+}
+
+fn parse_extra_stage_field(
+    extra: &mut [HermesCountedPhase; HERMES_EXTRA_STAGE_COUNT],
+    key: &str,
+    value: &str,
+) -> Option<bool> {
+    let (name, field) = if let Some(name) = key.strip_suffix("_pass") {
+        (name, 1u8)
+    } else if let Some(name) = key.strip_suffix("_fail") {
+        (name, 2u8)
+    } else if let Some(name) = key.strip_suffix("_unavail") {
+        (name, 3u8)
+    } else {
+        (key, 0u8)
+    };
+    let Some(stage) = extra_stage_from_name(name) else {
+        return Some(false);
+    };
+    let phase = &mut extra[stage.index()];
+    match field {
+        0 => phase.disposition = parse_suite_disposition(value)?,
+        1 => phase.pass = parse_decimal(value)? as usize,
+        2 => phase.fail = parse_decimal(value)? as usize,
+        _ => phase.unavailable = parse_decimal(value)? as usize,
+    }
+    Some(true)
 }
 
 fn parse_suite_disposition(value: &str) -> Option<HermesSuiteDisposition> {
@@ -1128,6 +1505,7 @@ fn parse_suite_disposition(value: &str) -> Option<HermesSuiteDisposition> {
         "legacy" => Some(HermesSuiteDisposition::Legacy),
         "done" => Some(HermesSuiteDisposition::Done),
         "skip" => Some(HermesSuiteDisposition::Skip),
+        "pending" => Some(HermesSuiteDisposition::Pending),
         _ => None,
     }
 }

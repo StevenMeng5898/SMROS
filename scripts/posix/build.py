@@ -1098,7 +1098,16 @@ def stage_support_files(
         destination_text = "/proc/{}/fd/{}".format(
             os.getpid(), destination_text.removeprefix("/proc/self/fd/")
         )
-    result = run_bounded_command(["gencat", destination_text, str(source)])
+    # The upstream fork catalog contains UTF-8 text. Hermes host jobs force
+    # LC_ALL=C, and gencat then rejects those bytes. Generate the catalog in
+    # a UTF-8 locale without changing the rest of the build.
+    gencat_env = os.environ.copy()
+    gencat_env["LC_ALL"] = "C.UTF-8"
+    gencat_env["LANG"] = "C.UTF-8"
+    result = run_bounded_command(
+        ["gencat", destination_text, str(source)],
+        env=gencat_env,
+    )
     if result.returncode != 0 or not destination.is_file():
         diagnostic = _bounded_text(result.stderr or result.stdout)
         raise ValueError(

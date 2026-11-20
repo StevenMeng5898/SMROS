@@ -194,7 +194,7 @@ class RiscvArchitectureContractTests(unittest.TestCase):
         self.assertIn("virtio_mmio_reg(virtio_mmio_index)", riscv_source)
         self.assertRegex(
             riscv_source,
-            r"while let Some\(reg\) = crate::kernel_lowlevel::drivers::virtio_mmio_reg\(virtio_mmio_index\)",
+            r"while let Some\(reg\)\s*=\s*crate::kernel_lowlevel::drivers::virtio_mmio_reg\(\s*virtio_mmio_index\s*\)",
             "each RISC-V process root must discover every virtio-MMIO transport",
         )
         self.assertRegex(riscv_source, r"reg\s*\.size")
