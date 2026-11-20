@@ -106,10 +106,12 @@ fn process_slot<'a>(budget: &'a mut Budget, pid: usize) -> Option<&'a mut Proces
     if pid == 0 {
         return None;
     }
-    if let Some(slot) = budget.procs.iter_mut().find(|slot| slot.pid == pid) {
-        return Some(slot);
-    }
-    budget.procs.iter_mut().find(|slot| slot.pid == 0)
+    let index = budget
+        .procs
+        .iter()
+        .position(|slot| slot.pid == pid)
+        .or_else(|| budget.procs.iter().position(|slot| slot.pid == 0))?;
+    Some(&mut budget.procs[index])
 }
 
 fn process_total(slot: &ProcessCharge) -> usize {
