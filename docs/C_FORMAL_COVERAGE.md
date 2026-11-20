@@ -12,6 +12,13 @@ Labels match the Verus audit:
 - 超出范围: not part of the kernel TCB for this C audit.
 - 未覆盖: present and not otherwise classified.
 
+Standard conformance test programs are out of scope for this inventory and for
+the rest of SMROS. That includes posixtest, the Open POSIX Test Suite, and
+similar suites in any language, including `scripts/posix/runtime/` and
+`tests/guest/`. Their sources are not edited, reformatted, patched, or
+generated over, and they are not formally proved. Running them, including
+`posixtest all` and `hermes test-all`, remains ordinary kernel verification.
+
 Priority for the in-scope DDK layer is CBMC for bounds, overflow, and null
 dereference. ACSL with Frama-C Wp is appropriate once a function contract can
 be written. VeriFast is reserved for a separation-logic property CBMC and Wp
@@ -159,13 +166,13 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
     Sample driver, not kernel TCB.
 - `scripts/posix/runtime/include/sched.h`
   - 超出范围
-    POSIX test runtime shim, not kernel TCB.
+    Standard conformance test program (POSIX test runtime). Out of scope for formal proof; sources are not modified.
 - `scripts/posix/runtime/include/unistd.h`
   - 超出范围
-    POSIX test runtime shim, not kernel TCB.
+    Standard conformance test program (POSIX test runtime). Out of scope for formal proof; sources are not modified.
 - `scripts/posix/runtime/smros_posix_compat.c`
   - 超出范围
-    POSIX test runtime shim, not kernel TCB.
+    Standard conformance test program (POSIX test runtime). Out of scope for formal proof; sources are not modified.
 - `src/user_level/apps/pthread_mutex_futex.c`
   - 待证明
     EL0 futex mutex demo. Secondary CBMC target. Kernel futex proofs stay on the Verus track.
@@ -183,28 +190,28 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
     PCI config and BAR helpers in the DDK compat layer. Priority CBMC.
 - `tests/guest/f1_seccomp.c`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/f2_landlock.c`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/f3_pkey.c`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/f4_iouring.c`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/f5_ptrace.c`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/fail_closed.h`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/g1_stopcont.c`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/g1b_stop.c`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
 - `tests/guest/poc_common.h`
   - 超出范围
-    Guest capability probe, not kernel TCB.
+    Standard conformance test program (guest probe). Out of scope for formal proof; sources are not modified.
