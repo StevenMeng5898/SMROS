@@ -1,5 +1,5 @@
 ===== verus function evidence =====
-git_head=c8a664939919e048b9afcda8998ddd24c50e9f6d
+git_head=a8af20557adc38b1f884e37af5ff82deae495281
 git_dirty=false
 dirty_files<<END
 

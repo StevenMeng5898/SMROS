@@ -1,14 +1,14 @@
 ===== campaign summary =====
-utc=2026-11-21T15:45:07Z
-git_head=1b8701d7613e721e3a97745721232ac0a7d9bd6f
-git_dirty=true
-git_dirty is the tracked launcher bytecode cache, not a source edit.
-Full serial output is not committed.
+utc=2026-11-21T17:17:42Z
+git_head=a8af20557adc38b1f884e37af5ff82deae495281
+git_dirty=false
+The guest booted this commit. Full serial output is not committed.
 posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
-SMROS_POSIX_EVENT {"schema":1,"seq":3202,"event":"suite_end","run_id":"258fe1671fbcb9634bd8507aeabeafee0d7d10b3031bfae3947644f35957922c-334","manifest_sha256":"d9c4d3a84598a056ce945e0152f6271852021aa74f1c03b3c3c5e82d1cd6e36b","architecture":"aarch64","complete":true,"selected_count":1600,"completed_count":1600,"status_counts":{"pass":1600},"elapsed_ticks":126218}
+SMROS_POSIX_EVENT {"schema":1,"seq":3202,"event":"suite_end","run_id":"527f52cf3722e609465f48427e4738c1c114614146bd870f8fcbd4f5ba4dff96-344","manifest_sha256":"93874445573b1976e5c31443b41daa6cdcf26148a3a6ec97f39c52206e6983ad","architecture":"aarch64","complete":true,"selected_count":1600,"completed_count":1600,"status_counts":{"pass":1600},"elapsed_ticks":125639}
 posixtest: completed
 SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
-Host stage PASS reference_selected=1600_reference_passed=1365_reference_nonpass=235
+Host stage PASS reference_selected=1600_reference_passed=1364_reference_nonpass=236
+Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
 Hermes phase futex-stress phase=done pass=1 fail=0 unavailable=0
-Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1365/235/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1364/236/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
 Hermes test-all result: PASS
