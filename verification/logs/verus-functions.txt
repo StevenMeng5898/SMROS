@@ -1,8 +1,8 @@
 ===== verus function evidence =====
-git_head=1b8701d7613e721e3a97745721232ac0a7d9bd6f
-git_dirty=true
+git_head=c8a664939919e048b9afcda8998ddd24c50e9f6d
+git_dirty=false
 dirty_files<<END
- M scripts/__pycache__/smros-vm-launcher.cpython-312.pyc
+
 END
 source_sha256:
 45b913c10ed3d5a18bc6841ca5dd2d6e4ba909c6a1b5674f210fd63cdc46a889  src/kernel_lowlevel/kernel_budget_logic_shared.rs
@@ -19,6 +19,12 @@ ae3ad0cda6a14038bab431cb62da6172e22fc6fb87e187c38990cd6c03b184f9  src/kernel_obj
 c087382ff717d959261cc1d78531a28bd71ba9103eec3f32d027ae97c653bef8  src/user_level/drivers/driver_logic_shared.rs
 13fda35133b588ba6e7bfd2e0848fdcfd00256f9c1fa9002dbaae35f10dc3c00  src/user_level/drivers/linux_logic_shared.rs
 129c8fbaf9e6cf85389ed7de6863d59538480891686ccad46169e0a5108213cd  src/user_level/services/security_case_logic_shared.rs
+harness_sha256:
+81b63a4059fd940cb56980edeafea5e011ad774d3a3c00124b6b606229905c73  verification/syscall/src/lib.rs
+bc905656807711a9a5ed149e463c5f8e58fd4d8e3652959255881c11d414c1cb  verification/kernel_objects/src/lib.rs
+4cf8574761adf412686d15be616c4137897620e21852e6dc5dbc556a1bfbd576  verification/kernel_lowlevel/src/lib.rs
+2fcec78cef4812bf793f45002cd1e45dacb1f1c678d42810e178b57e108a066c  verification/user_level/src/lib.rs
+16618596d57f605edf1b3189502b833fde4d4146d7fb03d3655a32de0065c585  verification/services/src/lib.rs
 harness function mode success origin
 verus-kernel-lowlevel.log	lib::verified_kernel_budget_admit_heap	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_admit_heap_body
 verus-kernel-lowlevel.log	lib::verified_kernel_budget_admit_process	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_admit_process_body
