@@ -1,6 +1,6 @@
-utc=2026-11-21T13:23:56Z
-git_head=b8b3661d5c363d72ad317a5e910131c0632500ed
-git_dirty=false
+utc=2026-11-21T15:41:52Z
+git_head=1b8701d7613e721e3a97745721232ac0a7d9bd6f
+git_dirty=true
 A later commit whose diff is only verification/logs/ publishes this run.
 command=cbmc --cover cover src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check
 **** WARNING: Use --unwinding-assertions to obtain sound verification results
@@ -15,33 +15,33 @@ Generic Property Instrumentation
 Rewriting existing assertions as assumptions
 Running with 8 object bits, 56 offset bits (default)
 Starting Bounded Model Checking
-Runtime Symex: 0.00227365s
+Runtime Symex: 0.00388013s
 size of program expression: 112 steps
 Generated 3 VCC(s), 3 remaining after simplification
-Runtime Postprocess Equation: 4.975e-06s
+Runtime Postprocess Equation: 4.567e-06s
 Passing problem to propositional reduction
 converting SSA
-Runtime Convert SSA: 0.000592296s
+Runtime Convert SSA: 0.000937635s
 Running propositional reduction
 Post-processing
-Runtime Post-process: 1.4014e-05s
+Runtime Post-process: 4.7789e-05s
 Solving with MiniSAT 2.2.1 with simplifier
 975 variables, 1489 clauses
 SAT checker: instance is SATISFIABLE
-Runtime Solver: 0.00063524s
-Runtime decision procedure: 0.00125873s
+Runtime Solver: 0.000678292s
+Runtime decision procedure: 0.00164403s
 Running propositional reduction
 Solving with MiniSAT 2.2.1 with simplifier
 975 variables, 726 clauses
 SAT checker: instance is SATISFIABLE
-Runtime Solver: 1.7043e-05s
-Runtime decision procedure: 2.2546e-05s
+Runtime Solver: 1.7323e-05s
+Runtime decision procedure: 2.2401e-05s
 Running propositional reduction
 Solving with MiniSAT 2.2.1 with simplifier
 975 variables, 725 clauses
 SAT checker: instance is SATISFIABLE
-Runtime Solver: 9.3659e-05s
-Runtime decision procedure: 0.000100585s
+Runtime Solver: 9.4867e-05s
+Runtime decision procedure: 0.000101994s
 
 ** coverage results:
 [cbmc_futex_word.coverage.1] file src/user_level/apps/pthread_mutex_futex.c line 116 function cbmc_futex_word condition '1 != 0': SATISFIED

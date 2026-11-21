@@ -1,7 +1,7 @@
 ===== make verus summary =====
-utc=2026-11-21T13:23:37Z
-git_head=b8b3661d5c363d72ad317a5e910131c0632500ed
-git_dirty=false
+utc=2026-11-21T15:41:33Z
+git_head=1b8701d7613e721e3a97745721232ac0a7d9bd6f
+git_dirty=true
 Per-harness totals from Verus --output-json. Full JSON stays local and is not committed.
 verus-syscall: verified=303 errors=0 success=True
 verus-kernel-objects: verified=269 errors=0 success=True
