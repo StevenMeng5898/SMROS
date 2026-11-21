@@ -1,6 +1,6 @@
 ===== verification log =====
-utc=2026-11-21T07:34:50Z
-git_head=ea61993c09aa0d2ba4b3ceda02296c12694e2100
+utc=2026-11-21T09:38:36Z
+git_head=652c136a8251c599b35131d619bfdee7d05fc8a2
 git_dirty=true
 git_status_before_log_write<<END
  M scripts/__pycache__/smros-vm-launcher.cpython-312.pyc
@@ -40,867 +40,7 @@ Verus
 ===== output =====
 {
   "func-details": {
-    "lib::ll_pte_attr_idx": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fdt_reg_tuple_bytes_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::align_up_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_uart_has_byte": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fdt_align4_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_bitmap_mask": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERM_WRITE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_gic_interrupt_id": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%49::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QEMU_VIRT_UART_BASE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fdt_reg_tuple_offset_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%6::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_fdt_align4": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_dt_irq_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::num::usize_specs_tmp::checked_mul%returns_clause_autospec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "alloc::vec::impl&%1::len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_PLATFORM_IRQS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::memory_layout_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::axiom_vec_has_resolved": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::axiom_spec_len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%31::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_ascii_printable": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%24::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::GICD_ITARGETSR": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::Seq::new": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "alloc::boxed::impl&%15::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fdt_cells_to_bytes_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERM_READ_WRITE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::kernel_budget_uncharge_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_kernel_budget_admit_heap": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PROCESS_EMPTY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::UART_CR": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PSCI_RET_ON_PENDING": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%9::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%8::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::find_process_by_pid_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::wrapping_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_timer_rearm_compare": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_RUNNING": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QEMU_VIRT_GICD_BASE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::UART_BASE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_uart_tx_ready": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::TIMER_IRQ": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%16::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_process_index_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::FR_TXFF": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%29::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_pte_sh": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_page_bit_free": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%7::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::axiom_seq_new_len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::GICD_IPRIORITYR": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PROCESS_TERMINATED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%15::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
     "core::num::impl&%11::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_bitmap_indices": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::memory_reg_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_fdt_reg_tuple_offset": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QEMU_VIRT_UART_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "verus_builtin::impl&%7::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_IDLE_ID": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PLATFORM_COUNT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_READY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_page_range_admitted": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CR_RXE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_kernel_budget_uncharge": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_kernel_budget_mmap_metadata": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_stack_alloc": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%39::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CR_TXE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_permission_executable": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::dt_gic_irq_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::impl&%0::arrow_0": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_permission_writable": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_PAGES_PER_PROCESS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_gic_byte_shift": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::find_segment_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PROCESS_READY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_valid_cpu_id": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_pfn_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_pte_output_address": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%19::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%11::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%47::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::memory_capacity_ok_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::checked_sub": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%46::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_pte_set_output_address": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_segment_contains": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CR_UARTEN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_fdt_cells_to_bytes": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::pfn_address_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%36::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QEMU_VIRT_GICR_BASE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::spec_unwrap_or": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%25::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERM_READ_EXECUTE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_SEGMENTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_uart_control": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PAGE_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_timer_compare_needs_rearm": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_timer_tick_is_new": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::axiom_vec_index_decreases": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_dt_reg_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%5::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%17::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%0::is_some": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LCRH_WLEN_8": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::spec_vec_len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%15::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::vec_clone_deep_view_proof": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::dt_platform_index_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_segment_end": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_BLOCKED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::dt_irq_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SegmentModel::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_page_to_vaddr": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_pfn_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::Seq::len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_fdt_reg_tuple_bytes": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERM_EXECUTE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::thread_context_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::checked_mul": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_gic_enable_bit": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::process_state_live_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::axiom_seq_ext_equal_deep": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%38::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CNTP_CTL_IMASK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SEGMENT_DATA": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QEMU_VIRT_GICR_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_display_mpidr": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_pte_table": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_gic_reg_offset": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_segment_size": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PROCESS_RUNNING": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::kernel_budget_admit_heap_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_heap_alloc": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::dt_reg_contains_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LCRH_FEN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::page_to_vaddr_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::VecAdditionalSpecFns::spec_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_timer_elapsed_ticks": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_CPUS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_cpu_id_from_mpidr": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%21::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QEMU_VIRT_GICD_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%11::checked_mul": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::axiom_vec_decreases_to_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::driver_platform_table_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PSCI_RET_INTERNAL_FAILURE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%48::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_timer_tick_count": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%41::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::stack_alloc_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERM_READ": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PRIORITY_HIGH": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::checked_end_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PROCESS_BLOCKED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QEMU_VIRT_UART_IRQ": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::segment_size_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DEFAULT_PLATFORM_INDEX": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%2::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::mmu_constants_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::pfn_index_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%0::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%20::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_checked_end": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::View::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%8::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::kernel_budget_mmap_metadata_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::Clone::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_dt_platform_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SEGMENT_HEAP": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%14::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::serial_timer_interrupt_smp_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_memory_reg": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::pfn_from_index_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%3::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%6::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%0::unwrap_or_else": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_hex_digit": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_align_up": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "alloc::vec::impl&%12::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::saturating_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_memory_capacity_ok": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_fdt_range_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_timer_compare": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::spec_unwrap": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_PROCESSES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::dt_reg_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::TOTAL_PHYSICAL_PAGES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::vec_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::kernel_budget_reserve_blocks_the_reported_mmap_failure": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_kernel_budget_admit_process": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::segment_contains_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fdt_range_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::impl&%0::spec_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_thread_id_idle": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SEGMENT_STACK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "verus_builtin::impl&%9::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ProcessModel::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::kernel_budget_admit_process_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_timer_ctl": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%0::and_then": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::vec_clone_trigger": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_timer_period": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%30::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::axiom_seq_new_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_psci_success": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_pt_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::wrapping::u64_specs::wrapping_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%27::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::is_some": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::axiom_seq_ext_equal": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -908,19 +48,63 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
+    "lib::ll_pfn_from_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%0::is_some": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PERM_READ_EXECUTE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::CNTP_CTL_IMASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_CPUS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::impl&%0::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%20::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_kernel_budget_admit_process": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::pfn_index_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_segment_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DEFAULT_PLATFORM_INDEX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
     "core::clone::impls::impl&%17::clone": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::SEGMENT_CODE": {
+    "vstd::view::impl&%36::view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ll_dt_timer_irq_index": {
+    "lib::PROCESS_EMPTY": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ll_pte_set_flag": {
+    "vstd::view::impl&%17::deep_view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -928,131 +112,7 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::PSCI_RET_SUCCESS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%6::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_TERMINATED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%0::unwrap_or": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_vma_size": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::Seq::index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::impl&%1::requires": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_mmio_addr": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%37::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::impl&%0::spec_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::GICD_ISENABLER": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::is_none": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::strictly_cloned": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%26::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_gic_set_byte_field": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_dt_reg_contains": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%1::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%9::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PT_ENTRIES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::impl&%1::ensures": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::FR_RXFE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::DeepView::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%27::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_uart_lcrh": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::dt_timer_irq_index_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::heap_alloc_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ll_dt_gic_irq": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::FnWithRequiresEnsures::ensures": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_EMPTY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%18::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%4::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::UART_FR": {
+    "lib::verified_timer_compare_needs_rearm": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1060,15 +120,199 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ll_pfn_from_index": {
+    "vstd::view::impl&%24::view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::seq::axiom_seq_index_decreases": {
+    "core::clone::impls::impl&%9::clone": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::pervasive::FnWithRequiresEnsures::requires": {
+    "lib::MAX_PLATFORM_IRQS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::wrapping_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_page_to_vaddr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::spec_unwrap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%19::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SEGMENT_CODE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QEMU_VIRT_UART_IRQ": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_cpu_id_from_mpidr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%4::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_permission_executable": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pte_sh": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_timer_elapsed_ticks": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QEMU_VIRT_GICD_BASE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_fdt_reg_tuple_bytes": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dt_timer_irq_index_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::FR_RXFE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_timer_compare": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::VecAdditionalSpecFns::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_timer_rearm_compare": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_some": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::kernel_budget_admit_process_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%8::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_segment_contains": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%18::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ProcessModel::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fdt_reg_tuple_offset_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::stack_alloc_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::saturating_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::FnWithRequiresEnsures::ensures": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%0::unwrap_or_else": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_page_bit_free": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_heap_alloc": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PSCI_RET_ON_PENDING": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LCRH_WLEN_8": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::UART_BASE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%7::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SegmentModel::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_index_decreases": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_stack_alloc": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%27::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_decreases_to_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::boxed::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::process_state_live_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::CR_RXE": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1076,7 +320,763 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
+    "vstd::seq::Seq::new": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_EMPTY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::impl&%1::ensures": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PERM_EXECUTE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%47::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%1::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_IDLE_ID": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_RUNNING": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_BLOCKED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_fdt_cells_to_bytes": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_PROCESSES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_fdt_range_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%39::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%30::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pte_attr_idx": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%3::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::memory_capacity_ok_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::DeepView::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_uart_control": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::kernel_budget_uncharge_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%25::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%48::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
     "lib::ll_thread_state_runnable": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_dt_reg_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_gic_set_byte_field": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_timer_tick_count": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_psci_success": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_ascii_printable": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::segment_size_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dt_reg_contains_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%21::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%5::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_kernel_budget_admit_heap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::kernel_budget_admit_heap_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PROCESS_READY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PSCI_RET_SUCCESS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::spec_vec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pte_output_address": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%41::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%9::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_TERMINATED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_kernel_budget_mmap_metadata": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_SEGMENTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_timer_period": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%0::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::page_to_vaddr_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::TOTAL_PHYSICAL_PAGES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%49::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pfn_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%7::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QEMU_VIRT_GICR_BASE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_none": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pte_set_output_address": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::GICD_IPRIORITYR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_valid_cpu_id": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_gic_enable_bit": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PROCESS_TERMINATED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::Clone::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_uart_lcrh": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::CR_UARTEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QEMU_VIRT_UART_BASE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::pfn_from_index_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::TIMER_IRQ": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::FnWithRequiresEnsures::requires": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%12::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_dt_irq_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_dt_platform_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_gic_reg_offset": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PERM_WRITE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::memory_reg_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::UART_CR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::wrapping::u64_specs::wrapping_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::kernel_budget_mmap_metadata_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_trigger": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pte_table": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_page_range_admitted": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dt_reg_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PRIORITY_HIGH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dt_irq_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%38::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PLATFORM_COUNT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PROCESS_BLOCKED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PERM_READ_WRITE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%31::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SEGMENT_DATA": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PERM_READ": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_memory_capacity_ok": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_thread_id_idle": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_kernel_budget_uncharge": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_new_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fdt_cells_to_bytes_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::find_process_by_pid_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QEMU_VIRT_GICR_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QEMU_VIRT_GICD_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::CR_TXE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::thread_context_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_timer_tick_is_new": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pte_set_flag": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_timer_ctl": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::strictly_cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pt_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_spec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_dt_gic_irq": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%0::unwrap_or": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dt_gic_irq_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_memory_reg": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%37::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_index_decreases": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_PAGES_PER_PROCESS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PAGE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::driver_platform_table_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fdt_range_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%0::and_then": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_permission_writable": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_READY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::segment_contains_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fdt_reg_tuple_bytes_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_bitmap_mask": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_process_index_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::dt_platform_index_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::kernel_budget_reserve_blocks_the_reported_mmap_failure": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%29::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LCRH_FEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_display_mpidr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_fdt_reg_tuple_offset": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_deep_view_proof": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_segment_size": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_dt_reg_contains": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::serial_timer_interrupt_smp_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_bitmap_indices": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_sub": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::find_segment_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%6::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_checked_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fdt_align4_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_has_resolved": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%27::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::FR_TXFF": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_align_up": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SEGMENT_STACK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::UART_FR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::spec_unwrap_or": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_uart_has_byte": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_vma_size": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%26::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::impl&%1::requires": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%14::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::num::usize_specs_tmp::checked_mul%returns_clause_autospec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_gic_byte_shift": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::heap_alloc_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QEMU_VIRT_UART_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%16::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_hex_digit": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%2::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::GICD_ISENABLER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::align_up_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PSCI_RET_INTERNAL_FAILURE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_fdt_align4": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::GICD_ITARGETSR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_ext_equal_deep": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%8::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_uart_tx_ready": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_new_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::mmu_constants_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%15::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::View::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::memory_layout_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_dt_timer_irq_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PT_ENTRIES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%11::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%46::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PROCESS_RUNNING": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_gic_interrupt_id": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SEGMENT_HEAP": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_mmio_addr": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::pfn_address_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ll_pfn_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_ext_equal": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%1::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_mul": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     }
@@ -1095,658 +1095,98 @@ Verus
       "version": "0.2026.04.19.6f7d4de"
     },
     "num-threads": 1,
-    "total": 1296,
-    "estimated-cpu-time": 1296,
+    "total": 1397,
+    "estimated-cpu-time": 1397,
     "rust": {
-      "total": 245,
-      "init-and-types": 80,
-      "trait-conflicts": 28,
-      "compile": 137
+      "total": 272,
+      "init-and-types": 87,
+      "trait-conflicts": 31,
+      "compile": 152
     },
     "verification": {
-      "total": 1014,
+      "total": 1086,
       "vir": {
-        "total": 275,
-        "hir": 52,
-        "import": 142,
-        "rust-to-vir": 29
+        "total": 280,
+        "hir": 59,
+        "import": 131,
+        "rust-to-vir": 34
       }
     },
-    "total-verify": 709,
+    "total-verify": 767,
     "total-verify-module-times": [
       {
         "module": "",
-        "time": 709
+        "time": 767
       }
     ],
     "air": {
-      "total": 353,
+      "total": 378,
       "module-times": [
         {
           "module": "",
-          "time": 353
+          "time": 378
         }
       ]
     },
     "smt": {
-      "total": 261,
+      "total": 276,
       "smt-init": 5,
       "rlimit-init": 9482,
       "smt-init-module-times": [
         {
           "module": "",
           "time": 5,
-          "time-micros": 5253,
+          "time-micros": 5537,
           "rlimit": 9482
         }
       ],
-      "smt-run": 256,
+      "smt-run": 271,
       "rlimit-run": 1803058,
       "smt-run-module-times": [
         {
           "module": "",
-          "time": 256,
-          "time-micros": 256760,
+          "time": 271,
+          "time-micros": 271399,
           "rlimit": 1803058,
           "function-breakdown": [
-            {
-              "function": "lib::MAX_PLATFORM_IRQS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_RUNNING",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 27,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_thread_state_runnable",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_kernel_budget_admit_process",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2691,
-              "rlimit": 16280,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_PROCESSES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 38,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PROCESS_RUNNING",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::LCRH_WLEN_8",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 53,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_uart_control",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 48,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PT_ENTRIES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_mmio_addr",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3350,
-              "rlimit": 22023,
-              "success": true
-            },
-            {
-              "function": "lib::serial_timer_interrupt_smp_smoke",
-              "mode:": "proof",
-              "time": 12,
-              "time-micros": 12676,
-              "rlimit": 31162,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pte_sh",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 39,
-              "rlimit": 164,
-              "success": true
-            },
-            {
-              "function": "lib::SEGMENT_CODE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PERM_READ_EXECUTE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::CNTP_CTL_IMASK",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::CR_UARTEN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_vma_size",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2200,
-              "rlimit": 12932,
-              "success": true
-            },
-            {
-              "function": "lib::ll_align_up",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2142,
-              "rlimit": 11196,
-              "success": true
-            },
-            {
-              "function": "lib::ll_fdt_reg_tuple_offset",
-              "mode:": "exec",
-              "time": 15,
-              "time-micros": 15346,
-              "rlimit": 62941,
-              "success": true
-            },
-            {
-              "function": "lib::PERM_READ",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PROCESS_TERMINATED",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::GICD_ITARGETSR",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_timer_rearm_compare",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2227,
-              "rlimit": 10821,
-              "success": true
-            },
-            {
-              "function": "lib::PAGE_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 77,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::UART_BASE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_gic_interrupt_id",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 40,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_CPUS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_kernel_budget_mmap_metadata",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9496,
-              "rlimit": 30206,
-              "success": true
-            },
-            {
-              "function": "lib::UART_FR",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::TIMER_IRQ",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_process_index_valid",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 51,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_timer_tick_is_new",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 44,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::TOTAL_PHYSICAL_PAGES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::FR_TXFF",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_gic_enable_bit",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1914,
-              "rlimit": 10163,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_TERMINATED",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_thread_id_idle",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::CR_TXE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 35,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_kernel_budget_uncharge",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2108,
-              "rlimit": 11435,
-              "success": true
-            },
-            {
-              "function": "lib::ll_memory_capacity_ok",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2591,
-              "rlimit": 19256,
-              "success": true
-            },
-            {
-              "function": "lib::ll_dt_reg_valid",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3394,
-              "rlimit": 26127,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_SEGMENTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_uart_has_byte",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 27,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_dt_irq_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1702,
-              "rlimit": 10051,
-              "success": true
-            },
-            {
-              "function": "lib::CR_RXE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::QEMU_VIRT_UART_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_bitmap_indices",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2105,
-              "rlimit": 10535,
-              "success": true
-            },
-            {
-              "function": "lib::DEFAULT_PLATFORM_INDEX",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_heap_alloc",
-              "mode:": "exec",
-              "time": 25,
-              "time-micros": 25755,
-              "rlimit": 319829,
-              "success": true
-            },
             {
               "function": "lib::ll_stack_alloc",
               "mode:": "exec",
               "time": 12,
-              "time-micros": 12022,
+              "time-micros": 12382,
               "rlimit": 124264,
               "success": true
             },
             {
-              "function": "lib::PROCESS_READY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_timer_compare",
+              "function": "lib::ll_pte_attr_idx",
               "mode:": "exec",
-              "time": 3,
-              "time-micros": 3015,
-              "rlimit": 10727,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_IDLE_ID",
-              "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
+              "time-micros": 236,
+              "rlimit": 164,
               "success": true
             },
             {
-              "function": "lib::PROCESS_BLOCKED",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::LCRH_FEN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PROCESS_EMPTY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::driver_platform_table_smoke",
-              "mode:": "proof",
-              "time": 7,
-              "time-micros": 7854,
-              "rlimit": 38391,
-              "success": true
-            },
-            {
-              "function": "lib::UART_CR",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pfn_valid",
+              "function": "lib::ll_hex_digit",
               "mode:": "exec",
-              "time": 1,
-              "time-micros": 1999,
-              "rlimit": 10567,
-              "success": true
-            },
-            {
-              "function": "lib::ll_timer_tick_count",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1788,
-              "rlimit": 9105,
-              "success": true
-            },
-            {
-              "function": "lib::ll_valid_cpu_id",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1763,
-              "rlimit": 13086,
+              "time": 2,
+              "time-micros": 2037,
+              "rlimit": 11625,
               "success": true
             },
             {
               "function": "lib::ll_pfn_address",
               "mode:": "exec",
               "time": 3,
-              "time-micros": 3540,
+              "time-micros": 3799,
               "rlimit": 21318,
               "success": true
             },
             {
-              "function": "lib::ll_pfn_from_index",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2965,
-              "rlimit": 18127,
-              "success": true
-            },
-            {
-              "function": "lib::ll_permission_writable",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 44,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::FR_RXFE",
+              "function": "lib::PERM_WRITE",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 38,
               "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::thread_context_smoke",
-              "mode:": "proof",
-              "time": 0,
-              "time-micros": 880,
-              "rlimit": 4471,
-              "success": true
-            },
-            {
-              "function": "lib::verified_timer_compare_needs_rearm",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 37,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_timer_ctl",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 49,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_PAGES_PER_PROCESS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PERM_EXECUTE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::QEMU_VIRT_UART_BASE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pte_output_address",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 34,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SEGMENT_HEAP",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SEGMENT_STACK",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pte_set_flag",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2001,
-              "rlimit": 9871,
               "success": true
             },
             {
@@ -1758,10 +1198,954 @@ Verus
               "success": true
             },
             {
-              "function": "lib::QEMU_VIRT_GICD_SIZE",
+              "function": "lib::ll_pt_index",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2416,
+              "rlimit": 10959,
+              "success": true
+            },
+            {
+              "function": "lib::SEGMENT_DATA",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PERM_READ_WRITE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PROCESS_READY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_TERMINATED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::FR_RXFE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 140,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PRIORITY_HIGH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 40,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::QEMU_VIRT_GICR_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pte_set_output_address",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_uart_control",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 38,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_fdt_reg_tuple_bytes",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6271,
+              "rlimit": 37289,
+              "success": true
+            },
+            {
+              "function": "lib::verified_timer_compare_needs_rearm",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 35,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PERM_READ",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 83,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SEGMENT_STACK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_valid_cpu_id",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1894,
+              "rlimit": 13086,
+              "success": true
+            },
+            {
+              "function": "lib::verified_timer_rearm_compare",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2470,
+              "rlimit": 10821,
+              "success": true
+            },
+            {
+              "function": "lib::UART_FR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 33,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::driver_platform_table_smoke",
+              "mode:": "proof",
+              "time": 8,
+              "time-micros": 8244,
+              "rlimit": 38391,
+              "success": true
+            },
+            {
+              "function": "lib::TOTAL_PHYSICAL_PAGES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_ascii_printable",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 38,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_uart_lcrh",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::CNTP_CTL_IMASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pfn_index",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3764,
+              "rlimit": 25577,
+              "success": true
+            },
+            {
+              "function": "lib::PROCESS_TERMINATED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_PLATFORM_IRQS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pfn_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1867,
+              "rlimit": 10567,
+              "success": true
+            },
+            {
+              "function": "lib::ll_bitmap_indices",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2070,
+              "rlimit": 10535,
+              "success": true
+            },
+            {
+              "function": "lib::ll_timer_compare",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2470,
+              "rlimit": 10727,
+              "success": true
+            },
+            {
+              "function": "lib::QEMU_VIRT_GICR_BASE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_gic_byte_shift",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2756,
+              "rlimit": 14661,
+              "success": true
+            },
+            {
+              "function": "lib::ll_dt_irq_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1745,
+              "rlimit": 10051,
+              "success": true
+            },
+            {
+              "function": "lib::mmu_constants_smoke",
+              "mode:": "proof",
+              "time": 0,
+              "time-micros": 601,
+              "rlimit": 2529,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pfn_from_index",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3087,
+              "rlimit": 18127,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_SEGMENTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_thread_id_idle",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::find_process_by_pid_model",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7718,
+              "rlimit": 46071,
+              "success": true
+            },
+            {
+              "function": "lib::ll_uart_tx_ready",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 35,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::GICD_ISENABLER",
               "mode:": "spec",
               "time": 0,
               "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_memory_capacity_ok",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2601,
+              "rlimit": 19256,
+              "success": true
+            },
+            {
+              "function": "lib::ll_page_to_vaddr",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3522,
+              "rlimit": 22873,
+              "success": true
+            },
+            {
+              "function": "lib::ll_vma_size",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1898,
+              "rlimit": 12932,
+              "success": true
+            },
+            {
+              "function": "lib::verified_kernel_budget_admit_process",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2651,
+              "rlimit": 16280,
+              "success": true
+            },
+            {
+              "function": "lib::PAGE_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 57,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LCRH_FEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::UART_BASE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PSCI_RET_SUCCESS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_kernel_budget_admit_heap",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6613,
+              "rlimit": 69133,
+              "success": true
+            },
+            {
+              "function": "lib::ll_bitmap_mask",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 151,
+              "rlimit": 229,
+              "success": true
+            },
+            {
+              "function": "lib::PLATFORM_COUNT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PROCESS_EMPTY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_fdt_range_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2312,
+              "rlimit": 16555,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pte_output_address",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 36,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_process_index_valid",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 49,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::GICD_ITARGETSR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 33,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PSCI_RET_INTERNAL_FAILURE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 110,
+              "rlimit": 188,
+              "success": true
+            },
+            {
+              "function": "lib::ll_dt_reg_contains",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3740,
+              "rlimit": 34022,
+              "success": true
+            },
+            {
+              "function": "lib::ll_mmio_addr",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3170,
+              "rlimit": 22023,
+              "success": true
+            },
+            {
+              "function": "lib::verified_kernel_budget_uncharge",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2734,
+              "rlimit": 11435,
+              "success": true
+            },
+            {
+              "function": "lib::FR_TXFF",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_EMPTY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SegmentModel::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 38,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_page_range_admitted",
+              "mode:": "exec",
+              "time": 5,
+              "time-micros": 5444,
+              "rlimit": 45876,
+              "success": true
+            },
+            {
+              "function": "lib::ll_gic_enable_bit",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1903,
+              "rlimit": 10163,
+              "success": true
+            },
+            {
+              "function": "lib::ll_segment_end",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6582,
+              "rlimit": 47808,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pte_table",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1900,
+              "rlimit": 8803,
+              "success": true
+            },
+            {
+              "function": "lib::ll_permission_executable",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pte_sh",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 104,
+              "rlimit": 164,
+              "success": true
+            },
+            {
+              "function": "lib::PROCESS_BLOCKED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::memory_layout_smoke",
+              "mode:": "proof",
+              "time": 3,
+              "time-micros": 3714,
+              "rlimit": 17764,
+              "success": true
+            },
+            {
+              "function": "lib::LCRH_WLEN_8",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_dt_timer_irq_index",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1864,
+              "rlimit": 8254,
+              "success": true
+            },
+            {
+              "function": "lib::CNTP_CTL_ENABLE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SEGMENT_CODE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_fdt_align4",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7278,
+              "rlimit": 51564,
+              "success": true
+            },
+            {
+              "function": "lib::serial_timer_interrupt_smp_smoke",
+              "mode:": "proof",
+              "time": 14,
+              "time-micros": 14615,
+              "rlimit": 31162,
+              "success": true
+            },
+            {
+              "function": "lib::TIMER_IRQ",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_page_bit_free",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1872,
+              "rlimit": 8848,
+              "success": true
+            },
+            {
+              "function": "lib::ProcessModel::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 33,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_timer_period",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 253,
+              "rlimit": 613,
+              "success": true
+            },
+            {
+              "function": "lib::ll_uart_has_byte",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 36,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PROCESS_RUNNING",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::find_segment_model",
+              "mode:": "exec",
+              "time": 13,
+              "time-micros": 13624,
+              "rlimit": 92565,
+              "success": true
+            },
+            {
+              "function": "lib::kernel_budget_reserve_blocks_the_reported_mmap_failure",
+              "mode:": "exec",
+              "time": 14,
+              "time-micros": 14849,
+              "rlimit": 163247,
+              "success": true
+            },
+            {
+              "function": "lib::PSCI_RET_ON_PENDING",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 169,
+              "rlimit": 192,
+              "success": true
+            },
+            {
+              "function": "lib::CR_UARTEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_RUNNING",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PERM_EXECUTE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SEGMENT_HEAP",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_align_up",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2004,
+              "rlimit": 11196,
+              "success": true
+            },
+            {
+              "function": "lib::ll_cpu_id_from_mpidr",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 43,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::QEMU_VIRT_UART_IRQ",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_timer_elapsed_ticks",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2311,
+              "rlimit": 10787,
+              "success": true
+            },
+            {
+              "function": "lib::ll_fdt_reg_tuple_offset",
+              "mode:": "exec",
+              "time": 21,
+              "time-micros": 21909,
+              "rlimit": 62941,
+              "success": true
+            },
+            {
+              "function": "lib::ll_dt_reg_valid",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3599,
+              "rlimit": 26127,
+              "success": true
+            },
+            {
+              "function": "lib::PT_ENTRIES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_PAGES_PER_PROCESS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::QEMU_VIRT_UART_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_segment_contains",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7015,
+              "rlimit": 65490,
+              "success": true
+            },
+            {
+              "function": "lib::ll_permission_writable",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 38,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_PROCESSES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 33,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::UART_CR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_BLOCKED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 36,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::QEMU_VIRT_UART_BASE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_display_mpidr",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 39,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_IDLE_ID",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 33,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_gic_reg_offset",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3312,
+              "rlimit": 28134,
+              "success": true
+            },
+            {
+              "function": "lib::ll_gic_set_byte_field",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 391,
+              "rlimit": 988,
+              "success": true
+            },
+            {
+              "function": "lib::CR_RXE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 34,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_gic_interrupt_id",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 45,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_dt_platform_index",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2711,
+              "rlimit": 9622,
+              "success": true
+            },
+            {
+              "function": "lib::verified_kernel_budget_mmap_metadata",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9762,
+              "rlimit": 30206,
+              "success": true
+            },
+            {
+              "function": "lib::ll_pte_set_flag",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1920,
+              "rlimit": 9871,
+              "success": true
+            },
+            {
+              "function": "lib::ll_thread_state_runnable",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 60,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::CR_TXE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::GICD_IPRIORITYR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 105,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::thread_context_smoke",
+              "mode:": "proof",
+              "time": 0,
+              "time-micros": 958,
+              "rlimit": 4471,
+              "success": true
+            },
+            {
+              "function": "lib::verified_timer_tick_is_new",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 44,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ll_timer_ctl",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 41,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::QEMU_VIRT_GICD_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
               "rlimit": 2,
               "success": true
             },
@@ -1774,207 +2158,31 @@ Verus
               "success": true
             },
             {
-              "function": "lib::ll_bitmap_mask",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 153,
-              "rlimit": 229,
-              "success": true
-            },
-            {
-              "function": "lib::CNTP_CTL_ENABLE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_EMPTY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::QEMU_VIRT_GICR_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_timer_period",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 279,
-              "rlimit": 613,
-              "success": true
-            },
-            {
-              "function": "lib::SegmentModel::clone",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 430,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_gic_byte_shift",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2468,
-              "rlimit": 14661,
-              "success": true
-            },
-            {
-              "function": "lib::ll_fdt_range_valid",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2446,
-              "rlimit": 16555,
-              "success": true
-            },
-            {
-              "function": "lib::PSCI_RET_SUCCESS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_hex_digit",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2117,
-              "rlimit": 11625,
-              "success": true
-            },
-            {
-              "function": "lib::ll_dt_platform_index",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2008,
-              "rlimit": 9622,
-              "success": true
-            },
-            {
-              "function": "lib::ll_permission_executable",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 31,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PSCI_RET_ON_PENDING",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 133,
-              "rlimit": 192,
-              "success": true
-            },
-            {
               "function": "lib::QEMU_VIRT_GICD_BASE",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 28,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::ll_segment_contains",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7528,
-              "rlimit": 65490,
+              "function": "lib::MAX_CPUS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::find_segment_model",
-              "mode:": "exec",
-              "time": 13,
-              "time-micros": 13820,
-              "rlimit": 92565,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pte_table",
+              "function": "lib::ll_timer_tick_count",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1819,
-              "rlimit": 8803,
+              "time-micros": 1873,
+              "rlimit": 9105,
               "success": true
             },
             {
-              "function": "lib::PERM_READ_WRITE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_ascii_printable",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_dt_timer_irq_index",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1674,
-              "rlimit": 8254,
-              "success": true
-            },
-            {
-              "function": "lib::kernel_budget_reserve_blocks_the_reported_mmap_failure",
-              "mode:": "exec",
-              "time": 14,
-              "time-micros": 14060,
-              "rlimit": 163247,
-              "success": true
-            },
-            {
-              "function": "lib::verified_page_range_admitted",
-              "mode:": "exec",
-              "time": 5,
-              "time-micros": 5644,
-              "rlimit": 45876,
-              "success": true
-            },
-            {
-              "function": "lib::QEMU_VIRT_UART_IRQ",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_fdt_align4",
-              "mode:": "exec",
-              "time": 6,
-              "time-micros": 6872,
-              "rlimit": 51564,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_BLOCKED",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::GICD_IPRIORITYR",
+              "function": "lib::THREAD_READY",
               "mode:": "spec",
               "time": 0,
               "time-micros": 27,
@@ -1982,266 +2190,58 @@ Verus
               "success": true
             },
             {
-              "function": "lib::ll_uart_lcrh",
+              "function": "lib::ll_checked_end",
               "mode:": "exec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_fdt_reg_tuple_bytes",
-              "mode:": "exec",
-              "time": 5,
-              "time-micros": 5159,
-              "rlimit": 37289,
-              "success": true
-            },
-            {
-              "function": "lib::ProcessModel::clone",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 32,
-              "rlimit": 2,
+              "time": 4,
+              "time-micros": 4068,
+              "rlimit": 24592,
               "success": true
             },
             {
               "function": "lib::ll_memory_reg",
               "mode:": "exec",
               "time": 3,
-              "time-micros": 3387,
+              "time-micros": 3244,
               "rlimit": 17914,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pte_attr_idx",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 41,
-              "rlimit": 164,
-              "success": true
-            },
-            {
-              "function": "lib::PERM_WRITE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_gic_reg_offset",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3360,
-              "rlimit": 28134,
               "success": true
             },
             {
               "function": "lib::ll_fdt_cells_to_bytes",
               "mode:": "exec",
               "time": 3,
-              "time-micros": 3205,
+              "time-micros": 3268,
               "rlimit": 17398,
-              "success": true
-            },
-            {
-              "function": "lib::PLATFORM_COUNT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SEGMENT_DATA",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
               "success": true
             },
             {
               "function": "lib::ll_dt_gic_irq",
               "mode:": "exec",
               "time": 4,
-              "time-micros": 4401,
+              "time-micros": 4714,
               "rlimit": 25522,
               "success": true
             },
             {
-              "function": "lib::GICD_ISENABLER",
+              "function": "lib::PERM_READ_EXECUTE",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 30,
+              "time-micros": 29,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::ll_pt_index",
+              "function": "lib::ll_heap_alloc",
               "mode:": "exec",
-              "time": 2,
-              "time-micros": 2406,
-              "rlimit": 10959,
+              "time": 26,
+              "time-micros": 26069,
+              "rlimit": 319829,
               "success": true
             },
             {
-              "function": "lib::ll_dt_reg_contains",
-              "mode:": "exec",
-              "time": 4,
-              "time-micros": 4032,
-              "rlimit": 34022,
-              "success": true
-            },
-            {
-              "function": "lib::ll_gic_set_byte_field",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 298,
-              "rlimit": 988,
-              "success": true
-            },
-            {
-              "function": "lib::verified_kernel_budget_admit_heap",
-              "mode:": "exec",
-              "time": 6,
-              "time-micros": 6390,
-              "rlimit": 69133,
-              "success": true
-            },
-            {
-              "function": "lib::PRIORITY_HIGH",
+              "function": "lib::DEFAULT_PLATFORM_INDEX",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::QEMU_VIRT_GICR_BASE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_page_bit_free",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1829,
-              "rlimit": 8848,
-              "success": true
-            },
-            {
-              "function": "lib::ll_cpu_id_from_mpidr",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 44,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_timer_elapsed_ticks",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2188,
-              "rlimit": 10787,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_READY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_display_mpidr",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 36,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PSCI_RET_INTERNAL_FAILURE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 91,
-              "rlimit": 188,
-              "success": true
-            },
-            {
-              "function": "lib::ll_page_to_vaddr",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3611,
-              "rlimit": 22873,
-              "success": true
-            },
-            {
-              "function": "lib::find_process_by_pid_model",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7378,
-              "rlimit": 46071,
-              "success": true
-            },
-            {
-              "function": "lib::ll_segment_end",
-              "mode:": "exec",
-              "time": 6,
-              "time-micros": 6399,
-              "rlimit": 47808,
-              "success": true
-            },
-            {
-              "function": "lib::ll_checked_end",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3753,
-              "rlimit": 24592,
-              "success": true
-            },
-            {
-              "function": "lib::ll_uart_tx_ready",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pfn_index",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3714,
-              "rlimit": 25577,
-              "success": true
-            },
-            {
-              "function": "lib::memory_layout_smoke",
-              "mode:": "proof",
-              "time": 3,
-              "time-micros": 3243,
-              "rlimit": 17764,
-              "success": true
-            },
-            {
-              "function": "lib::mmu_constants_smoke",
-              "mode:": "proof",
-              "time": 0,
-              "time-micros": 563,
-              "rlimit": 2529,
-              "success": true
-            },
-            {
-              "function": "lib::ll_pte_set_output_address",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 30,
+              "time-micros": 29,
               "rlimit": 2,
               "success": true
             }

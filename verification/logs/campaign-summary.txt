@@ -1,0 +1,18 @@
+===== campaign summary =====
+utc=2026-11-21T09:41:48Z
+git_head=652c136a8251c599b35131d619bfdee7d05fc8a2
+git_dirty=true
+The guest campaign ran against this commit. git_dirty was the tracked launcher bytecode cache, not a source edit.
+A later commit whose diff is only verification/logs/ publishes this summary.
+Full serial output was not committed. These are the completion lines from that boot.
+posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+SMROS_POSIX_EVENT {"schema":1,"seq":3202,"event":"suite_end","run_id":"ccf722ad030ed0f6a0f765a78ecf3c1e00f77ae2d735c4ff01677979fbdef3f2-262","manifest_sha256":"5d0cc5e81bdac1894215e21cf03e567d2fcbf44ce46e7758a5089b329bb68402","architecture":"aarch64","complete":true,"selected_count":1600,"completed_count":1600,"status_counts":{"pass":1600},"elapsed_ticks":128696}
+posixtest: completed
+SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
+Host test ut iteration=100: PASS Running_unittests_src/lib.rs_(agent/repos/SMROS/target/host-tests/x86_64-unknown-linux-gnu/debug/deps/smros_host_tests-ae31431a82469bcb)
+Host test it iteration=100: PASS Running_tests/integration_contracts.rs_(agent/repos/SMROS/target/host-tests/x86_64-unknown-linux-gnu/debug/deps/integration_contracts-d81c7d985e7c31c6)
+Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0
+Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
+Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1364/236/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 shm-mode=pass overall=PASS
+Hermes test-all result: PASS
