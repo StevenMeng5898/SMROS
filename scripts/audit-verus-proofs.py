@@ -119,31 +119,73 @@ def split_top(expr, op):
 
 
 def is_tautology(expr):
+    """Syntactic patterns only.
+
+    Catches true, x == x, x ==> x, x ==> true, x <= x, x >= x, and
+    x || !x in either order. A disjunction is tautological when any
+    disjunct is, and a conjunction when every conjunct is. This does
+    not decide general arithmetic or boolean equivalence.
+    """
     expr = re.sub(r"[\s,{}]+", " ", expr).strip()
     if expr in {"", "true"}:
         return True
     ors = split_top(expr, "||")
     if len(ors) > 1:
+        if len(ors) == 2 and complementary(ors[0], ors[1]):
+            return True
         return any(is_tautology(part) for part in ors)
     ands = split_top(expr, "&&")
     if len(ands) > 1:
         return all(is_tautology(part) for part in ands)
     compact = re.sub(r"\s+", "", expr)
-    return re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:==|==>)\1", compact) is not None
+    if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:==|==>|<=|>=)\1", compact):
+        return True
+    return re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)==>true", compact) is not None
 
 
-def nonempty_spec(header):
-    clauses = re.findall(
+def complementary(left, right):
+    a = re.sub(r"\s+", "", left)
+    b = re.sub(r"\s+", "", right)
+    return (a.startswith("!") and a[1:] == b) or (b.startswith("!") and b[1:] == a)
+
+
+def ensures_clauses(header):
+    return re.findall(
         r"\bensures\b(.*?)(?=\b(?:ensures|requires|decreases)\b|$)",
         header,
         re.S,
     )
+
+
+def nonempty_spec(header):
+    clauses = ensures_clauses(header)
     if not clauses:
         return False
     if all(is_tautology(clause) for clause in clauses):
         return False
     atoms = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", " ".join(clauses))
     return any(atom != "true" for atom in atoms)
+
+
+def constrains_result(header):
+    """True when ensures mentions the named result other than is_some/is_none/is_ok/is_err."""
+    named = re.search(r"->\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", header)
+    if not named:
+        return True
+    clauses = ensures_clauses(header)
+    if not clauses:
+        return False
+    name = named.group(1)
+    stripped = re.sub(
+        rf"\b{name}\s*\.\s*(?:is_some|is_none|is_ok|is_err)\s*\(\s*\)",
+        " ",
+        " ".join(clauses),
+    )
+    return re.search(rf"\b{name}\b", stripped) is not None
+
+
+def useful_spec(header):
+    return nonempty_spec(header) and constrains_result(header)
 
 
 def git(*args):
@@ -323,7 +365,7 @@ def main():
             qualified = f"lib::{name}"
             header = origin_headers.get(name, "")
             present = [owner for owner in owners if qualified in details_by_harness.get(owner, set())]
-            if not present or not nonempty_spec(header):
+            if not present or not useful_spec(header):
                 status |= fail(
                     f"已证明 function has no specified func-details entry in its harness: {rel} {qualified}"
                 )
@@ -333,6 +375,7 @@ def main():
         for macro in macros:
             needle = macro + "!"
             found = False
+            rejected = False
             for owner in owners:
                 _path, text, spans = harness_by_name[owner]
                 headers = function_headers(text)
@@ -349,14 +392,22 @@ def main():
                         continue
                     name = previous[-1].group(1)
                     qualified = f"lib::{name}"
-                    if qualified in details_by_harness.get(owner, set()) and nonempty_spec(headers.get(name, "")):
-                        found = True
-                        mode, ok = breakdown.get((owner, qualified), ("", None))
-                        evidence.append((owner, qualified, mode, ok, f"{rel}::{macro}"))
+                    header = headers.get(name, "")
+                    if qualified not in details_by_harness.get(owner, set()) or not nonempty_spec(header):
+                        continue
+                    if not constrains_result(header):
+                        status |= fail(
+                            f"已证明 spec does not constrain the result value: {rel} {qualified}"
+                        )
+                        rejected = True
                         break
-                if found:
+                    found = True
+                    mode, ok = breakdown.get((owner, qualified), ("", None))
+                    evidence.append((owner, qualified, mode, ok, f"{rel}::{macro}"))
                     break
-            if not found:
+                if found or rejected:
+                    break
+            if not found and not rejected:
                 status |= fail(
                     f"已证明 macro has no specified func-details function in its harness: {rel} {macro}"
                 )
@@ -398,9 +449,14 @@ def self_test():
         "fn checked_end() -> (out: bool)\n    ensures\n        out == out || armed,\n{",
         "fn checked_end() -> (out: bool)\n    ensures\n        x == x,\n{",
         "fn checked_end() -> (out: bool)\n    ensures\n        out ==> out,\n{",
+        "fn checked_end() -> (out: bool)\n    ensures\n        !out || out,\n{",
+        "fn checked_end() -> (out: bool)\n    ensures\n        out || !out,\n{",
+        "fn checked_end() -> (out: bool)\n    ensures\n        out ==> true,\n{",
+        "fn checked_end() -> (out: usize)\n    ensures\n        deadline <= deadline,\n{",
+        "fn checked_end() -> (out: Option<usize>)\n    ensures\n        out.is_some(),\n{",
     ]
     for header in tautologies:
-        if nonempty_spec(header):
+        if useful_spec(header):
             print("counterexample tautology was accepted", file=sys.stderr)
             failures += 1
         else:
@@ -413,7 +469,7 @@ def self_test():
     owners = ["verus-kernel-objects.log"]
     qualified = "lib::checked_end"
     present = [owner for owner in owners if qualified in {"verus-syscall.log": syscall_has, "verus-kernel-objects.log": kernel_objects_has}[owner]]
-    accepted = bool(present) and nonempty_spec(origin)
+    accepted = bool(present) and useful_spec(origin)
     if accepted:
         print("counterexample harness-collision was accepted", file=sys.stderr)
         failures += 1

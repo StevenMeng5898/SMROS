@@ -12,7 +12,7 @@ with a non-empty spec in `verification/logs/verus-*.log`.
 
 ## Labels
 
-- 已证明: every macro in the file is expanded inside a `verus!` function that appears in that harness's `func-details` and has a non-empty `requires` or `ensures`. A plain function in the same file is not covered by that label unless it too appears there. Raw JSON is `verification/logs/verus-*.log`. `make verus-coverage` checks this against the JSON; a coverage pass is a proof gate only for files labeled 已证明.
+- 已证明: every macro in the file is expanded inside a `verus!` function that appears in that harness's `func-details` and has an `ensures` that constrains the result value. `out.is_some()` alone does not. The tautology check is syntactic: `true`, `x == x`, `x ==> x`, `x ==> true`, `x <= x`, `x >= x`, and `x || !x` either way, including a disjunction that contains one of those or a conjunction made only of them. It does not decide general arithmetic or boolean equivalence, such as `x < x + 1` or `!(x && !x)`. A plain function in the same file is not covered by that label unless it too appears in func-details. Raw JSON is `verification/logs/verus-*.log`. `make verus-coverage` checks this against the JSON; a coverage pass is a proof gate only for files labeled 已证明.
 - 待证明: in scope, but the file itself is not fully verified. A shared model may already cover part of it.
 - 公理或可信计算基: assembly, exception entry, or a device register path that Verus does not compile.
 - 规范假设: a stated assumption of the specification rather than an implementation proof.
@@ -323,7 +323,7 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/user_level/drivers/driver_logic_shared.rs`
   - 已证明
-    Each macro expands inside a user_level function that is in func-details and has a non-empty spec. `smros_driver_block_capacity_bytes_body` and `smros_driver_block_range_valid_body` are specified by `driver_block_capacity_bytes_direct` and `driver_block_range_valid_direct`, whose postconditions restate the checked multiply and checked add, including the overflow results.
+    Each macro expands inside a user_level function that is in func-details and has a non-empty spec. `driver_mmio_slot_base_direct` has no overflow precondition. Its postcondition is `Some(base + slot * stride)` when that sum fits and `None` when the multiply or the add overflows. `smros_driver_block_capacity_bytes_body` and `smros_driver_block_range_valid_body` are specified by `driver_block_capacity_bytes_direct` and `driver_block_range_valid_direct`, whose postconditions restate the checked multiply and checked add, including the overflow results.
 - `src/user_level/drivers/linux.rs`
   - 待证明
 - `src/user_level/drivers/linux_logic.rs`
