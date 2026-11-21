@@ -1,22 +1,6 @@
-utc=2026-11-21T05:12:10Z
-git_head=783201c3ac537ea56d9defc2a478f8c104d7db9b
+utc=2026-11-21T10:50:46Z
+git_head=68be4babe598a9d8a6bbb4510a1b7dfe268d0b80
 git_dirty=true
-command=make skt
-make[1]: Entering directory '/agent/repos/SMROS'
-guest-cases: f1_seccomp.elf
-guest-cases: f2_landlock.elf
-guest-cases: f3_pkey.elf
-guest-cases: f4_iouring.elf
-guest-cases: f5_ptrace.elf
-guest-cases: g1_stopcont.elf
-guest-cases: g1b_stop.elf
-SMROS build jobs: 4 (cargo -j 4, codegen-units 4)
-Building SMROS kernel for aarch64-unknown-none...
-   Compiling smros v0.1.0 (/agent/repos/SMROS)
-    Finished `release` profile [optimized] target(s) in 17.79s
-Build complete: kernel8.img
-make[1]: Leaving directory '/agent/repos/SMROS'
-Booting SMROS smoke test for up to 180s...
+command=make skt.log
 SMROS QEMU smoke test passed: found 'smros:/>' and every required serial pattern.
-Log: target/smros-smoke-qemu.log
 EXIT:0
