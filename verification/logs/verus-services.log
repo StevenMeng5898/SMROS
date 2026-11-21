@@ -1,4 +1,27 @@
-===== utc 2026-11-20T11:06:14Z =====
+===== verification log =====
+utc=2026-11-21T05:06:50Z
+git_head=783201c3ac537ea56d9defc2a478f8c104d7db9b
+git_dirty=false
+git_status_before_log_write<<END
+END
+Status above was recorded before this log file was written.
+A later commit whose diff is only verification/logs/ publishes this run and does not change the sources it checked.
+===== source sha256 =====
+16618596d57f605edf1b3189502b833fde4d4146d7fb03d3655a32de0065c585  verification/services/src/lib.rs
+45b913c10ed3d5a18bc6841ca5dd2d6e4ba909c6a1b5674f210fd63cdc46a889  src/kernel_lowlevel/kernel_budget_logic_shared.rs
+3eb18eddfbb52b012864a3a0147fcc26f9c6d613dd29737d54bc740d0ef008dc  src/kernel_objects/campaign_watch_logic_shared.rs
+2b4af300325417e7f7610cd7c314ef98227815824af369c3180135232bc92adb  src/kernel_objects/fifo_logic_shared.rs
+b9cce0d93f8590e9573d0d01b190c3d987cb7885d4a2e1c93cb1fa6ee56856bc  src/kernel_objects/futex_logic_shared.rs
+80cf0297af8f7a6f696ff706ad894c61e649d9a77282958dd3015ec6ac63422b  src/kernel_objects/hypervisor_logic_shared.rs
+3233cdca827024b31c2a4ac85902e7f5ece86213e2cb9b1a2ddd940645a22cd8  src/kernel_objects/log_logic_shared.rs
+ae3ad0cda6a14038bab431cb62da6172e22fc6fb87e187c38990cd6c03b184f9  src/kernel_objects/port_logic_shared.rs
+671dac9c068d0acc80c44bb86fdf70a1e961ac823d676b3a978d6db318a5932e  src/kernel_objects/socket_logic_shared.rs
+9c2c9343ea312e4ee7d24d1cd020f1d7234294828bf0e93e8fa303aaba99f60e  src/main_logic_shared.rs
+06644572937739b61db5684b0fa98e2a4695dde8ce412302ea1e72e326f331ae  src/syscall/linux_riscv_syscall_context_logic_shared.rs
+979e4fc5b09094a5a16403b1c8f72371a999c9f0caacfe36d50d23e6bd2aa0ed  src/syscall/uaccess_logic_shared.rs
+c087382ff717d959261cc1d78531a28bd71ba9103eec3f32d027ae97c653bef8  src/user_level/drivers/driver_logic_shared.rs
+13fda35133b588ba6e7bfd2e0848fdcfd00256f9c1fa9002dbaae35f10dc3c00  src/user_level/drivers/linux_logic_shared.rs
+129c8fbaf9e6cf85389ed7de6863d59538480891686ccad46169e0a5108213cd  src/user_level/services/security_case_logic_shared.rs
 ===== toolchain =====
 VERUS_RELEASE_TAG=release/0.2026.04.19.6f7d4de
 VERUS_RELEASE_ID=0.2026.04.19.6f7d4de
@@ -16,215 +39,7 @@ Verus
 ===== output =====
 {
   "func-details": {
-    "lib::fxfs_dirent_capacity_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::is_some": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::TAR_MEMBER_NAME_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_command_item_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_agent_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_entry_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_test_passed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_test_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%13::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DOCKER_HTTP_ARCHIVE_PATH_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::GEMMA_CONTEXT_TOKENS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::host_share_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::strictly_cloned": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_pts_status": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::shell_ascii_input": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_name_byte_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QML_CLUSTER_QML_WIDTH": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_STATUS_PASS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_file_size_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::decimal_digit_value_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_ELF_PHDR_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::run_elf_table_words_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::vm_host_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DHCP_MIN_PAYLOAD": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::namespace_rights_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_name_len_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_IPC_MESSAGE_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_MANIFEST_MAX_TESTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_parse_i32_abs_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_test_logic_shared_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_dns_message_buffer_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_command_len_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::checked_mul_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%9::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%8::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ELF_LOAD_EINVAL": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::run_elf_table_bytes_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_ipc_header_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_FILESYSTEM_DESCRIBE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::qml_cluster_state_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LVGL_SCHED_TRACE_WIDTH": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::run_elf_table_bytes": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%0::and_then": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_delegate_allowed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_FXFS_MAX_NODES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_phdr_table_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DOCKER_PULL_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%8::checked_sub": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sectest_trap_code": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%6::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QML_CLUSTER_RPM_MAX": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DOCKER_MAX_CONTAINER_NAME_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::component_return_active_spec": {
+    "lib::hermes_skill_matches_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -232,499 +47,7 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "core::num::impl&%9::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%41::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::IPV4_MIN_HEADER_LEN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::run_elf_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_class_data_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::TCP_MIN_HEADER_PAIR": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_write_end_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_tar_member_name_shape": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_FXFS_MAX_DIRENTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QML_CLUSTER_SPEED_MAX_KPH": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_same_ipv4_subnet": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_rights_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_pull_body_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_simple_path_component_shape": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::TAR_BLOCK_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QML_CLUSTER_RENDER_HEIGHT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::qml_cluster_dimensions_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::compat_linux_cat_buffer_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::FnWithRequiresEnsures::requires": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CASE_TIMEOUT_NS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_command_class_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::component_capacity_available": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::checked_end_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RUN_ELF_STACK_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LISTED_CASE_COUNT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::GEMMA_PROMPT_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_parse_i32_abs_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_STATUS_UNTESTED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SECTEST_ALL_CASE_COUNT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::impl&%0::arrow_0": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%11::checked_sub": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "verus_builtin::impl&%7::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_resource_delta_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::FnWithRequiresEnsures::ensures": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_append_size_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::VM_HOST_MAX_RESPONSE_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::component_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::GEMMA_MAX_OUTPUT_TOKENS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LVGL_SCHED_TRACE_HEIGHT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::HERMES_REQUIRED_SKILLS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_shell_logic_shared_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::impl&%1::requires": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ETHERNET_HEADER_LEN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ETHERNET_MTU": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_same_ipv4_subnet_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_segment_bounds_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_report_passed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "alloc::boxed::impl&%15::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::qml_cluster_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_campaign_iterations_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_dns_message_buffer_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_http_archive_path_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_prompt_len_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::user_logic_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_ELF_TYPE_EXEC": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::user_shell_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_header_bounds_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::UDP_HEADER_LEN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_COMPONENT_MANAGER": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_seek_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_COMPONENTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::perfetto_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_rights_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERFETTO_POLICY_COMPARE_MAX_STEPS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_dirent_capacity_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_IPC_VERSION": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DOCKER_MAX_COMMAND_ITEM_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DOCKER_HTTP_ARCHIVE_REQUEST_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_write_end": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ascii_shell_input_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_PENDING_COMPONENT_LAUNCHES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::component_pending_capacity_available_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LINUX_CAT_PAYLOAD_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_report_passed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_ELF_TYPE_DYN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_segment_mapping_range": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::Clone::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_filter_matches_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::security_case_logic_shared_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_tcp_payload_len_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_seek_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_dhcp_frame_buffer_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LVGL_DEMO_HEIGHT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DOCKER_IMAGE_REFERENCE_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_replay_count_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::shell_ask_args_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_compat_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_image_reference_shape": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::user_logic_shared_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_node_capacity_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_type_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_delegate_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_node_capacity_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hermes_skill_matches_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_RIGHTS_MASK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_http_archive_path_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::user_checked_end": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_elf_page_down": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_link_count_after_unlink_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_RUNNER_LOAD_ELF": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::HOST_SHARE_MAX_FILE_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_name_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_COMPONENT_START": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::qml_cluster_dimensions_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_fxfs_link_count_after_link": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_clamp_tokens_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::html_ui_clamp_width_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_FILESYSTEM": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_sectest_case_timed_out": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SIMPLE_PATH_COMPONENT_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::qml_cluster_report_passed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_model_available": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QML_CLUSTER_RENDER_WIDTH": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ELF_LOAD_ENOMEM": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_name_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_pts_status_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERFETTO_TICK_US": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::component_pending_capacity_available": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_elf_admit_segment": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::security_case_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DEFAULT_LAUNCHER_PORT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_resource_delta": {
+    "core::num::impl&%11::checked_add": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -732,119 +55,11 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::SERVICES_FILE_COUNT": {
+    "lib::gemma_prompt_len_valid": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::hermes_campaign_iterations_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LVGL_DEMO_WIDTH": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_file_size_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_ELF_HEADER_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_test_passed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::QML_CLUSTER_QML_HEIGHT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_ipc_message_size_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%15::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DNS_MAX_MESSAGE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_STATUS_FAIL": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::compat_linux_cat_buffer_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_replay_count_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_load_logic_shared_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PERFETTO_POLICY_COMPARE_DEFAULT_STEPS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::is_none": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "verus_builtin::impl&%9::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_prompt_len_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_MANIFEST_MAX_STAGED_PATH_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_MANIFEST_MAX_TEST_ID_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::component_start_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_MANIFEST_MAX_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::qml_cluster_state_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::compat_apps_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%6::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PosixFilterKind::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%11::checked_mul": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_image_reference_shape_spec": {
+    "core::num::impl&%8::checked_sub": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -852,75 +67,23 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::elf_header_bounds_valid": {
+    "lib::hermes_skill_matches": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::HERMES_REQUIRED_TOOLS": {
+    "lib::DOCKER_MAX_CONTAINER_NAME_BYTES": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::namespace_rights_valid_spec": {
+    "lib::hermes_command_class_allowed_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::RUN_ELF_AUXV_ENTRIES": {
+    "lib::docker_image_reference_shape": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::mod_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_elf_page_up": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::posix_filter_matches": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_prompt_byte_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_command_len_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%17::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_model_available_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::impl&%1::ensures": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_name_byte_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_clamp_tokens": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_STATUS_UNRESOLVED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_command_item_valid_spec": {
+    "lib::DHCP_MIN_PAYLOAD": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -928,151 +91,15 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::USER_SVC_IPC_MAGIC": {
+    "core::clone::impls::impl&%9::clone": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::DOCKER_MAX_COMMAND_ITEMS": {
+    "core::option::impl&%6::clone": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::PERFETTO_NS_PER_US": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::lvgl_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::elf_magic_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::services_folder_all_files_have_verification_slices": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_dhcp_frame_buffer_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_prompt_byte_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%11::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%31::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::html_ui_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::GEMMA_DEFAULT_OUTPUT_TOKENS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_MAX_NAME_LEN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::num::usize_specs_tmp::checked_add%returns_clause_autospec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_sectest_address_in_window": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_append_size": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::num::usize_specs_tmp::checked_mul%returns_clause_autospec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::checked_sub": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_SVC_RUNNER": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_FXFS_MAX_FILE_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::component_capacity_available_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_protocol_allowed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LINUX_CAT_BUFFER_BYTES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::POSIX_STATUS_UNSUPPORTED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::run_elf_table_words": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_protocol_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%27::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::gemma_rs_proof_slice": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_sectest_trap_verdict": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_simple_path_component_shape_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::docker_tar_member_name_shape_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_ELF_MAX_PHDRS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::USER_ELF_MACHINE_AARCH64": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::net_tcp_payload_len_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::svc_ipc_header_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::spec_unwrap": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fxfs_link_count_after_link_spec": {
+    "core::option::impl&%0::and_then": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1080,19 +107,355 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::hermes_skill_matches": {
+    "lib::fxfs_node_capacity_valid_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::svc_ipc_message_size_valid": {
+    "lib::elf_segment_mapping_range": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::qml_cluster_report_passed": {
+    "alloc::boxed::impl&%15::clone": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::VM_HOST_MAX_REQUEST_BYTES": {
+    "lib::posix_resource_delta": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::UDP_HEADER_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_IPC_VERSION": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_MAX_PHDRS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_PHDR_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_mul_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ascii_shell_input_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_dirent_capacity_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_clamp_tokens_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_sectest_trap_verdict": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_phdr_table_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::GEMMA_PROMPT_MAX_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_link_count_after_link_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_PENDING_COMPONENT_LAUNCHES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_header_bounds_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_http_archive_path_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_delegate_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::qml_cluster_dimensions_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_ipc_message_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::compat_linux_cat_buffer_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_image_reference_shape_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_IPC_MAGIC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_dhcp_frame_buffer_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_header_bounds_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QML_CLUSTER_QML_WIDTH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DOCKER_MAX_COMMAND_ITEM_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_sectest_address_in_window": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::GEMMA_CONTEXT_TOKENS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::POSIX_STATUS_UNTESTED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_none": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ETHERNET_HEADER_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_delegate_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SIMPLE_PATH_COMPONENT_MAX_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::posix_resource_delta_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_name_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_TYPE_EXEC": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_agent_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::POSIX_STATUS_UNRESOLVED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::IPV4_MIN_HEADER_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%8::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%17::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DOCKER_HTTP_ARCHIVE_PATH_MAX_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_write_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DOCKER_HTTP_ARCHIVE_REQUEST_MAX_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_file_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_parse_i32_abs_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_seek_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%13::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_TYPE_DYN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_segment_bounds_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_test_passed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QML_CLUSTER_RENDER_HEIGHT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_pending_capacity_available": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::strictly_cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_prompt_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_MACHINE_AARCH64": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_shell_logic_shared_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_entry_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_some": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_dns_message_buffer_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_command_item_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_ELF_HEADER_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PosixFilterKind::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::posix_filter_matches_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_machine_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ETHERNET_MTU": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::impl&%1::requires": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QML_CLUSTER_QML_HEIGHT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DOCKER_IMAGE_REFERENCE_MAX_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_campaign_iterations_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::POSIX_STATUS_PASS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_RUNNER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_same_ipv4_subnet": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DNS_MAX_MESSAGE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::posix_pts_status_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_prompt_byte_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::spec_unwrap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::decimal_digit_value_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_sub": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::FnWithRequiresEnsures::requires": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1100,11 +463,531 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
+    "lib::qml_cluster_report_passed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DOCKER_MAX_COMMAND_ITEMS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_logic_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
     "vstd::pervasive::cloned": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::elf_machine_valid_spec": {
+    "core::clone::Clone::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::shell_ascii_input": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_name_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::HERMES_REQUIRED_SKILLS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DOCKER_PULL_MAX_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CAT_BUFFER_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_clamp_tokens": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%27::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_name_byte_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_pull_body_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_tcp_payload_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::run_elf_table_words": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_link_count_after_unlink_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_elf_page_down": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::run_elf_table_bytes_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::compat_linux_cat_buffer_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::GEMMA_MAX_OUTPUT_TOKENS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::qml_cluster_dimensions_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_test_passed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_same_ipv4_subnet_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QML_CLUSTER_RENDER_WIDTH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_compat_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_simple_path_component_shape": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_FXFS_MAX_FILE_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_ipc_header_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_name_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_http_archive_path_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::run_elf_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::namespace_rights_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_shell_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::qml_cluster_report_passed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_checked_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_dns_message_buffer_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::num::usize_specs_tmp::checked_mul%returns_clause_autospec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_capacity_available": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_ipc_header_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_sub": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_class_data_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QML_CLUSTER_SPEED_MAX_KPH": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_campaign_iterations_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_return_active_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::run_elf_table_bytes": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_report_passed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::POSIX_STATUS_UNSUPPORTED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_magic_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_rights_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::compat_apps_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::GEMMA_DEFAULT_OUTPUT_TOKENS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_tar_member_name_shape_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_fxfs_link_count_after_link": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_tar_member_name_shape": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RUN_ELF_STACK_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::user_logic_shared_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_model_available_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_elf_page_up": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_FILESYSTEM_DESCRIBE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_start_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_tcp_payload_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_ipc_message_size_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::qml_cluster_state_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RUN_ELF_AUXV_ENTRIES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_type_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::namespace_rights_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_COMPONENT_MANAGER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_append_size": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_IPC_MESSAGE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_RUNNER_LOAD_ELF": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_RIGHTS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_name_byte_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%41::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_model_available": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::qml_cluster_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%7::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_dirent_capacity_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::gemma_prompt_byte_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::QML_CLUSTER_RPM_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::FnWithRequiresEnsures::ensures": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_protocol_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::POSIX_STATUS_FAIL": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::run_elf_table_words_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::TAR_MEMBER_NAME_MAX_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_node_capacity_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_pending_capacity_available_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_rights_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_protocol_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_sectest_case_timed_out": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_seek_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%31::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::net_dhcp_frame_buffer_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_replay_count_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_command_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::svc_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_replay_count_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::qml_cluster_state_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::posix_test_logic_shared_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::TCP_MIN_HEADER_PAIR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_FXFS_MAX_DIRENTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LINUX_CAT_PAYLOAD_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_command_item_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_elf_admit_segment": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_write_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::shell_ask_args_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::impl&%0::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_FILESYSTEM": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::HERMES_REQUIRED_TOOLS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_file_size_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::TAR_BLOCK_BYTES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_FXFS_MAX_NODES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::posix_filter_matches": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fxfs_append_size_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::component_capacity_available_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_parse_i32_abs_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::num::usize_specs_tmp::checked_add%returns_clause_autospec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_COMPONENTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::posix_pts_status": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_MAX_NAME_LEN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hermes_report_passed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::USER_SVC_COMPONENT_START": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::elf_rs_proof_slice": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_command_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::docker_simple_path_component_shape_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::impl&%1::ensures": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     }
@@ -1113,7 +996,7 @@ Verus
     "encountered-error": false,
     "encountered-vir-error": false,
     "success": true,
-    "verified": 176,
+    "verified": 143,
     "errors": 0,
     "is-verifying-entire-crate": true
   },
@@ -1123,62 +1006,158 @@ Verus
       "version": "0.2026.04.19.6f7d4de"
     },
     "num-threads": 1,
-    "total": 1164,
-    "estimated-cpu-time": 1164,
+    "total": 1088,
+    "estimated-cpu-time": 1088,
     "rust": {
-      "total": 316,
-      "init-and-types": 86,
-      "trait-conflicts": 25,
-      "compile": 203
+      "total": 312,
+      "init-and-types": 79,
+      "trait-conflicts": 27,
+      "compile": 205
     },
     "verification": {
-      "total": 807,
+      "total": 739,
       "vir": {
-        "total": 258,
+        "total": 267,
         "hir": 67,
-        "import": 119,
-        "rust-to-vir": 28
+        "import": 120,
+        "rust-to-vir": 32
       }
     },
-    "total-verify": 527,
+    "total-verify": 452,
     "total-verify-module-times": [
       {
         "module": "",
-        "time": 527
+        "time": 452
       }
     ],
     "air": {
-      "total": 249,
+      "total": 225,
       "module-times": [
         {
           "module": "",
-          "time": 249
+          "time": 225
         }
       ]
     },
     "smt": {
-      "total": 214,
-      "smt-init": 8,
-      "rlimit-init": 7710,
+      "total": 165,
+      "smt-init": 7,
+      "rlimit-init": 7030,
       "smt-init-module-times": [
         {
           "module": "",
-          "time": 8,
-          "time-micros": 8373,
-          "rlimit": 7710
+          "time": 7,
+          "time-micros": 7486,
+          "rlimit": 7030
         }
       ],
-      "smt-run": 206,
-      "rlimit-run": 1380125,
+      "smt-run": 158,
+      "rlimit-run": 993323,
       "smt-run-module-times": [
         {
           "module": "",
-          "time": 206,
-          "time-micros": 206307,
-          "rlimit": 1380125,
+          "time": 158,
+          "time-micros": 158452,
+          "rlimit": 993323,
           "function-breakdown": [
             {
-              "function": "lib::PosixFilterKind::clone",
+              "function": "lib::docker_name_len_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1663,
+              "rlimit": 7896,
+              "success": true
+            },
+            {
+              "function": "lib::hermes_delegate_allowed",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1392,
+              "rlimit": 9230,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_FILESYSTEM_DESCRIBE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_fxfs_link_count_after_unlink",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2238,
+              "rlimit": 11445,
+              "success": true
+            },
+            {
+              "function": "lib::docker_name_byte_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1486,
+              "rlimit": 8346,
+              "success": true
+            },
+            {
+              "function": "lib::docker_http_archive_path_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1521,
+              "rlimit": 7901,
+              "success": true
+            },
+            {
+              "function": "lib::docker_image_reference_shape",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1612,
+              "rlimit": 8129,
+              "success": true
+            },
+            {
+              "function": "lib::QML_CLUSTER_SPEED_MAX_KPH",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_fxfs_link_count_after_link",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2338,
+              "rlimit": 12043,
+              "success": true
+            },
+            {
+              "function": "lib::component_capacity_available",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1425,
+              "rlimit": 8000,
+              "success": true
+            },
+            {
+              "function": "lib::posix_test_logic_shared_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1780,
+              "rlimit": 10880,
+              "success": true
+            },
+            {
+              "function": "lib::verified_sectest_case_timed_out",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1986,
+              "rlimit": 10297,
+              "success": true
+            },
+            {
+              "function": "lib::svc_protocol_allowed",
               "mode:": "exec",
               "time": 0,
               "time-micros": 36,
@@ -1186,195 +1165,27 @@ Verus
               "success": true
             },
             {
-              "function": "lib::docker_pull_body_valid",
+              "function": "lib::fxfs_file_size_valid",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1561,
-              "rlimit": 9796,
+              "time-micros": 1321,
+              "rlimit": 7931,
               "success": true
             },
             {
-              "function": "lib::POSIX_STATUS_UNTESTED",
+              "function": "lib::USER_ELF_PHDR_SIZE",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 26,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::SERVICES_FILE_COUNT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 346,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SIMPLE_PATH_COMPONENT_MAX_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::svc_rights_valid",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 45,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::gemma_prompt_byte_valid",
+              "function": "lib::fxfs_replay_count_valid",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1830,
-              "rlimit": 9717,
-              "success": true
-            },
-            {
-              "function": "lib::net_dns_message_buffer_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1772,
-              "rlimit": 11662,
-              "success": true
-            },
-            {
-              "function": "lib::docker_compat_rs_proof_slice",
-              "mode:": "proof",
-              "time": 3,
-              "time-micros": 3583,
-              "rlimit": 20263,
-              "success": true
-            },
-            {
-              "function": "lib::docker_simple_path_component_shape",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1847,
-              "rlimit": 9913,
-              "success": true
-            },
-            {
-              "function": "lib::perfetto_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1449,
-              "rlimit": 8467,
-              "success": true
-            },
-            {
-              "function": "lib::posix_test_logic_shared_rs_proof_slice",
-              "mode:": "proof",
-              "time": 2,
-              "time-micros": 2472,
-              "rlimit": 18135,
-              "success": true
-            },
-            {
-              "function": "lib::gemma_model_available",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1603,
-              "rlimit": 9527,
-              "success": true
-            },
-            {
-              "function": "lib::IPV4_MIN_HEADER_LEN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 23,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::user_logic_shared_rs_proof_slice",
-              "mode:": "proof",
-              "time": 4,
-              "time-micros": 4108,
-              "rlimit": 37611,
-              "success": true
-            },
-            {
-              "function": "lib::qml_cluster_report_passed",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1709,
-              "rlimit": 9538,
-              "success": true
-            },
-            {
-              "function": "lib::TAR_BLOCK_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::posix_test_rs_proof_slice",
-              "mode:": "proof",
-              "time": 2,
-              "time-micros": 2170,
-              "rlimit": 14953,
-              "success": true
-            },
-            {
-              "function": "lib::docker_http_archive_path_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1735,
-              "rlimit": 9697,
-              "success": true
-            },
-            {
-              "function": "lib::docker_parse_i32_abs_valid",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2749,
-              "rlimit": 15570,
-              "success": true
-            },
-            {
-              "function": "lib::DOCKER_PULL_MAX_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 570,
-              "rlimit": 3312,
-              "success": true
-            },
-            {
-              "function": "lib::PERFETTO_TICK_US",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 32,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::VM_HOST_MAX_RESPONSE_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::svc_ipc_header_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1878,
-              "rlimit": 9666,
-              "success": true
-            },
-            {
-              "function": "lib::net_dhcp_frame_buffer_valid",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2831,
-              "rlimit": 17698,
+              "time-micros": 1973,
+              "rlimit": 7923,
               "success": true
             },
             {
@@ -1386,514 +1197,18 @@ Verus
               "success": true
             },
             {
-              "function": "lib::security_case_logic_shared_rs_proof_slice",
-              "mode:": "proof",
-              "time": 2,
-              "time-micros": 2059,
-              "rlimit": 10109,
-              "success": true
-            },
-            {
-              "function": "lib::user_checked_end",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3970,
-              "rlimit": 32196,
-              "success": true
-            },
-            {
-              "function": "lib::USER_FXFS_MAX_FILE_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 800,
-              "rlimit": 2326,
-              "success": true
-            },
-            {
-              "function": "lib::POSIX_STATUS_UNRESOLVED",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 33,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::QML_CLUSTER_SPEED_MAX_KPH",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::GEMMA_PROMPT_MAX_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::posix_filter_matches",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2176,
-              "rlimit": 11373,
-              "success": true
-            },
-            {
-              "function": "lib::UDP_HEADER_LEN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::USER_ELF_MAX_PHDRS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::fxfs_seek_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1864,
-              "rlimit": 11755,
-              "success": true
-            },
-            {
-              "function": "lib::hermes_skill_matches",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1699,
-              "rlimit": 10056,
-              "success": true
-            },
-            {
-              "function": "lib::ELF_LOAD_ENOMEM",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 47,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::services_folder_all_files_have_verification_slices",
-              "mode:": "proof",
-              "time": 0,
-              "time-micros": 115,
-              "rlimit": 141,
-              "success": true
-            },
-            {
-              "function": "lib::QML_CLUSTER_QML_WIDTH",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::docker_name_len_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1620,
-              "rlimit": 9694,
-              "success": true
-            },
-            {
-              "function": "lib::docker_command_item_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1972,
-              "rlimit": 9970,
-              "success": true
-            },
-            {
-              "function": "lib::run_elf_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1505,
-              "rlimit": 8814,
-              "success": true
-            },
-            {
-              "function": "lib::hermes_agent_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1317,
-              "rlimit": 7137,
-              "success": true
-            },
-            {
-              "function": "lib::HERMES_REQUIRED_SKILLS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::hermes_shell_logic_shared_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1126,
-              "rlimit": 6133,
-              "success": true
-            },
-            {
-              "function": "lib::USER_ELF_TYPE_DYN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DOCKER_HTTP_ARCHIVE_PATH_MAX_BYTES",
+              "function": "lib::DHCP_MIN_PAYLOAD",
               "mode:": "spec",
               "time": 0,
               "time-micros": 28,
               "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::fxfs_rs_proof_slice",
-              "mode:": "proof",
-              "time": 5,
-              "time-micros": 5798,
-              "rlimit": 39293,
-              "success": true
-            },
-            {
-              "function": "lib::ETHERNET_HEADER_LEN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::USER_SVC_IPC_MESSAGE_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::USER_ELF_PHDR_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::hermes_delegate_allowed",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1755,
-              "rlimit": 11897,
-              "success": true
-            },
-            {
-              "function": "lib::fxfs_file_size_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1621,
-              "rlimit": 9894,
-              "success": true
-            },
-            {
-              "function": "lib::elf_phdr_table_valid",
-              "mode:": "exec",
-              "time": 6,
-              "time-micros": 6937,
-              "rlimit": 43068,
-              "success": true
-            },
-            {
-              "function": "lib::docker_image_reference_shape",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1592,
-              "rlimit": 9927,
-              "success": true
-            },
-            {
-              "function": "lib::gemma_rs_proof_slice",
-              "mode:": "proof",
-              "time": 2,
-              "time-micros": 2550,
-              "rlimit": 14508,
-              "success": true
-            },
-            {
-              "function": "lib::DOCKER_IMAGE_REFERENCE_MAX_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 23,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ELF_LOAD_EINVAL",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 38,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::compat_apps_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1275,
-              "rlimit": 7129,
-              "success": true
-            },
-            {
-              "function": "lib::net_rs_proof_slice",
-              "mode:": "proof",
-              "time": 2,
-              "time-micros": 2263,
-              "rlimit": 15643,
-              "success": true
-            },
-            {
-              "function": "lib::elf_load_logic_shared_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1335,
-              "rlimit": 7883,
-              "success": true
-            },
-            {
-              "function": "lib::verified_sectest_address_in_window",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2580,
-              "rlimit": 16310,
-              "success": true
-            },
-            {
-              "function": "lib::hermes_report_passed",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1661,
-              "rlimit": 9869,
-              "success": true
-            },
-            {
-              "function": "lib::net_tcp_payload_len_valid",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2687,
-              "rlimit": 28474,
-              "success": true
-            },
-            {
-              "function": "lib::GEMMA_MAX_OUTPUT_TOKENS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::POSIX_MANIFEST_MAX_TEST_ID_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::namespace_rights_valid",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 47,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::USER_SVC_COMPONENT_START",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::security_case_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1817,
-              "rlimit": 12296,
-              "success": true
-            },
-            {
-              "function": "lib::host_share_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1996,
-              "rlimit": 13575,
-              "success": true
-            },
-            {
-              "function": "lib::POSIX_MANIFEST_MAX_STAGED_PATH_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 27,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::POSIX_STATUS_FAIL",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_sectest_trap_verdict",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1781,
-              "rlimit": 9799,
-              "success": true
-            },
-            {
-              "function": "lib::USER_SVC_RUNNER_LOAD_ELF",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::QML_CLUSTER_RPM_MAX",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::TCP_MIN_HEADER_PAIR",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::LVGL_DEMO_HEIGHT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::component_pending_capacity_available",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1666,
-              "rlimit": 9866,
-              "success": true
-            },
-            {
-              "function": "lib::fxfs_node_capacity_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1910,
-              "rlimit": 9783,
-              "success": true
-            },
-            {
-              "function": "lib::run_elf_table_bytes",
-              "mode:": "exec",
-              "time": 4,
-              "time-micros": 4267,
-              "rlimit": 26580,
-              "success": true
-            },
-            {
-              "function": "lib::gemma_clamp_tokens",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2090,
-              "rlimit": 11778,
-              "success": true
-            },
-            {
-              "function": "lib::elf_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1417,
-              "rlimit": 9829,
-              "success": true
-            },
-            {
-              "function": "lib::USER_SVC_IPC_VERSION",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::HOST_SHARE_MAX_FILE_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 582,
-              "rlimit": 3499,
-              "success": true
-            },
-            {
-              "function": "lib::LISTED_CASE_COUNT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 27,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PERFETTO_POLICY_COMPARE_MAX_STEPS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 27,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::CASE_TIMEOUT_NS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::fxfs_append_size",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3813,
-              "rlimit": 30146,
               "success": true
             },
             {
               "function": "lib::USER_SVC_RUNNER",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 25,
               "rlimit": 2,
               "success": true
             },
@@ -1901,191 +1216,159 @@ Verus
               "function": "lib::run_elf_table_words",
               "mode:": "exec",
               "time": 3,
-              "time-micros": 3895,
-              "rlimit": 36747,
+              "time-micros": 3428,
+              "rlimit": 31684,
               "success": true
             },
             {
-              "function": "lib::fxfs_replay_count_valid",
+              "function": "lib::hermes_report_passed",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1611,
-              "rlimit": 9718,
+              "time-micros": 1383,
+              "rlimit": 8027,
               "success": true
             },
             {
-              "function": "lib::svc_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1359,
-              "rlimit": 7539,
-              "success": true
-            },
-            {
-              "function": "lib::qml_cluster_rs_proof_slice",
-              "mode:": "proof",
-              "time": 2,
-              "time-micros": 2453,
-              "rlimit": 12440,
-              "success": true
-            },
-            {
-              "function": "lib::html_ui_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1598,
-              "rlimit": 10771,
-              "success": true
-            },
-            {
-              "function": "lib::verified_sectest_case_timed_out",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1888,
-              "rlimit": 12740,
-              "success": true
-            },
-            {
-              "function": "lib::svc_ipc_message_size_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1558,
-              "rlimit": 9412,
-              "success": true
-            },
-            {
-              "function": "lib::POSIX_MANIFEST_MAX_BYTES",
-              "mode:": "spec",
-              "time": 2,
-              "time-micros": 2333,
-              "rlimit": 12564,
-              "success": true
-            },
-            {
-              "function": "lib::RUN_ELF_AUXV_ENTRIES",
+              "function": "lib::UDP_HEADER_LEN",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 23,
+              "time-micros": 28,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::user_shell_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1721,
-              "rlimit": 9702,
-              "success": true
-            },
-            {
-              "function": "lib::docker_tar_member_name_shape",
+              "function": "lib::verified_sectest_address_in_window",
               "mode:": "exec",
               "time": 2,
-              "time-micros": 2080,
-              "rlimit": 16029,
+              "time-micros": 2538,
+              "rlimit": 12849,
               "success": true
             },
             {
-              "function": "lib::GEMMA_CONTEXT_TOKENS",
+              "function": "lib::verified_elf_admit_segment",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6544,
+              "rlimit": 37146,
+              "success": true
+            },
+            {
+              "function": "lib::posix_filter_matches",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1527,
+              "rlimit": 8715,
+              "success": true
+            },
+            {
+              "function": "lib::elf_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1405,
+              "rlimit": 9037,
+              "success": true
+            },
+            {
+              "function": "lib::ETHERNET_MTU",
               "mode:": "spec",
               "time": 0,
               "time-micros": 24,
               "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::USER_ELF_HEADER_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 31,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::QML_CLUSTER_RENDER_WIDTH",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::HERMES_REQUIRED_TOOLS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_COMPONENTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_PENDING_COMPONENT_LAUNCHES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 23,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::fxfs_dirent_capacity_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1640,
-              "rlimit": 9783,
-              "success": true
-            },
-            {
-              "function": "lib::fxfs_write_end",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3772,
-              "rlimit": 32546,
-              "success": true
-            },
-            {
-              "function": "lib::posix_pts_status",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2112,
-              "rlimit": 11089,
               "success": true
             },
             {
               "function": "lib::elf_header_bounds_valid",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1593,
-              "rlimit": 9704,
+              "time-micros": 1361,
+              "rlimit": 7908,
+              "success": true
+            },
+            {
+              "function": "lib::net_tcp_payload_len_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2334,
+              "rlimit": 22297,
+              "success": true
+            },
+            {
+              "function": "lib::GEMMA_PROMPT_MAX_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::hermes_shell_logic_shared_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1124,
+              "rlimit": 6116,
+              "success": true
+            },
+            {
+              "function": "lib::shell_ascii_input",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 44,
+              "rlimit": 2,
               "success": true
             },
             {
               "function": "lib::docker_command_len_valid",
               "mode:": "exec",
-              "time": 2,
-              "time-micros": 2084,
-              "rlimit": 15728,
+              "time": 1,
+              "time-micros": 1443,
+              "rlimit": 9032,
               "success": true
             },
             {
-              "function": "lib::verified_elf_page_up",
+              "function": "lib::docker_command_item_valid",
               "mode:": "exec",
-              "time": 3,
-              "time-micros": 3575,
-              "rlimit": 18241,
+              "time": 1,
+              "time-micros": 1422,
+              "rlimit": 8098,
               "success": true
             },
             {
-              "function": "lib::USER_FXFS_MAX_NODES",
+              "function": "lib::docker_pull_body_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1337,
+              "rlimit": 7921,
+              "success": true
+            },
+            {
+              "function": "lib::run_elf_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1472,
+              "rlimit": 8356,
+              "success": true
+            },
+            {
+              "function": "lib::qml_cluster_report_passed",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1274,
+              "rlimit": 7696,
+              "success": true
+            },
+            {
+              "function": "lib::QML_CLUSTER_QML_WIDTH",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 26,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PosixFilterKind::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 64,
               "rlimit": 2,
               "success": true
             },
@@ -2098,31 +1381,159 @@ Verus
               "success": true
             },
             {
-              "function": "lib::posix_resource_delta",
+              "function": "lib::namespace_rights_valid",
               "mode:": "exec",
-              "time": 2,
-              "time-micros": 2902,
-              "rlimit": 41060,
+              "time": 0,
+              "time-micros": 45,
+              "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::verified_elf_admit_segment",
+              "function": "lib::gemma_prompt_len_valid",
               "mode:": "exec",
-              "time": 7,
-              "time-micros": 7471,
-              "rlimit": 40791,
+              "time": 1,
+              "time-micros": 1756,
+              "rlimit": 9149,
               "success": true
             },
             {
-              "function": "lib::elf_segment_bounds_valid",
+              "function": "lib::svc_ipc_message_size_valid",
               "mode:": "exec",
+              "time": 1,
+              "time-micros": 1301,
+              "rlimit": 7620,
+              "success": true
+            },
+            {
+              "function": "lib::QML_CLUSTER_QML_HEIGHT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::docker_compat_rs_proof_slice",
+              "mode:": "proof",
               "time": 3,
-              "time-micros": 3593,
-              "rlimit": 24106,
+              "time-micros": 3004,
+              "rlimit": 15633,
               "success": true
             },
             {
-              "function": "lib::DHCP_MIN_PAYLOAD",
+              "function": "lib::shell_ask_args_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1400,
+              "rlimit": 8934,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_MAX_PHDRS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::POSIX_STATUS_PASS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::QML_CLUSTER_RPM_MAX",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fxfs_node_capacity_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1495,
+              "rlimit": 7932,
+              "success": true
+            },
+            {
+              "function": "lib::component_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1353,
+              "rlimit": 7493,
+              "success": true
+            },
+            {
+              "function": "lib::USER_FXFS_MAX_DIRENTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_sectest_trap_verdict",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1655,
+              "rlimit": 7875,
+              "success": true
+            },
+            {
+              "function": "lib::qml_cluster_state_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1436,
+              "rlimit": 8351,
+              "success": true
+            },
+            {
+              "function": "lib::GEMMA_MAX_OUTPUT_TOKENS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fxfs_dirent_capacity_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1320,
+              "rlimit": 7932,
+              "success": true
+            },
+            {
+              "function": "lib::compat_apps_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1282,
+              "rlimit": 7087,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_TYPE_EXEC",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DOCKER_HTTP_ARCHIVE_PATH_MAX_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DOCKER_MAX_COMMAND_ITEM_BYTES",
               "mode:": "spec",
               "time": 0,
               "time-micros": 24,
@@ -2138,39 +1549,71 @@ Verus
               "success": true
             },
             {
+              "function": "lib::user_logic_shared_rs_proof_slice",
+              "mode:": "proof",
+              "time": 3,
+              "time-micros": 3409,
+              "rlimit": 29492,
+              "success": true
+            },
+            {
+              "function": "lib::IPV4_MIN_HEADER_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::elf_segment_bounds_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2881,
+              "rlimit": 16643,
+              "success": true
+            },
+            {
+              "function": "lib::component_pending_capacity_available",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1554,
+              "rlimit": 8004,
+              "success": true
+            },
+            {
+              "function": "lib::svc_rights_valid",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 44,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::verified_elf_page_up",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2878,
+              "rlimit": 14703,
+              "success": true
+            },
+            {
+              "function": "lib::gemma_model_available",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1271,
+              "rlimit": 7651,
+              "success": true
+            },
+            {
               "function": "lib::USER_NAMESPACE_RIGHTS_MASK",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 51,
+              "time-micros": 561,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::DNS_MAX_MESSAGE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::USER_SVC_FILESYSTEM_DESCRIBE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::user_logic_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1628,
-              "rlimit": 9862,
-              "success": true
-            },
-            {
-              "function": "lib::USER_SVC_RIGHTS_MASK",
+              "function": "lib::POSIX_STATUS_UNRESOLVED",
               "mode:": "spec",
               "time": 0,
               "time-micros": 25,
@@ -2178,107 +1621,67 @@ Verus
               "success": true
             },
             {
-              "function": "lib::LINUX_CAT_BUFFER_BYTES",
+              "function": "lib::USER_ELF_TYPE_DYN",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 25,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::LVGL_SCHED_TRACE_WIDTH",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::component_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1576,
-              "rlimit": 7497,
-              "success": true
-            },
-            {
-              "function": "lib::lvgl_rs_proof_slice",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1431,
-              "rlimit": 8230,
-              "success": true
-            },
-            {
-              "function": "lib::USER_FXFS_MAX_DIRENTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DOCKER_MAX_COMMAND_ITEMS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_fxfs_link_count_after_unlink",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2581,
-              "rlimit": 17548,
-              "success": true
-            },
-            {
-              "function": "lib::gemma_test_passed",
+              "function": "lib::svc_name_valid",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1873,
-              "rlimit": 9595,
+              "time-micros": 1685,
+              "rlimit": 7994,
               "success": true
             },
             {
               "function": "lib::net_same_ipv4_subnet",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1661,
-              "rlimit": 10043,
+              "time-micros": 1565,
+              "rlimit": 8252,
               "success": true
             },
             {
-              "function": "lib::QML_CLUSTER_QML_HEIGHT",
+              "function": "lib::USER_FXFS_MAX_FILE_BYTES",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
+              "time-micros": 781,
+              "rlimit": 2226,
               "success": true
             },
             {
-              "function": "lib::USER_ELF_TYPE_EXEC",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::vm_host_rs_proof_slice",
+              "function": "lib::hermes_agent_rs_proof_slice",
               "mode:": "proof",
               "time": 1,
-              "time-micros": 1938,
-              "rlimit": 9709,
+              "time-micros": 1542,
+              "rlimit": 7128,
               "success": true
             },
             {
-              "function": "lib::docker_name_byte_valid",
+              "function": "lib::user_checked_end",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3676,
+              "rlimit": 27217,
+              "success": true
+            },
+            {
+              "function": "lib::gemma_prompt_byte_valid",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1715,
-              "rlimit": 10143,
+              "time-micros": 1358,
+              "rlimit": 7812,
+              "success": true
+            },
+            {
+              "function": "lib::net_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1902,
+              "rlimit": 9365,
               "success": true
             },
             {
@@ -2290,71 +1693,7 @@ Verus
               "success": true
             },
             {
-              "function": "lib::SECTEST_ALL_CASE_COUNT",
-              "mode:": "spec",
-              "time": 1,
-              "time-micros": 1799,
-              "rlimit": 11907,
-              "success": true
-            },
-            {
-              "function": "lib::VM_HOST_MAX_REQUEST_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::gemma_prompt_len_valid",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2000,
-              "rlimit": 11501,
-              "success": true
-            },
-            {
-              "function": "lib::verified_elf_page_down",
-              "mode:": "exec",
-              "time": 2,
-              "time-micros": 2080,
-              "rlimit": 14308,
-              "success": true
-            },
-            {
-              "function": "lib::qml_cluster_state_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1762,
-              "rlimit": 10199,
-              "success": true
-            },
-            {
-              "function": "lib::verified_fxfs_link_count_after_link",
-              "mode:": "exec",
-              "time": 3,
-              "time-micros": 3047,
-              "rlimit": 17953,
-              "success": true
-            },
-            {
-              "function": "lib::DOCKER_HTTP_ARCHIVE_REQUEST_MAX_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::svc_name_valid",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1662,
-              "rlimit": 9792,
-              "success": true
-            },
-            {
-              "function": "lib::POSIX_STATUS_UNSUPPORTED",
+              "function": "lib::GEMMA_DEFAULT_OUTPUT_TOKENS",
               "mode:": "spec",
               "time": 0,
               "time-micros": 27,
@@ -2362,51 +1701,299 @@ Verus
               "success": true
             },
             {
-              "function": "lib::mod_rs_proof_slice",
+              "function": "lib::hermes_skill_matches",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1379,
+              "rlimit": 8157,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_MAX_NAME_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::qml_cluster_rs_proof_slice",
               "mode:": "proof",
-              "time": 0,
-              "time-micros": 115,
-              "rlimit": 100,
-              "success": true
-            },
-            {
-              "function": "lib::compat_linux_cat_buffer_valid",
-              "mode:": "exec",
               "time": 1,
-              "time-micros": 1917,
-              "rlimit": 9759,
+              "time-micros": 1914,
+              "rlimit": 10079,
               "success": true
             },
             {
-              "function": "lib::GEMMA_DEFAULT_OUTPUT_TOKENS",
+              "function": "lib::USER_SVC_COMPONENT_START",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 25,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::ETHERNET_MTU",
+              "function": "lib::USER_FXFS_MAX_NODES",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 52,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::qml_cluster_dimensions_valid",
+              "function": "lib::gemma_test_passed",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1932,
-              "rlimit": 10040,
+              "time-micros": 1345,
+              "rlimit": 7696,
               "success": true
             },
             {
               "function": "lib::USER_SVC_IPC_MAGIC",
               "mode:": "spec",
               "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fxfs_seek_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1368,
+              "rlimit": 9149,
+              "success": true
+            },
+            {
+              "function": "lib::gemma_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1928,
+              "rlimit": 11591,
+              "success": true
+            },
+            {
+              "function": "lib::svc_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1520,
+              "rlimit": 7541,
+              "success": true
+            },
+            {
+              "function": "lib::QML_CLUSTER_RENDER_WIDTH",
+              "mode:": "spec",
+              "time": 0,
               "time-micros": 24,
               "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DOCKER_PULL_MAX_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 698,
+              "rlimit": 3236,
+              "success": true
+            },
+            {
+              "function": "lib::posix_pts_status",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1701,
+              "rlimit": 8449,
+              "success": true
+            },
+            {
+              "function": "lib::net_dns_message_buffer_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1360,
+              "rlimit": 9039,
+              "success": true
+            },
+            {
+              "function": "lib::LINUX_CAT_BUFFER_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RUN_ELF_STACK_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ETHERNET_HEADER_LEN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_RIGHTS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DOCKER_IMAGE_REFERENCE_MAX_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::posix_resource_delta",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2524,
+              "rlimit": 31172,
+              "success": true
+            },
+            {
+              "function": "lib::compat_linux_cat_buffer_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1320,
+              "rlimit": 7915,
+              "success": true
+            },
+            {
+              "function": "lib::elf_phdr_table_valid",
+              "mode:": "exec",
+              "time": 6,
+              "time-micros": 6809,
+              "rlimit": 37386,
+              "success": true
+            },
+            {
+              "function": "lib::docker_parse_i32_abs_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2152,
+              "rlimit": 11652,
+              "success": true
+            },
+            {
+              "function": "lib::USER_ELF_HEADER_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DOCKER_MAX_CONTAINER_NAME_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::elf_segment_mapping_range",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9732,
+              "rlimit": 117868,
+              "success": true
+            },
+            {
+              "function": "lib::run_elf_table_bytes",
+              "mode:": "exec",
+              "time": 3,
+              "time-micros": 3988,
+              "rlimit": 22148,
+              "success": true
+            },
+            {
+              "function": "lib::TCP_MIN_HEADER_PAIR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::net_dhcp_frame_buffer_valid",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2453,
+              "rlimit": 14034,
+              "success": true
+            },
+            {
+              "function": "lib::GEMMA_CONTEXT_TOKENS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::TAR_BLOCK_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::POSIX_STATUS_FAIL",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::USER_SVC_RUNNER_LOAD_ELF",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DOCKER_MAX_COMMAND_ITEMS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::svc_ipc_header_valid",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1358,
+              "rlimit": 7875,
+              "success": true
+            },
+            {
+              "function": "lib::docker_simple_path_component_shape",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1365,
+              "rlimit": 8041,
+              "success": true
+            },
+            {
+              "function": "lib::user_logic_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1503,
+              "rlimit": 8005,
               "success": true
             },
             {
@@ -2418,66 +2005,90 @@ Verus
               "success": true
             },
             {
-              "function": "lib::LVGL_DEMO_WIDTH",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 30,
-              "rlimit": 2,
+              "function": "lib::fxfs_rs_proof_slice",
+              "mode:": "proof",
+              "time": 3,
+              "time-micros": 3243,
+              "rlimit": 23142,
               "success": true
             },
             {
-              "function": "lib::USER_SVC_MAX_NAME_LEN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 23,
-              "rlimit": 2,
+              "function": "lib::user_shell_rs_proof_slice",
+              "mode:": "proof",
+              "time": 1,
+              "time-micros": 1746,
+              "rlimit": 9719,
               "success": true
             },
             {
-              "function": "lib::PERFETTO_NS_PER_US",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PERFETTO_POLICY_COMPARE_DEFAULT_STEPS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 27,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::shell_ascii_input",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 44,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::shell_ask_args_valid",
+              "function": "lib::verified_elf_page_down",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1876,
-              "rlimit": 15929,
+              "time-micros": 1965,
+              "rlimit": 11950,
               "success": true
             },
             {
-              "function": "lib::POSIX_MANIFEST_MAX_TESTS",
+              "function": "lib::HERMES_REQUIRED_SKILLS",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 35,
+              "time-micros": 24,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::POSIX_STATUS_PASS",
+              "function": "lib::USER_SVC_IPC_VERSION",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 79,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::docker_tar_member_name_shape",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1725,
+              "rlimit": 9333,
+              "success": true
+            },
+            {
+              "function": "lib::POSIX_STATUS_UNSUPPORTED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fxfs_append_size",
+              "mode:": "exec",
+              "time": 2,
+              "time-micros": 2824,
+              "rlimit": 21356,
+              "success": true
+            },
+            {
+              "function": "lib::DNS_MAX_MESSAGE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::gemma_clamp_tokens",
+              "mode:": "exec",
+              "time": 1,
+              "time-micros": 1829,
+              "rlimit": 8913,
+              "success": true
+            },
+            {
+              "function": "lib::HERMES_REQUIRED_TOOLS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
               "rlimit": 2,
               "success": true
             },
@@ -2490,75 +2101,83 @@ Verus
               "success": true
             },
             {
-              "function": "lib::component_capacity_available",
+              "function": "lib::USER_SVC_IPC_MESSAGE_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_PENDING_COMPONENT_LAUNCHES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DOCKER_HTTP_ARCHIVE_REQUEST_MAX_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RUN_ELF_AUXV_ENTRIES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::POSIX_STATUS_UNTESTED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SIMPLE_PATH_COMPONENT_MAX_BYTES",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 24,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fxfs_write_end",
               "mode:": "exec",
-              "time": 1,
-              "time-micros": 1589,
-              "rlimit": 9862,
-              "success": true
-            },
-            {
-              "function": "lib::LVGL_SCHED_TRACE_HEIGHT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 30,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DOCKER_MAX_CONTAINER_NAME_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 23,
-              "rlimit": 2,
+              "time": 3,
+              "time-micros": 3064,
+              "rlimit": 22514,
               "success": true
             },
             {
               "function": "lib::hermes_campaign_iterations_valid",
               "mode:": "exec",
               "time": 1,
-              "time-micros": 1771,
-              "rlimit": 9554,
+              "time-micros": 1590,
+              "rlimit": 7655,
               "success": true
             },
             {
-              "function": "lib::RUN_ELF_STACK_SIZE",
+              "function": "lib::MAX_COMPONENTS",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 25,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::DOCKER_MAX_COMMAND_ITEM_BYTES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DEFAULT_LAUNCHER_PORT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 35,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::svc_protocol_allowed",
+              "function": "lib::qml_cluster_dimensions_valid",
               "mode:": "exec",
-              "time": 0,
-              "time-micros": 49,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::elf_segment_mapping_range",
-              "mode:": "exec",
-              "time": 10,
-              "time-micros": 10895,
-              "rlimit": 139443,
+              "time": 1,
+              "time-micros": 1867,
+              "rlimit": 8184,
               "success": true
             }
           ]

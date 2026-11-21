@@ -1,5 +1,9 @@
+utc=2026-11-21T05:09:03Z
+git_head=783201c3ac537ea56d9defc2a478f8c104d7db9b
+git_dirty=false
+command=make it
 Running SMROS host tests on x86_64-unknown-linux-gnu...
-    Blocking waiting for file lock on package cache
+   Compiling smros-host-tests v0.1.0 (/agent/repos/SMROS/tests/host)
 warning: constant `MEMORY_PERMANENT_HANDLE_COUNT` is never used
  --> /agent/repos/SMROS/tests/host/../../src/syscall/syscall_logic_shared.rs:1:11
   |
@@ -632,32 +636,32 @@ warning: fields `allocated_pages` and `next_search_page` are never read
     |     ^^^^^^^^^^^^^^^^
 
 warning: multiple associated items are never used
-   --> /agent/repos/SMROS/tests/host/../../src/kernel_lowlevel/lowlevel_logic_shared.rs:151:25
+   --> /agent/repos/SMROS/tests/host/../../src/kernel_lowlevel/lowlevel_logic_shared.rs:175:25
     |
-150 | impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
+174 | impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
     | ------------------------------------------------------ associated items in this implementation
-151 |     pub(crate) const fn new(total_pages: usize) -> Self {
+175 |     pub(crate) const fn new(total_pages: usize) -> Self {
     |                         ^^^
 ...
-161 |     pub(crate) fn init_range(&mut self, start: usize, end: usize, page_size: usize) -> bool {
+185 |     pub(crate) fn init_range(&mut self, start: usize, end: usize, page_size: usize) -> bool {
     |                   ^^^^^^^^^^
 ...
-182 |     pub(crate) fn alloc(&mut self) -> Option<u64> {
+200 |     pub(crate) fn alloc(&mut self) -> Option<u64> {
     |                   ^^^^^
 ...
-218 |     pub(crate) fn free(&mut self, pfn: u64) -> bool {
+236 |     pub(crate) fn free(&mut self, pfn: u64) -> bool {
     |                   ^^^^
 ...
-238 |     pub(crate) fn pfn_address(&self, pfn: u64, page_size: usize) -> Option<usize> {
+257 |     pub(crate) fn pfn_address(&self, pfn: u64, page_size: usize) -> Option<usize> {
     |                   ^^^^^^^^^^^
 ...
-252 |     pub(crate) const fn total_pages(&self) -> usize {
+271 |     pub(crate) const fn total_pages(&self) -> usize {
     |                         ^^^^^^^^^^^
 ...
-256 |     pub(crate) const fn allocated_pages(&self) -> usize {
+275 |     pub(crate) const fn allocated_pages(&self) -> usize {
     |                         ^^^^^^^^^^^^^^^
 ...
-260 |     pub(crate) const fn free_pages(&self) -> usize {
+279 |     pub(crate) const fn free_pages(&self) -> usize {
     |                         ^^^^^^^^^^
 
 warning: function `fxfs_link_count_after_link` is never used
@@ -1029,40 +1033,40 @@ warning: function `run_elf_library_search_stage` is never used
      |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: `smros-host-tests` (test "integration_contracts") generated 145 warnings
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.19s
      Running tests/integration_contracts.rs (agent/repos/SMROS/target/host-tests/x86_64-unknown-linux-gnu/debug/deps/integration_contracts-d81c7d985e7c31c6)
 
 running 228 tests
-test aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus ... ok
 test aarch64_bootstrap_mmu_initialization_fails_closed ... ok
+test aarch64_bootstrap_mmu_maps_ram_mmio_and_secondary_cpus ... ok
 test aarch64_context_switch_preserves_irq_mask_until_resume ... ok
 test aarch64_context_switch_preserves_process_ttbr0 ... ok
-test aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it ... ok
 test aarch64_clone_child_installs_process_translation_root_before_el0 ... ok
+test aarch64_context_switch_preserves_irq_mask_until_the_resumed_owner_restores_it ... ok
 test aarch64_glibc_fork_clone_sets_and_clears_child_tid ... ok
-test aarch64_el0_context_abi_is_complete ... ok
 test aarch64_clone_child_is_validated_before_publication ... ok
 test aarch64_kernel_threads_reserve_fork_transaction_headroom ... ok
-test aarch64_memory_uses_one_vm_logic_module_without_broad_dead_code_suppression ... ok
 test aarch64_page_allocator_uses_detected_ram_after_kernel_end ... ok
-test aarch64_single_page_map_uses_existing_leaf_without_heap_rollback_vectors ... ok
+test aarch64_memory_uses_one_vm_logic_module_without_broad_dead_code_suppression ... ok
 test aarch64_process_roots_walk_distinct_four_kib_pages ... ok
+test aarch64_single_page_map_uses_existing_leaf_without_heap_rollback_vectors ... ok
+test aarch64_el0_context_abi_is_complete ... ok
 test aarch64_user_page_publish_avoids_unnecessary_tlbi_on_new_mappings ... ok
-test aarch64_runtime_has_no_obsolete_warning_only_surface ... ok
-test aarch64_synchronous_exception_vectors_are_origin_specific_and_fail_closed ... ok
 test aarch64_warning_gate_is_strict_and_target_scoped ... ok
 test arm64_linux_process_capacity_covers_posix_fork_stress ... ok
+test aarch64_synchronous_exception_vectors_are_origin_specific_and_fail_closed ... ok
+test aarch64_runtime_has_no_obsolete_warning_only_surface ... ok
 test checked_end_helpers_share_boundary_semantics ... ok
+test aarch64_directory_open_flags_match_staged_glibc ... ok
 test arm64_posix_mqueue_syscalls_are_real_handlers_not_compat_noops ... ok
-test docker_runc_smoke_batches_fxfs_persistence ... ok
 test elf_mapping_ranges_feed_fixed_mmap_window_checks ... ok
 test fifo_and_socket_ring_helpers_have_the_same_contract ... ok
-test fork_address_space_mapping_uses_deferred_user_updates ... ok
+test docker_runc_smoke_batches_fxfs_persistence ... ok
 test fork_cow_promotion_includes_initial_stack_pages ... ok
 test fork_cow_promotion_skips_already_promoted_address_spaces ... ok
-test aarch64_directory_open_flags_match_staged_glibc ... ok
-test fuzzsc_epoll_success_args_and_physical_vmo_stay_denied ... ok
+test fork_address_space_mapping_uses_deferred_user_updates ... ok
 test fuzzsc_kernel_dispatch_does_not_block_the_shell ... ok
+test fuzzsc_epoll_success_args_and_physical_vmo_stay_denied ... ok
 test fuzzsc_second_invocation_does_not_block_on_leftover_linux_state ... ok
 test fuzzsc_kernel_dispatch_must_not_die_on_linux_timers ... ok
 test fxfs_bootstrap_provides_posix_shared_memory_directory ... ok
@@ -1079,23 +1083,23 @@ test fxfs_shared_memory_mutations_defer_durable_persistence ... ok
 test fxfs_shared_persist_breaks_dirent_cycles ... ok
 test hermes_campaign_fuzzsc_bounds_runtime_and_skips_fxfs_persist ... ok
 test hermes_campaign_vm_create_skips_boot_wait_when_host_launch_fails ... ok
+test fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors ... ok
 test hermes_campaign_vm_create_waits_for_linux_boot_then_kills ... ok
 test hermes_host_jobs_retry_after_launcher_contention ... ok
 test hermes_host_status_polls_use_short_tcp_waits ... ok
 test hermes_host_tests_use_fixed_enum_jobs_and_protocol ... ok
 test hermes_owns_reboot_and_cmd_skills ... ok
 test hermes_posixtest_timeout_retires_a_blocked_root ... ok
-test fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors ... ok
 test hermes_safe_gateway_authorizes_before_shell_dispatch ... ok
-test hermes_test_all_runs_posix_and_sectest_before_random_iterations ... ok
 test hermes_product_api_campaigns_cover_lvgl_and_qml ... ok
+test hermes_test_all_runs_posix_and_sectest_before_random_iterations ... ok
 test hermes_test_orchestration_is_documented_and_smoke_wired ... ok
-test hermes_top_skips_terminated_vm_slots ... ok
+test hermes_test_resumes_after_reboot ... ok
 test host_coverage_runs_outside_repository_cargo_configuration ... ok
 test kernel_allocator_rejects_overlapping_free_blocks ... ok
 test kernel_dispatch_enter_leave_is_nested ... ok
+test hermes_top_skips_terminated_vm_slots ... ok
 test kernel_heap_covers_embedded_posix_share_and_thread_stress ... ok
-test hermes_test_resumes_after_reboot ... ok
 test linker_script_selection_is_single_source_for_nested_worktrees ... ok
 test linux_append_mode_positions_fxfs_writes_at_current_end_of_file ... ok
 test linux_child_exit_clears_tid_and_uses_deferred_stack_retirement ... ok
@@ -1115,153 +1119,153 @@ test linux_file_backed_shared_mmap_zeros_partial_eof_cache_before_reuse ... ok
 test linux_file_tail_fault_metadata_is_preserved_at_every_mapping_boundary ... ok
 test linux_fork_inherits_pid_owned_identity_paths_and_clears_transient_state ... ok
 test linux_fork_maps_shared_cow_pages_without_write_permission ... ok
-test cli_command_surface_and_host_job_protocol_are_closed ... ok
+test kobject_production_call_sites_use_debug_instead_of_info ... ok
 test linux_fork_resets_cpu_accounting_and_timer_inheritance ... ok
 test linux_ftruncate_reports_einval_for_read_only_shared_memory ... ok
-test linux_ftruncate_resizes_fxfs_backed_files_for_mmap ... ok
+test linux_fork_publishes_only_a_complete_child ... ok
 test linux_futex_accepts_any_cpu ... ok
-test linux_futex_waits_block_and_wake_scheduler_tasks ... ok
-test kobject_production_call_sites_use_debug_instead_of_info ... ok
+test linux_ftruncate_resizes_fxfs_backed_files_for_mmap ... ok
 test linux_fxfs_stat_and_read_paths_publish_posix_timestamps ... ok
+test linux_futex_waits_block_and_wake_scheduler_tasks ... ok
 test linux_handler_delivery_reserves_pending_capacity_until_the_frame_is_ready ... ok
 test linux_fxfs_stat_preserves_file_identity_for_dynamic_loader_deduplication ... ok
+test linux_high_resolution_sleep_arms_the_precision_deadline ... ok
 test linux_high_resolution_sleep_blocks_in_the_scheduler_sleep_queue ... ok
 test linux_high_resolution_sleep_does_not_spin_with_many_ready_tasks ... ok
 test linux_high_resolution_sleep_restores_interrupts_before_waiting ... ok
 test linux_high_resolution_sleep_waits_without_inflight_context_switch ... ok
-test linux_high_resolution_sleep_arms_the_precision_deadline ... ok
 test linux_interval_timer_deadline_cannot_expire_in_the_current_tick_phase ... ok
 test linux_kill_yields_after_delivering_a_real_signal ... ok
-test linux_kill_checks_credentials_and_process_groups ... ok
 test linux_memory_and_loader_are_process_owned ... ok
 test linux_mmap_bounds_mapping_metadata_before_address_space_exhaustion ... ok
+test linux_kill_checks_credentials_and_process_groups ... ok
 test linux_mmap_file_prefill_avoids_fxfs_read_metadata_persist ... ok
-test linux_fork_publishes_only_a_complete_child ... ok
+test linux_mmap_marks_fxfs_atime_without_read_journal_persist ... ok
 test linux_mmap_rejects_unsupported_fd_type_before_access_mode ... ok
 test linux_mmap_skips_fxfs_atime_marker_for_unlinked_open_files_from_cached_attrs ... ok
-test linux_mmap_enforces_posix_limit_and_object_errors ... ok
 test linux_mqueue_wait_accepts_any_cpu ... ok
 test linux_mqueue_wake_leaves_outcome_if_waiter_has_not_blocked ... ok
-test linux_mmap_marks_fxfs_atime_without_read_journal_persist ... ok
+test linux_mmap_enforces_posix_limit_and_object_errors ... ok
+test linux_msync_flushes_file_backed_shared_mappings ... ok
+test linux_named_semaphore_publication_uses_atomic_fxfs_links_and_inode_mmap_identity ... ok
 test linux_pci_c_driver_keeps_stock_linux_source ... ok
 test linux_process_memory_copies_enforce_metadata_without_blocking_mremap ... ok
-test linux_named_semaphore_publication_uses_atomic_fxfs_links_and_inode_mmap_identity ... ok
 test linux_process_memory_mutations_are_transactional_and_bounded ... ok
-test linux_msync_flushes_file_backed_shared_mappings ... ok
+test linux_process_memory_metadata_commit_is_allocation_free ... ok
 test linux_process_pending_process_state_access_has_compiler_barriers ... ok
 test linux_process_memory_review_paths_are_checked_and_reversible ... ok
 test linux_real_timer_expiration_uses_bounded_output_storage ... ok
 test linux_real_timer_irq_does_not_lazily_initialize_memory_state ... ok
 test linux_real_timer_scan_skips_all_disabled_deadlines ... ok
-test linux_process_memory_metadata_commit_is_allocation_free ... ok
 test linux_record_lock_runtime_blocks_without_missed_wakeups ... ok
-test linux_recvfrom_preflights_source_address_before_receive ... ok
 test linux_record_locks_follow_process_associated_lifecycle ... ok
 test linux_process_reset_reclaims_transient_state_without_reinitializing_global_state ... ok
+test linux_recvfrom_preflights_source_address_before_receive ... ok
 test linux_resource_copyouts_preflight_and_rollback_transactionally ... ok
-test linux_scheduler_allows_an_unprivileged_process_to_query_itself ... ok
 test linux_root_task_and_syscall_frame_have_bounded_owners ... ok
-test linux_select_zero_fd_timeout_uses_interruptible_sleep ... ok
+test linux_scheduler_allows_an_unprivileged_process_to_query_itself ... ok
 test linux_scheduler_policy_and_priority_are_process_state_inherited_by_fork ... ok
+test linux_select_zero_fd_timeout_uses_interruptible_sleep ... ok
 test linux_shared_memory_uses_nonnegative_process_ids_separate_from_compat_handles ... ok
-test linux_shm_open_reuses_live_open_description_handles ... ok
 test linux_shm_open_honors_mode_umask_permissions_and_name_limits ... ok
+test linux_shm_open_reuses_live_open_description_handles ... ok
 test linux_signal_runtime_resets_large_state_in_place ... ok
 test linux_resource_clone_inherits_open_descriptions_and_shared_pages ... ok
+test linux_signal_termination_reports_wait_status_and_sigchld ... ok
 test linux_signal_waits_block_and_restart_from_the_original_svc ... ok
 test linux_sigtimedwait_copyout_masks_irqs_across_validation_and_write ... ok
 test linux_sigtimedwait_requeues_the_original_source_when_copyout_becomes_invalid ... ok
 test linux_sigtimedwait_rollback_uses_bounded_source_local_reservations ... ok
+test cli_command_surface_and_host_job_protocol_are_closed ... ok
 test linux_sigtimedwait_selects_the_lowest_signal_across_pending_sources ... ok
-test linux_signal_termination_reports_wait_status_and_sigchld ... ok
-test linux_sleeps_expire_or_interrupt_only_the_matching_task ... ok
-test linux_stop_continue_signals_report_sigchld_and_resume_stopped_tasks ... ok
 test linux_standard_pending_records_are_bounded_and_shared_with_process_routing ... ok
+test linux_stop_continue_signals_report_sigchld_and_resume_stopped_tasks ... ok
 test linux_stop_signals_restart_sleep_syscalls_after_continue ... ok
 test linux_sync_syscalls_force_fxfs_persistence ... ok
 test linux_timer_settime_arms_hardware_deadline ... ok
 test linux_user_space_ddk_hosts_virtio_and_hello_demos ... ok
-test linux_vectored_io_preflights_every_entry_before_io ... ok
 test linux_signal_state_is_owned_by_each_live_task ... ok
+test linux_vectored_io_preflights_every_entry_before_io ... ok
+test linux_sleeps_expire_or_interrupt_only_the_matching_task ... ok
 test linux_wait_and_exit_runtime_own_blocking_reaping_and_safe_teardown ... ok
 test mq_open_creation_ignores_mq_attr_fields_posix_marks_ignored ... ok
+test linux_user_struct_paths_use_process_checked_copies ... ok
+test posix_baseline_make_value_is_shell_safe ... ok
 test native_zircon_stream_iov_is_bounded_and_copied_through_checked_user_access ... ok
 test linux_wait_reaps_one_real_child_status ... ok
-test posix_baseline_make_value_is_shell_safe ... ok
-test posix_clock_timer_cpu0_expiry_queues_process_signals ... ok
 test posix_clock_timer_clock_runtime_applies_checked_realtime_offsets ... ok
-test posix_conformance_workflow_and_limitations_are_documented ... ok
+test posix_clock_timer_cpu0_expiry_queues_process_signals ... ok
 test posix_clock_timer_syscalls_copy_validate_and_publish_owned_state ... ok
-test linux_user_struct_paths_use_process_checked_copies ... ok
+test posix_conformance_workflow_and_limitations_are_documented ... ok
 test posix_guest_manifest_parser_is_exported_bounded_and_canonical ... ok
 test posix_guest_manifest_read_sizes_buffer_from_fxfs_metadata ... ok
 test posix_guest_preserves_fxfs_prepare_error_details_in_terminal_events ... ok
-test posix_guest_runner_is_serialized_bounded_and_fail_closed ... ok
+test posix_guest_events_match_the_versioned_host_schema ... ok
 test posix_guest_suite_completion_reports_shell_readiness ... ok
 test posix_guest_terminal_events_are_line_framed_after_arbitrary_test_output ... ok
 test posix_make_targets_are_explicit_and_keep_the_default_suite_offline ... ok
-test posix_process_runtime_results_separate_campaign_and_merge_head_evidence ... ok
+test posix_guest_runner_is_serialized_bounded_and_fail_closed ... ok
 test posix_report_make_value_is_shell_safe ... ok
-test posix_guest_events_match_the_versioned_host_schema ... ok
+test posix_process_runtime_results_separate_campaign_and_merge_head_evidence ... ok
 test posix_event_path_has_no_unframed_debug_serial_writers ... ok
-test posix_resource_snapshot_uses_authoritative_state_without_resetting_it ... ok
 test posix_resources_include_linux_process_page_lifecycle ... ok
-test posix_scheduler_optionals_have_runtime_contracts ... ok
+test posix_resource_snapshot_uses_authoritative_state_without_resetting_it ... ok
 test posix_test_preloads_smros_compat_runtime_without_affecting_shell_run ... ok
-test posix_timer_create_copies_out_a_kernel_width_timer_id ... ok
-test posix_test_shell_command_is_strictly_wired_to_the_runner ... ok
+test posix_scheduler_optionals_have_runtime_contracts ... ok
 test posix_run_make_value_is_shell_safe ... ok
+test posix_test_shell_command_is_strictly_wired_to_the_runner ... ok
+test posix_timer_create_copies_out_a_kernel_width_timer_id ... ok
 test posix_timer_deadlines_are_armed_on_the_precision_compare ... ok
-test process_create_rolls_back_failed_init_slots ... ok
 test process_create_reclaims_terminated_slots_before_reuse ... ok
+test process_create_rolls_back_failed_init_slots ... ok
 test range_overlap_helpers_agree_on_touching_and_overflowing_ranges ... ok
+test posix_timer_ids_do_not_expose_negative_compatibility_handles ... ok
 test process_pending_signals_can_be_delivered_by_the_running_unmasked_thread ... ok
 test riscv64_kernel_threads_reserve_fuzzsc_headroom ... ok
-test riscv_kernel_context_switch_keeps_interrupts_masked_until_scheduler_restore ... ok
-test posix_timer_ids_do_not_expose_negative_compatibility_handles ... ok
 test riscv_kernel_timer_ticks_skip_linux_runtime_work_until_trap_return ... ok
 test riscv_kernel_timer_work_is_replayed_after_syscall_return ... ok
-test relative_sleep_uses_high_resolution_path_at_or_below_threshold ... ok
 test riscv_root_timer_preemption_is_only_deferred_for_realtime_root_tasks ... ok
-test riscv_task_exit_reenables_timer_interrupts_before_handoff ... ok
-test riscv_timer_signal_delivery_preserves_a_rewritten_trap_frame ... ok
 test riscv_signal_frames_use_a_compact_nested_stack_layout ... ok
+test riscv_task_exit_reenables_timer_interrupts_before_handoff ... ok
+test relative_sleep_uses_high_resolution_path_at_or_below_threshold ... ok
+test riscv_kernel_context_switch_keeps_interrupts_masked_until_scheduler_restore ... ok
 test riscv_user_returns_enable_float_state_for_glibc_resolver ... ok
+test riscv_timer_signal_delivery_preserves_a_rewritten_trap_frame ... ok
 test round_robin_scheduler_uses_ready_bitset_for_large_thread_sets ... ok
 test run_elf_batches_fxfs_persistence_for_the_exact_launch_lifecycle ... ok
 test run_elf_launch_identity_is_bound_and_carried_through_aarch64_resume ... ok
 test scheduler_exposes_atomic_linux_task_transitions ... ok
 test scheduler_handoffs_mask_interrupts_before_observing_global_state ... ok
 test scheduler_irq_work_is_owned_by_cpu0 ... ok
-test scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch ... ok
 test run_elf_observer_api_is_typed_environment_aware_and_compatible ... ok
 test scheduler_repairs_ready_index_before_picking_after_external_state_changes ... ok
-test run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared ... ok
-test scheduler_tracks_ready_priority_by_cpu_for_bound_cascades ... ok
+test scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch ... ok
 test shell_yields_before_waiting_for_uart_activity ... ok
 test signal_update_contract_is_shared_between_syscall_and_kernel_objects ... ok
+test scheduler_tracks_ready_priority_by_cpu_for_bound_cascades ... ok
 test smros_private_condition_broadcast_completes_the_polling_handoff ... ok
+test run_elf_terminal_outcomes_are_dispatched_once_after_state_is_cleared ... ok
 test smros_private_condition_wait_pause_is_bounded_and_blocking ... ok
-test smros_private_condition_wake_tokens_belong_to_registered_waiters ... ok
 test smros_private_mutex_unlock_clears_metadata_before_native_release ... ok
+test smros_private_condition_wake_tokens_belong_to_registered_waiters ... ok
 test smros_pthread_create_yields_after_publishing_child ... ok
-test smros_riscv_pthread_create_defers_explicit_fifo_startup ... ok
 test smros_riscv_pthread_create_yields_for_default_children ... ok
+test smros_riscv_pthread_create_defers_explicit_fifo_startup ... ok
 test smros_riscv_pthread_join_poll_blocks_for_lower_priority_children ... ok
 test syscall_routing_boundaries_match_known_interface_windows ... ok
 test test_layer_commands_and_docs_are_wired ... ok
 test testsc_component_launchers_keep_a_live_arm64_page_table ... ok
 test testsc_does_not_repeat_fxfs_smoke_after_starting_component_threads ... ok
-test synchronous_memory_fault_delivery_is_immediate_complete_and_fail_closed ... ok
 test testsc_model_and_ui_smokes_skip_fxfs_persist ... ok
+test synchronous_memory_fault_delivery_is_immediate_complete_and_fail_closed ... ok
 test testsc_uses_in_process_linux_syscalls_from_kernel_shell ... ok
-test timer_interrupt_expires_real_timers_for_kernel_mode_ticks ... ok
 test virtio_block_completion_wait_uses_a_monotonic_deadline ... ok
 test virtio_net_tx_completion_wait_uses_a_monotonic_deadline ... ok
 test x86_system_reset_uses_hardware_reset_ports_before_halting ... ok
+test timer_interrupt_expires_real_timers_for_kernel_mode_ticks ... ok
 test smros_posix_compat_runtime_tracks_aio_completion_state ... ok
 test build_script_recognizes_supported_linker_script_flag_forms ... ok
 
-test result: ok. 228 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+test result: ok. 228 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
 
 EXIT:0
