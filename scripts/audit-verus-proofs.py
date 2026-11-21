@@ -129,7 +129,7 @@ def is_tautology(expr):
     if len(ands) > 1:
         return all(is_tautology(part) for part in ands)
     compact = re.sub(r"\s+", "", expr)
-    return re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)==\1", compact) is not None
+    return re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:==|==>)\1", compact) is not None
 
 
 def nonempty_spec(header):
@@ -374,6 +374,10 @@ def main():
         for rel in proved:
             digest = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
             lines.append(f"{digest}  {rel}")
+        lines.append("harness_sha256:")
+        for path in HARNESS_SOURCES:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            lines.append(f"{digest}  {path.relative_to(ROOT)}")
         lines.append("harness function mode success origin")
         for row in evidence:
             lines.append("\t".join(str(part) for part in row))
@@ -393,6 +397,7 @@ def self_test():
     tautologies = [
         "fn checked_end() -> (out: bool)\n    ensures\n        out == out || armed,\n{",
         "fn checked_end() -> (out: bool)\n    ensures\n        x == x,\n{",
+        "fn checked_end() -> (out: bool)\n    ensures\n        out ==> out,\n{",
     ]
     for header in tautologies:
         if nonempty_spec(header):

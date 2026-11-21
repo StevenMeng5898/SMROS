@@ -365,6 +365,19 @@ cbmc-futex:
 			--unsigned-overflow-check; \
 		rc=$$?; \
 		echo "cbmc_exit=$$rc"; \
+		echo "----- cbmc assertions -----"; \
+		echo "command=cbmc src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --unwinding-assertions --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check"; \
+		cbmc src/user_level/apps/pthread_mutex_futex.c \
+			--function cbmc_futex_word \
+			-DCBMC \
+			--unwind 1 \
+			--unwinding-assertions \
+			--bounds-check \
+			--pointer-check \
+			--signed-overflow-check \
+			--unsigned-overflow-check; \
+		arc=$$?; \
+		echo "cbmc_assert_exit=$$arc"; \
 		cc -O2 -o /tmp/smros-mutex-model verification/futex/mutex_interleave.c; \
 		echo "model_fixed:"; \
 		/tmp/smros-mutex-model; \
@@ -375,14 +388,14 @@ cbmc-futex:
 		/tmp/smros-mutex-model-bad; \
 		broken=$$?; \
 		echo "model_broken_exit=$$broken"; \
-		if [ "$$rc" -ne 0 ] || [ "$$fixed" -ne 0 ] || [ "$$broken" -eq 0 ]; then \
+		if [ "$$rc" -ne 0 ] || [ "$$arc" -ne 0 ] || [ "$$fixed" -ne 0 ] || [ "$$broken" -eq 0 ]; then \
 			echo "futex model gate failed"; \
 			exit 1; \
 		fi; \
 	} > verification/logs/cbmc-futex.log 2>&1; \
 	status=$$?; \
 	tail -n 20 verification/logs/cbmc-futex.log; \
-	python3 -c 'import pathlib,re,sys; t=pathlib.Path("verification/logs/cbmc-futex.log").read_text(); m=re.findall(r"\*\* (\d+) of (\d+) covered", t); sys.exit(0 if ("3","3") in m and "cbmc_exit=0" in t and "model_fixed_exit=0" in t and "model_broken_exit=1" in t else 1)' || exit 1; \
+	python3 -c 'import pathlib,re,sys; t=pathlib.Path("verification/logs/cbmc-futex.log").read_text(); covered=re.findall(r"\*\* (\d+) of (\d+) covered", t); failed=re.findall(r"\*\* (0) of (\d+) failed", t); sys.exit(0 if ("3","3") in covered and failed and "cbmc_exit=0" in t and "cbmc_assert_exit=0" in t and "model_fixed_exit=0" in t and "model_broken_exit=1" in t else 1)' || exit 1; \
 	exit $$status
 
 # Host stress of the contended futex mutex. Each run must finish and count exactly.
@@ -402,10 +415,10 @@ futex-stress:
 				got=$$(printf '%s\n' "$$out" | sed -n 's/.*counter=\([0-9]*\).*/\1/p'); \
 				if [ "$$got" != "$$expect" ]; then \
 					echo "FAIL threads=$$threads run=$$run line=$$out"; \
-					fail=1; \
-				else \
-					echo "PASS threads=$$threads run=$$run counter=$$got"; \
+					echo "futex-stress failed"; \
+					exit 1; \
 				fi; \
+				echo "PASS threads=$$threads run=$$run counter=$$got"; \
 			done; \
 		done; \
 		if [ "$$fail" -ne 0 ]; then echo "futex-stress failed"; exit 1; fi; \

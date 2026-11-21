@@ -1,7 +1,10 @@
-/* Explicit-state check of the futex mutex protocol for three threads.
- * A reachable state where a waiter still sleeps, the word is 0, and nobody
- * holds the lock is a lost wakeup. BROKEN_SLOW_PATH restores the regression
- * that stored 1 after seeing 0; that build must exit non-zero. */
+/* Explicit-state model of a 3-thread futex mutex. This file does not include
+ * or call pthread_mutex_futex.c. Matching the real slow path is manual.
+ *
+ * Limits: safety only (no liveness), exchange and the following wait are one
+ * step, and trylock is absent. A state with a sleeper, word 0, and nobody
+ * holding or retrying is a lost wakeup. BROKEN_SLOW_PATH stores 1 after
+ * seeing 0 and must exit non-zero. */
 
 #include <stdio.h>
 #include <stdlib.h>

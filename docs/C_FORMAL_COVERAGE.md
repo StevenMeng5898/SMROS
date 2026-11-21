@@ -188,7 +188,7 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
     SMROS POSIX compat runtime. Not yet discharged. The upstream suite under `target/posix` is not this file.
 - `src/user_level/apps/pthread_mutex_futex.c`
   - 待证明
-    The pthread demo, futex syscall, and thread interleaving are not model-checked. The slow path stores `lock_transition`'s result, but CBMC does not run the atomics.
+    The pthread demo, futex syscall, and thread interleaving are not model-checked. After the fast path fails, the loop stores `contended_lock_word()` with `exchange` and waits while the previous value was not 0. That function is not a proof. The host stress test is the gate for this loop.
 - `src/user_level/apps/pthread_mutex_futex.c::lock_transition`
   - 已证明
     CBMC: a free word becomes 1 with no wait; any other word becomes 2 and waits. Log: `verification/logs/cbmc-futex.log`.
@@ -199,8 +199,11 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
   - 已证明
     CBMC: trylock acquires only a free word and leaves any other word unchanged.
 - `src/user_level/apps/pthread_mutex_futex.c::contended_lock_word`
-  - 已证明
-    CBMC: the slow path always stores 2. A three-thread explicit-state check of that protocol finds no lost wakeup; the same check with the CAS-to-1 regression exits non-zero.
+  - 待证明
+    The body is `return 2`. A CBMC check that this equals 2 would only repeat the constant. It is not 已证明.
+- `verification/futex/mutex_interleave.c`
+  - 规范假设
+    Hand-written 3-thread model of the protocol, not a compilation of `pthread_mutex_futex.c`. Correspondence to the C loop is manual. Limits: no liveness, the exchange and the following wait are one step, and trylock is not in the model. The fixed model exits 0; `-DBROKEN_SLOW_PATH` exits 1. The real-loop gate is `make futex-stress`.
 - `src/user_level/apps/tensor_neon_mul.c`
   - 超出范围
     EL0 NEON GEMM demo, not kernel TCB.

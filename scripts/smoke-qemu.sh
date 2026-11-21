@@ -81,6 +81,17 @@ input_fifo="${SMROS_ST_LOG}.stdin"
 rm -f "$SMROS_ST_LOG" "$input_fifo"
 mkfifo "$input_fifo"
 exec 3<>"$input_fifo"
+echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "git_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+dirty_files="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' 2>/dev/null || true)"
+if [ -n "$dirty_files" ]; then
+    echo "git_dirty=true"
+    echo "dirty_files<<END"
+    printf '%s\n' "$dirty_files"
+    echo "END"
+else
+    echo "git_dirty=false"
+fi
 echo "Booting SMROS smoke test for up to ${SMROS_ST_TIMEOUT}s..."
 
 qemu_pid=""

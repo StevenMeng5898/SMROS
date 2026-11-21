@@ -111,7 +111,6 @@ void cbmc_futex_word(void)
     __CPROVER_assert(acquired == (word == 0), "trylock acquires only a free word");
     __CPROVER_assert(acquired ? tried == 1 : tried == word, "failed trylock leaves the word unchanged");
     __CPROVER_assert(tried <= 2, "trylock does not overflow the futex word");
-    __CPROVER_assert(contended_lock_word() == 2, "slow path stores the waiter mark");
     if (word == 0) {
         __CPROVER_cover(1);
     }
