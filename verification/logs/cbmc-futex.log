@@ -1,5 +1,5 @@
-utc=2026-11-21T17:29:41Z
-git_head=c6d045dec24beaaa2c201a8179eb2bf458b997fd
+utc=2026-11-21T20:09:42Z
+git_head=be0b69698560f33de381c9f4d33eee6b456a9df5
 git_dirty=false
 A later commit whose diff is only verification/logs/ publishes this run.
 command=cbmc --cover cover src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check
@@ -15,33 +15,33 @@ Generic Property Instrumentation
 Rewriting existing assertions as assumptions
 Running with 8 object bits, 56 offset bits (default)
 Starting Bounded Model Checking
-Runtime Symex: 0.00241392s
+Runtime Symex: 0.00426926s
 size of program expression: 106 steps
 Generated 3 VCC(s), 3 remaining after simplification
-Runtime Postprocess Equation: 5.627e-06s
+Runtime Postprocess Equation: 5.466e-06s
 Passing problem to propositional reduction
 converting SSA
-Runtime Convert SSA: 0.000729214s
+Runtime Convert SSA: 0.000892832s
 Running propositional reduction
 Post-processing
-Runtime Post-process: 1.8386e-05s
+Runtime Post-process: 6.2738e-05s
 Solving with MiniSAT 2.2.1 with simplifier
 943 variables, 1489 clauses
 SAT checker: instance is SATISFIABLE
-Runtime Solver: 0.000784276s
-Runtime decision procedure: 0.00155666s
+Runtime Solver: 0.00071481s
+Runtime decision procedure: 0.00163339s
 Running propositional reduction
 Solving with MiniSAT 2.2.1 with simplifier
 943 variables, 725 clauses
 SAT checker: instance is SATISFIABLE
 Runtime Solver: 1.6697e-05s
-Runtime decision procedure: 2.2062e-05s
+Runtime decision procedure: 2.1859e-05s
 Running propositional reduction
 Solving with MiniSAT 2.2.1 with simplifier
 943 variables, 724 clauses
 SAT checker: instance is SATISFIABLE
-Runtime Solver: 9.7918e-05s
-Runtime decision procedure: 0.000104722s
+Runtime Solver: 9.7916e-05s
+Runtime decision procedure: 0.000104757s
 
 ** coverage results:
 [cbmc_futex_word.coverage.1] file src/user_level/apps/pthread_mutex_futex.c line 115 function cbmc_futex_word condition '1 != 0': SATISFIED
@@ -64,22 +64,22 @@ Generic Property Instrumentation
 Running with 8 object bits, 56 offset bits (default)
 Starting Bounded Model Checking
 **** WARNING: no body for function __CPROVER_cover
-Runtime Symex: 0.00168633s
+Runtime Symex: 0.00164867s
 size of program expression: 112 steps
 simple slicing removed 26 assignments
 Generated 38 VCC(s), 7 remaining after simplification
-Runtime Postprocess Equation: 5.239e-06s
+Runtime Postprocess Equation: 6.578e-06s
 Passing problem to propositional reduction
 converting SSA
-Runtime Convert SSA: 0.000429149s
+Runtime Convert SSA: 0.000452059s
 Running propositional reduction
 Post-processing
-Runtime Post-process: 2.74e-06s
+Runtime Post-process: 2.413e-06s
 Solving with MiniSAT 2.2.1 with simplifier
 835 variables, 1114 clauses
 SAT checker: instance is UNSATISFIABLE
-Runtime Solver: 0.000630032s
-Runtime decision procedure: 0.00107969s
+Runtime Solver: 0.000613358s
+Runtime decision procedure: 0.00109441s
 
 ** Results:
 src/user_level/apps/pthread_mutex_futex.c function cbmc_futex_word
