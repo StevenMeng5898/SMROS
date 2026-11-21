@@ -97,14 +97,50 @@ def function_headers(text):
     return headers
 
 
+def split_top(expr, op):
+    parts = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(expr):
+        char = expr[i]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and expr.startswith(op, i):
+            parts.append(expr[start:i])
+            i += len(op)
+            start = i
+            continue
+        i += 1
+    parts.append(expr[start:])
+    return parts
+
+
+def is_tautology(expr):
+    expr = re.sub(r"[\s,{}]+", " ", expr).strip()
+    if expr in {"", "true"}:
+        return True
+    ors = split_top(expr, "||")
+    if len(ors) > 1:
+        return any(is_tautology(part) for part in ors)
+    ands = split_top(expr, "&&")
+    if len(ands) > 1:
+        return all(is_tautology(part) for part in ands)
+    compact = re.sub(r"\s+", "", expr)
+    return re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)==\1", compact) is not None
+
+
 def nonempty_spec(header):
     clauses = re.findall(
-        r"\b(?:ensures|requires)\b(.*?)(?=\b(?:ensures|requires|decreases)\b|$)",
+        r"\bensures\b(.*?)(?=\b(?:ensures|requires|decreases)\b|$)",
         header,
         re.S,
     )
-    compact = re.sub(r"\s+", "", " ".join(clauses))
-    if re.fullmatch(r"(?:true,?|out==out,?)*", compact or ""):
+    if not clauses:
+        return False
+    if all(is_tautology(clause) for clause in clauses):
         return False
     atoms = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", " ".join(clauses))
     return any(atom != "true" for atom in atoms)
@@ -177,14 +213,16 @@ def main():
         if "inside" not in includes.get(rel, set()):
             status |= fail(f"已证明 file is not included inside verus!: {rel}")
 
-    headers = {}
-    func_names = set()
     recorded_heads = set()
+    details_by_harness = {}
+    breakdown = {}
+    log_headers = {}
     for log in LOGS:
         if not log.is_file():
             status |= fail(f"missing Verus JSON log: {log.relative_to(ROOT)}")
             continue
         header, data = load_log(log)
+        log_headers[log.name] = header
         results = data.get("verification-results", {})
         if not results.get("success") or results.get("errors") != 0:
             status |= fail(f"{log.name} is not a successful Verus run: {results}")
@@ -195,10 +233,23 @@ def main():
             recorded_heads.add(head_match.group(1))
         if "only verification/logs/" not in header and "only verification/logs" not in header:
             status |= fail(f"{log.name} does not state that a log-only commit publishes the run")
-        for key in data.get("func-details", {}):
-            func_names.add(key)
-        for path, text in harness_text:
-            headers.setdefault(path, function_headers(text))
+        details_by_harness[log.name] = set(data.get("func-details", {}))
+        def walk(node):
+            if isinstance(node, dict):
+                rows = node.get("function-breakdown")
+                if isinstance(rows, list):
+                    for row in rows:
+                        if isinstance(row, dict) and "function" in row:
+                            breakdown[(log.name, row["function"])] = (
+                                row.get("mode:", ""),
+                                row.get("success"),
+                            )
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+        walk(data)
 
     if len(recorded_heads) > 1:
         status |= fail(f"Verus logs disagree on git_head: {sorted(recorded_heads)}")
@@ -232,21 +283,14 @@ def main():
                 if actual != digest:
                     status |= fail(f"source hash changed since the Verus log: {rel}")
 
-    combined = "\n".join(text for _, text in harness_text)
-    combined_spans = []
-    offset = 0
-    pieces = []
-    for _, text, spans in harness_spans:
-        pieces.append(text)
-        combined_spans.extend((left + offset, right + offset) for left, right in spans)
-        offset += len(text) + 1
-    combined = "\n".join(pieces)
-    all_headers = {}
-    for mapping in headers.values():
-        all_headers.update(mapping)
+    harness_by_name = {}
+    for (path, text, spans), log in zip(harness_spans, LOGS):
+        harness_by_name[log.name] = (path, text, spans)
 
+    evidence = []
     for rel in proved:
         source = (ROOT / rel).read_text()
+        origin_headers = function_headers(source)
         functions = re.findall(
             r"^(?:pub(?:\([^)]*\))?\s+)?(?:const\s+)?fn\s+([A-Za-z0-9_]+)",
             source,
@@ -258,48 +302,122 @@ def main():
             re.M,
         )
         macros = re.findall(r"^macro_rules!\s+([A-Za-z0-9_]+)", source, re.M)
+        owners = [
+            log.name
+            for log in LOGS
+            if "inside" in includes.get(rel, set())
+            and rel in {
+                match.group(1)
+                for match in include_re.finditer(harness_by_name[log.name][1])
+                if inside(match.start(), harness_by_name[log.name][2])
+            }
+        ]
+        if not owners:
+            status |= fail(f"已证明 file has no inside-verus harness: {rel}")
+            continue
         exempt = UNVERIFIED_WRAPPERS.get(rel, set())
         for name in functions + methods:
             if name in exempt:
                 print(f"documented unverified runtime wrapper: {rel} {name}")
                 continue
             qualified = f"lib::{name}"
-            if qualified not in func_names or not nonempty_spec(all_headers.get(name, "")):
+            header = origin_headers.get(name, "")
+            present = [owner for owner in owners if qualified in details_by_harness.get(owner, set())]
+            if not present or not nonempty_spec(header):
                 status |= fail(
-                    f"已证明 function has no specified func-details entry: {rel} {name}"
+                    f"已证明 function has no specified func-details entry in its harness: {rel} {qualified}"
                 )
+            for owner in present:
+                mode, ok = breakdown.get((owner, qualified), ("", None))
+                evidence.append((owner, qualified, mode, ok, rel))
         for macro in macros:
             needle = macro + "!"
             found = False
-            start = 0
-            while True:
-                pos = combined.find(needle, start)
-                if pos < 0:
-                    break
-                start = pos + len(needle)
-                if not inside(pos, combined_spans):
-                    continue
-                previous = list(re.finditer(r"(?:proof\s+)?fn\s+([A-Za-z0-9_]+)\b", combined[:pos]))
-                if not previous:
-                    continue
-                name = previous[-1].group(1)
-                if not inside(previous[-1].start(), combined_spans):
-                    continue
-                if f"lib::{name}" in func_names and nonempty_spec(all_headers.get(name, "")):
-                    found = True
+            for owner in owners:
+                _path, text, spans = harness_by_name[owner]
+                headers = function_headers(text)
+                start = 0
+                while True:
+                    pos = text.find(needle, start)
+                    if pos < 0:
+                        break
+                    start = pos + len(needle)
+                    if not inside(pos, spans):
+                        continue
+                    previous = list(re.finditer(r"(?:proof\s+)?fn\s+([A-Za-z0-9_]+)\b", text[:pos]))
+                    if not previous or not inside(previous[-1].start(), spans):
+                        continue
+                    name = previous[-1].group(1)
+                    qualified = f"lib::{name}"
+                    if qualified in details_by_harness.get(owner, set()) and nonempty_spec(headers.get(name, "")):
+                        found = True
+                        mode, ok = breakdown.get((owner, qualified), ("", None))
+                        evidence.append((owner, qualified, mode, ok, f"{rel}::{macro}"))
+                        break
+                if found:
                     break
             if not found:
                 status |= fail(
-                    f"已证明 macro has no specified func-details function: {rel} {macro}"
+                    f"已证明 macro has no specified func-details function in its harness: {rel} {macro}"
                 )
+
+    if evidence and status == 0:
+        lines = ["===== verus function evidence ====="]
+        if recorded_heads:
+            lines.append(f"git_head={next(iter(recorded_heads))}")
+        dirty = git("status", "--porcelain", "--untracked-files=no", "--", ".", ":(exclude)verification/logs")
+        lines.append("git_dirty=" + ("true" if dirty.strip() else "false"))
+        lines.append("dirty_files<<END")
+        lines.append(dirty.rstrip())
+        lines.append("END")
+        lines.append("source_sha256:")
+        for rel in proved:
+            digest = hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
+            lines.append(f"{digest}  {rel}")
+        lines.append("harness function mode success origin")
+        for row in evidence:
+            lines.append("\t".join(str(part) for part in row))
+        (ROOT / "verification/logs/verus-functions.txt").write_text("\n".join(lines) + "\n")
 
     if status == 0:
         print(
             f"Verus proof audit passed for {len(proved)} 已证明 files "
-            f"against {len(func_names)} func-details names."
+            f"with {len(evidence)} harness function rows."
         )
     return status
 
 
+def self_test():
+    """The two auditor counterexamples must be rejected."""
+    failures = 0
+    tautologies = [
+        "fn checked_end() -> (out: bool)\n    ensures\n        out == out || armed,\n{",
+        "fn checked_end() -> (out: bool)\n    ensures\n        x == x,\n{",
+    ]
+    for header in tautologies:
+        if nonempty_spec(header):
+            print("counterexample tautology was accepted", file=sys.stderr)
+            failures += 1
+        else:
+            print("counterexample tautology: audit exit 1")
+    # A kernel_objects 已证明 file defining an unspecified checked_end must not
+    # borrow syscall's lib::checked_end.
+    origin = "fn checked_end(addr: usize, len: usize) -> (out: Option<usize>)\n{\n"
+    syscall_has = {"lib::checked_end"}
+    kernel_objects_has = set()
+    owners = ["verus-kernel-objects.log"]
+    qualified = "lib::checked_end"
+    present = [owner for owner in owners if qualified in {"verus-syscall.log": syscall_has, "verus-kernel-objects.log": kernel_objects_has}[owner]]
+    accepted = bool(present) and nonempty_spec(origin)
+    if accepted:
+        print("counterexample harness-collision was accepted", file=sys.stderr)
+        failures += 1
+    else:
+        print("counterexample harness-collision: audit exit 1")
+    return 1 if failures else 0
+
+
 if __name__ == "__main__":
+    if "--self-test" in sys.argv:
+        sys.exit(self_test())
     sys.exit(main())

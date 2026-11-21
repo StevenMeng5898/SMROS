@@ -225,7 +225,7 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/handle_namespace_logic_shared.rs`
   - 待证明
-    The Vec slot table is not in the Verus AST. `verified_handle_next_generation` ensures the bumped generation differs from the old one while `gen_max > 1`. `verified_handle_round_trip` and `verified_handle_encode_injective` cover encode/decode. `lookup` and `close` call `smros_handle_generation_matches_body`.
+    The Vec slot table is not in the Verus AST. `verified_handle_next_generation` ensures the bumped generation differs from the old one while `gen_max > 1`. `handle_encode_decode_round_trip` checks the prefix `0x4000_0000`, the index, and the generation. `handle_encode_injective` is the injectivity lemma. `lookup` and `close` call `smros_handle_generation_matches_body`.
 - `src/syscall/handle_namespace_logic_shared.rs generation wrap`
   - 规范假设
     `next_generation` returns 1 once the value exceeds `0x000f_ffff`. A stale handle can match a later occupant of the same slot after that wrap. Single-step inequality is proved; the wrap alias is not.

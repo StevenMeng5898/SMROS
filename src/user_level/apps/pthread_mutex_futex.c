@@ -76,6 +76,12 @@ static unsigned trylock_transition(unsigned word, int *acquired)
     return word;
 }
 
+/* After the fast path fails, every later store is 2 so unlock still wakes. */
+static unsigned contended_lock_word(void)
+{
+    return 2;
+}
+
 #ifdef CBMC
 unsigned nondet_uint(void);
 
@@ -105,6 +111,7 @@ void cbmc_futex_word(void)
     __CPROVER_assert(acquired == (word == 0), "trylock acquires only a free word");
     __CPROVER_assert(acquired ? tried == 1 : tried == word, "failed trylock leaves the word unchanged");
     __CPROVER_assert(tried <= 2, "trylock does not overflow the futex word");
+    __CPROVER_assert(contended_lock_word() == 2, "slow path stores the waiter mark");
     if (word == 0) {
         __CPROVER_cover(1);
     }
@@ -172,21 +179,9 @@ static void mutex_lock(void)
         return;
     }
     for (;;) {
-        unsigned observed = atomic_load_explicit(&mutex_word, memory_order_relaxed);
-        int slow_wait = 0;
-        unsigned stored = lock_transition(observed, &slow_wait);
-        if (!slow_wait) {
-            unsigned retry = 0;
-            if (atomic_compare_exchange_strong_explicit(
-                    &mutex_word, &retry, stored, memory_order_acquire, memory_order_relaxed)) {
-                return;
-            }
-            continue;
-        }
+        unsigned stored = contended_lock_word();
         unsigned previous = atomic_exchange_explicit(&mutex_word, stored, memory_order_acquire);
-        int acquired_free = 0;
-        (void)lock_transition(previous, &acquired_free);
-        if (!acquired_free) {
+        if (previous == 0) {
             return;
         }
         if (futex_wait(&mutex_word, stored) < 0 && errno != EAGAIN && errno != EINTR) {

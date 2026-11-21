@@ -2547,9 +2547,15 @@ proof fn handle_encode_decode_round_trip(index: u32, generation: u32)
         index < 1024,
         1 <= generation <= 0x000f_ffff,
     ensures
+        ((0x4000_0000u32 | (generation << 10) | index) & 0xC000_0000) == 0x4000_0000,
         ((0x4000_0000u32 | (generation << 10) | index) & 0x3ff) == index,
         (((0x4000_0000u32 | (generation << 10) | index) & !0xC000_0000) >> 10) == generation,
 {
+    assert(((0x4000_0000u32 | (generation << 10) | index) & 0xC000_0000) == 0x4000_0000) by (bit_vector)
+        requires
+            index < 1024,
+            1 <= generation <= 0x000f_ffff,
+    ;
     assert(((0x4000_0000u32 | (generation << 10) | index) & 0x3ff) == index) by (bit_vector)
         requires
             index < 1024,

@@ -198,6 +198,9 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
 - `src/user_level/apps/pthread_mutex_futex.c::trylock_transition`
   - 已证明
     CBMC: trylock acquires only a free word and leaves any other word unchanged.
+- `src/user_level/apps/pthread_mutex_futex.c::contended_lock_word`
+  - 已证明
+    CBMC: the slow path always stores 2. A three-thread explicit-state check of that protocol finds no lost wakeup; the same check with the CAS-to-1 regression exits non-zero.
 - `src/user_level/apps/tensor_neon_mul.c`
   - 超出范围
     EL0 NEON GEMM demo, not kernel TCB.

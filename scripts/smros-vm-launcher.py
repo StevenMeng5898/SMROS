@@ -368,6 +368,7 @@ def fixed_test_jobs() -> set[str]:
         "launcher-test",
         "verus",
         "cbmc-futex",
+        "futex-stress",
     }
 
 

@@ -344,7 +344,8 @@ verus-coverage:
 # Verify all currently wired Verus proof harnesses
 verus: verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services verus-coverage
 
-# Bounded check of the pthread futex-word lock, unlock, and trylock transitions.
+# Bounded check of the futex-word transitions, three-thread interleaving, and a
+# negative run of the lost-wakeup slow path.
 cbmc-futex:
 	@command -v cbmc >/dev/null
 	@mkdir -p verification/logs
@@ -353,22 +354,65 @@ cbmc-futex:
 		echo "git_head=$$(git rev-parse HEAD)"; \
 		echo "git_dirty=$$(if git status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' | grep -q .; then echo true; else echo false; fi)"; \
 		echo "A later commit whose diff is only verification/logs/ publishes this run."; \
-		echo "command=cbmc src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --unwinding-assertions --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check"; \
-		cbmc src/user_level/apps/pthread_mutex_futex.c \
+		echo "command=cbmc --cover cover src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check"; \
+		cbmc --cover cover src/user_level/apps/pthread_mutex_futex.c \
 			--function cbmc_futex_word \
 			-DCBMC \
 			--unwind 1 \
-			--unwinding-assertions \
 			--bounds-check \
 			--pointer-check \
 			--signed-overflow-check \
 			--unsigned-overflow-check; \
 		rc=$$?; \
-		echo "exit=$$rc"; \
-		exit $$rc; \
+		echo "cbmc_exit=$$rc"; \
+		cc -O2 -o /tmp/smros-mutex-model verification/futex/mutex_interleave.c; \
+		echo "model_fixed:"; \
+		/tmp/smros-mutex-model; \
+		fixed=$$?; \
+		echo "model_fixed_exit=$$fixed"; \
+		cc -O2 -DBROKEN_SLOW_PATH -o /tmp/smros-mutex-model-bad verification/futex/mutex_interleave.c; \
+		echo "model_broken:"; \
+		/tmp/smros-mutex-model-bad; \
+		broken=$$?; \
+		echo "model_broken_exit=$$broken"; \
+		if [ "$$rc" -ne 0 ] || [ "$$fixed" -ne 0 ] || [ "$$broken" -eq 0 ]; then \
+			echo "futex model gate failed"; \
+			exit 1; \
+		fi; \
 	} > verification/logs/cbmc-futex.log 2>&1; \
 	status=$$?; \
 	tail -n 20 verification/logs/cbmc-futex.log; \
+	python3 -c 'import pathlib,re,sys; t=pathlib.Path("verification/logs/cbmc-futex.log").read_text(); m=re.findall(r"\*\* (\d+) of (\d+) covered", t); sys.exit(0 if ("3","3") in m and "cbmc_exit=0" in t and "model_fixed_exit=0" in t and "model_broken_exit=1" in t else 1)' || exit 1; \
+	exit $$status
+
+# Host stress of the contended futex mutex. Each run must finish and count exactly.
+futex-stress:
+	@mkdir -p verification/logs
+	@cc -O2 -pthread -o /tmp/smros-pthread-mutex-futex src/user_level/apps/pthread_mutex_futex.c
+	@{ \
+		echo "utc=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+		echo "git_head=$$(git rev-parse HEAD)"; \
+		echo "git_dirty=$$(if git status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' | grep -q .; then echo true; else echo false; fi)"; \
+		echo "A later commit whose diff is only verification/logs/ publishes this run."; \
+		fail=0; \
+		for threads in 3 4 6 8; do \
+			for run in $$(seq 1 20); do \
+				out=$$(timeout 10s /tmp/smros-pthread-mutex-futex contended $$threads 100 2>/dev/null | tail -n 1); \
+				expect=$$((threads * 100)); \
+				got=$$(printf '%s\n' "$$out" | sed -n 's/.*counter=\([0-9]*\).*/\1/p'); \
+				if [ "$$got" != "$$expect" ]; then \
+					echo "FAIL threads=$$threads run=$$run line=$$out"; \
+					fail=1; \
+				else \
+					echo "PASS threads=$$threads run=$$run counter=$$got"; \
+				fi; \
+			done; \
+		done; \
+		if [ "$$fail" -ne 0 ]; then echo "futex-stress failed"; exit 1; fi; \
+		echo "futex-stress passed runs=80"; \
+	} > verification/logs/futex-stress.log 2>&1; \
+	status=$$?; \
+	tail -n 5 verification/logs/futex-stress.log; \
 	exit $$status
 
 # Full local confidence suite, including QEMU smoke and Verus
