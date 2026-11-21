@@ -1,5 +1,5 @@
-utc=2026-11-21T15:57:58Z
-git_head=c8a664939919e048b9afcda8998ddd24c50e9f6d
+utc=2026-11-21T17:30:50Z
+git_head=c6d045dec24beaaa2c201a8179eb2bf458b997fd
 git_dirty=false
 SMROS QEMU smoke test passed: found 'smros:/>' and every required serial pattern.
 EXIT:0

@@ -1,5 +1,5 @@
 ===== verus function evidence =====
-git_head=a8af20557adc38b1f884e37af5ff82deae495281
+git_head=c6d045dec24beaaa2c201a8179eb2bf458b997fd
 git_dirty=false
 dirty_files<<END
 
@@ -23,7 +23,7 @@ harness_sha256:
 81b63a4059fd940cb56980edeafea5e011ad774d3a3c00124b6b606229905c73  verification/syscall/src/lib.rs
 bc905656807711a9a5ed149e463c5f8e58fd4d8e3652959255881c11d414c1cb  verification/kernel_objects/src/lib.rs
 4cf8574761adf412686d15be616c4137897620e21852e6dc5dbc556a1bfbd576  verification/kernel_lowlevel/src/lib.rs
-2fcec78cef4812bf793f45002cd1e45dacb1f1c678d42810e178b57e108a066c  verification/user_level/src/lib.rs
+e46878989df6f430cf93f4e68430b414abc9768efe232691eea8f5a6301e6dd3  verification/user_level/src/lib.rs
 16618596d57f605edf1b3189502b833fde4d4146d7fb03d3655a32de0065c585  verification/services/src/lib.rs
 harness function mode success origin
 verus-kernel-lowlevel.log	lib::verified_kernel_budget_admit_heap	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_admit_heap_body
