@@ -56,8 +56,6 @@ verus! {
 include!("../../../src/user_level/services/user_logic_shared.rs");
 include!("../../../src/user_level/services/security_case_logic_shared.rs");
 
-pub const SERVICES_FILE_COUNT: usize = 26;
-
 pub const USER_NAMESPACE_RIGHTS_MASK: u32 = 0x7;
 pub const USER_FXFS_MAX_NODES: usize = 8192;
 pub const USER_FXFS_MAX_DIRENTS: usize = 8192;
@@ -1329,37 +1327,6 @@ proof fn posix_test_logic_shared_rs_proof_slice() {
     assert(posix_resource_delta_spec(14, 10) == -4);
 }
 
-pub const HOST_SHARE_MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
-
-proof fn host_share_rs_proof_slice() {
-    assert(HOST_SHARE_MAX_FILE_BYTES == 67108864);
-    assert(HOST_SHARE_MAX_FILE_BYTES as int / 1048576int == 64);
-}
-
-spec fn html_ui_clamp_width_spec(width: int) -> int {
-    if width < 56 {
-        56
-    } else if width > 96 {
-        96
-    } else {
-        width
-    }
-}
-
-proof fn html_ui_rs_proof_slice() {
-    assert(html_ui_clamp_width_spec(40) == 56);
-    assert(html_ui_clamp_width_spec(80) == 80);
-    assert(html_ui_clamp_width_spec(120) == 96);
-    assert(720 > 78);
-    assert(720 * 420 > 78);
-}
-
-proof fn mod_rs_proof_slice()
-    ensures
-        SERVICES_FILE_COUNT == 26,
-{
-}
-
 proof fn net_rs_proof_slice() {
     assert(net_same_ipv4_subnet_spec(10, 0, 2, 10, 0, 2));
     assert(!net_same_ipv4_subnet_spec(10, 0, 2, 10, 0, 3));
@@ -1434,116 +1401,6 @@ proof fn user_shell_rs_proof_slice() {
     assert(decimal_digit_value_spec(65) == Option::<int>::None);
     assert(shell_ask_args_valid_spec(2));
     assert(!shell_ask_args_valid_spec(1));
-}
-
-pub const ELF_LOAD_EINVAL: u8 = 22;
-pub const ELF_LOAD_ENOMEM: u8 = 12;
-pub const LVGL_DEMO_WIDTH: usize = 480;
-pub const LVGL_DEMO_HEIGHT: usize = 288;
-pub const LVGL_SCHED_TRACE_WIDTH: usize = 360;
-pub const LVGL_SCHED_TRACE_HEIGHT: usize = 216;
-pub const PERFETTO_TICK_US: u64 = 10_000;
-pub const PERFETTO_NS_PER_US: u64 = 1_000;
-pub const PERFETTO_POLICY_COMPARE_DEFAULT_STEPS: usize = 16;
-pub const PERFETTO_POLICY_COMPARE_MAX_STEPS: usize = 64;
-pub const POSIX_MANIFEST_MAX_BYTES: usize = 2 * 1024 * 1024;
-pub const POSIX_MANIFEST_MAX_TESTS: usize = 4_096;
-pub const POSIX_MANIFEST_MAX_TEST_ID_BYTES: usize = 256;
-pub const POSIX_MANIFEST_MAX_STAGED_PATH_BYTES: usize = 512;
-pub const LISTED_CASE_COUNT: usize = 89;
-pub const SECTEST_ALL_CASE_COUNT: usize = LISTED_CASE_COUNT + 2;
-pub const DEFAULT_LAUNCHER_PORT: u16 = 7070;
-pub const VM_HOST_MAX_REQUEST_BYTES: usize = 2048;
-pub const VM_HOST_MAX_RESPONSE_BYTES: usize = 512;
-
-proof fn elf_load_logic_shared_rs_proof_slice() {
-    assert(ELF_LOAD_EINVAL == 22);
-    assert(ELF_LOAD_ENOMEM == 12);
-    assert(ELF_LOAD_EINVAL != ELF_LOAD_ENOMEM);
-}
-
-proof fn lvgl_rs_proof_slice() {
-    assert(LVGL_DEMO_WIDTH * LVGL_DEMO_HEIGHT == 138240);
-    assert(LVGL_SCHED_TRACE_WIDTH < LVGL_DEMO_WIDTH);
-    assert(LVGL_SCHED_TRACE_HEIGHT < LVGL_DEMO_HEIGHT);
-}
-
-proof fn perfetto_rs_proof_slice() {
-    assert(PERFETTO_TICK_US * PERFETTO_NS_PER_US == 10_000_000);
-    assert(PERFETTO_POLICY_COMPARE_DEFAULT_STEPS < PERFETTO_POLICY_COMPARE_MAX_STEPS);
-    assert(PERFETTO_POLICY_COMPARE_MAX_STEPS == 64);
-}
-
-proof fn posix_test_rs_proof_slice() {
-    assert(POSIX_MANIFEST_MAX_BYTES == 2 * 1024 * 1024);
-    assert(POSIX_MANIFEST_MAX_TESTS == 4096);
-    assert(POSIX_MANIFEST_MAX_TEST_ID_BYTES < POSIX_MANIFEST_MAX_STAGED_PATH_BYTES);
-}
-
-pub const CASE_TIMEOUT_NS: u64 = 2_000_000_000;
-
-spec fn sectest_trap_code(faulted: bool, magic_ok: bool, exec_ok: bool) -> int {
-    if faulted && magic_ok && exec_ok {
-        0
-    } else if !magic_ok {
-        1
-    } else if !exec_ok {
-        2
-    } else {
-        3
-    }
-}
-
-proof fn security_case_rs_proof_slice() {
-    assert(LISTED_CASE_COUNT == 89);
-    assert(SECTEST_ALL_CASE_COUNT == 91);
-    assert(SECTEST_ALL_CASE_COUNT == LISTED_CASE_COUNT + 2);
-    assert(CASE_TIMEOUT_NS == 2_000_000_000);
-}
-
-proof fn security_case_logic_shared_rs_proof_slice() {
-    assert(sectest_trap_code(true, true, true) == 0);
-    assert(sectest_trap_code(true, false, true) == 1);
-    assert(sectest_trap_code(true, true, false) == 2);
-    assert(sectest_trap_code(false, true, true) == 3);
-}
-
-proof fn vm_host_rs_proof_slice() {
-    assert(DEFAULT_LAUNCHER_PORT == 7070);
-    assert(VM_HOST_MAX_REQUEST_BYTES > VM_HOST_MAX_RESPONSE_BYTES);
-    assert(VM_HOST_MAX_REQUEST_BYTES / VM_HOST_MAX_RESPONSE_BYTES == 4);
-}
-
-proof fn services_folder_all_files_have_verification_slices()
-    ensures
-        SERVICES_FILE_COUNT == 26,
-{
-    compat_apps_rs_proof_slice();
-    component_rs_proof_slice();
-    docker_compat_rs_proof_slice();
-    elf_load_logic_shared_rs_proof_slice();
-    elf_rs_proof_slice();
-    fxfs_rs_proof_slice();
-    gemma_rs_proof_slice();
-    hermes_agent_rs_proof_slice();
-    hermes_shell_logic_shared_rs_proof_slice();
-    host_share_rs_proof_slice();
-    html_ui_rs_proof_slice();
-    lvgl_rs_proof_slice();
-    mod_rs_proof_slice();
-    net_rs_proof_slice();
-    perfetto_rs_proof_slice();
-    posix_test_logic_shared_rs_proof_slice();
-    posix_test_rs_proof_slice();
-    qml_cluster_rs_proof_slice();
-    run_elf_rs_proof_slice();
-    security_case_logic_shared_rs_proof_slice();
-    security_case_rs_proof_slice();
-    svc_rs_proof_slice();
-    user_logic_rs_proof_slice();
-    user_logic_shared_rs_proof_slice();
-    user_shell_rs_proof_slice();
-    vm_host_rs_proof_slice();
 }
 
 fn verified_sectest_trap_verdict(faulted: bool, magic_ok: bool, exec_ok: bool) -> (out: u8)

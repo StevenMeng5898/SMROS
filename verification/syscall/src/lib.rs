@@ -47,6 +47,21 @@ mod linux_mqueue_runtime_shared {
     include!("../../../src/syscall/linux_mqueue_logic_shared.rs");
 }
 
+#[allow(dead_code)]
+mod linux_runtime_lock_for_verification {
+    include!("../../../src/syscall/linux_runtime_lock_shared.rs");
+}
+
+#[allow(dead_code, unused_macros)]
+mod syscall_bridge_pointer_smoke {
+    include!("../../../src/syscall/syscall_bridge_shared.rs");
+
+    #[allow(dead_code)]
+    fn exercise_saved_regs_ptr(sp: usize) -> *const [u64; 32] {
+        smros_saved_regs_ptr_from_el0_sp_body!(sp)
+    }
+}
+
 #[allow(dead_code, unused_macros)]
 mod address_runtime_macro_checks {
     include!("../../../src/syscall/address_logic_shared.rs");

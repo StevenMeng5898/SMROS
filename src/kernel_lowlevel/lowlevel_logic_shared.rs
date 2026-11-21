@@ -147,6 +147,30 @@ pub(crate) struct PageFrameAllocatorCore<const WORDS: usize> {
     next_search_page: usize,
 }
 
+macro_rules! smros_ll_page_range_admit_body {
+    ($start:expr, $end:expr, $page_size:expr, $words:expr) => {{
+        if $page_size == 0
+            || $start % $page_size != 0
+            || $end % $page_size != 0
+            || $start >= $end
+        {
+            false
+        } else {
+            let pages = ($end - $start) / $page_size;
+            match $words.checked_mul(64) {
+                Some(capacity) => pages <= capacity,
+                None => false,
+            }
+        }
+    }};
+}
+
+macro_rules! smros_ll_page_bit_free_body {
+    ($word:expr, $bit:expr) => {{
+        $bit < 64 && ($word & (1u64 << $bit)) == 0
+    }};
+}
+
 impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
     pub(crate) const fn new(total_pages: usize) -> Self {
         Self {
@@ -159,17 +183,11 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
     }
 
     pub(crate) fn init_range(&mut self, start: usize, end: usize, page_size: usize) -> bool {
-        if page_size == 0 || start % page_size != 0 || end % page_size != 0 || start >= end {
+        if !smros_ll_page_range_admit_body!(start, end, page_size, WORDS) {
             return false;
         }
 
         let pages = (end - start) / page_size;
-        let Some(capacity) = WORDS.checked_mul(64) else {
-            return false;
-        };
-        if pages > capacity {
-            return false;
-        }
 
         self.bitmap.fill(0);
         self.base_pfn = (start / page_size) as u64;
@@ -190,7 +208,7 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
             let word_index = page_index / 64;
             let bit_index = page_index % 64;
             let mask = 1u64 << bit_index;
-            if self.bitmap[word_index] & mask == 0 {
+            if smros_ll_page_bit_free_body!(self.bitmap[word_index], bit_index) {
                 self.bitmap[word_index] |= mask;
                 self.allocated_pages += 1;
                 self.next_search_page = (page_index + 1) % self.total_pages;
@@ -211,8 +229,8 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
             return false;
         };
         let word_index = page_index / 64;
-        let mask = 1u64 << (page_index % 64);
-        self.bitmap[word_index] & mask != 0
+        let bit_index = page_index % 64;
+        !smros_ll_page_bit_free_body!(self.bitmap[word_index], bit_index)
     }
 
     pub(crate) fn free(&mut self, pfn: u64) -> bool {
@@ -224,11 +242,12 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
             return false;
         };
         let word_index = page_index / 64;
-        let mask = 1u64 << (page_index % 64);
-        if self.bitmap[word_index] & mask == 0 {
+        let bit_index = page_index % 64;
+        if smros_ll_page_bit_free_body!(self.bitmap[word_index], bit_index) {
             return false;
         }
 
+        let mask = 1u64 << bit_index;
         self.bitmap[word_index] &= !mask;
         self.allocated_pages -= 1;
         self.next_search_page = self.next_search_page.min(page_index);

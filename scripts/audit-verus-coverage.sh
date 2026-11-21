@@ -8,6 +8,20 @@ cd "$ROOT_DIR"
 
 status=0
 
+if [ -f verification/logs/verus-syscall.log ]; then
+    {
+        echo "===== assembled make verus log ====="
+        echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "git_head=$(git rev-parse HEAD)"
+        echo "The per-harness logs below are the raw Verus JSON. This file only concatenates them."
+        for name in verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services; do
+            echo "########## verification/logs/${name}.log ##########"
+            cat "verification/logs/${name}.log"
+            echo
+        done
+    } >verification/logs/make-verus.log
+fi
+
 contains_fixed() {
     local needle="$1"
     local path="$2"
@@ -25,7 +39,13 @@ macro_lines() {
     grep -E -o '^macro_rules! [A-Za-z0-9_]+ ' "$path" || true
 }
 
-shared_files="$(find src -type f -name '*_logic_shared.rs' | sort)"
+shared_files="$(
+    find src -type f -name '*_logic_shared.rs'
+    printf '%s\n' \
+        src/syscall/syscall_bridge_shared.rs \
+        src/syscall/linux_runtime_lock_shared.rs
+)"
+shared_files="$(printf '%s\n' "$shared_files" | sort -u)"
 
 for src_file in $shared_files; do
     include_path="../../../$src_file"
@@ -91,6 +111,10 @@ if missing:
     sys.exit(1)
 PY
 then
+    status=1
+fi
+
+if ! python3 scripts/audit-verus-proofs.py; then
     status=1
 fi
 

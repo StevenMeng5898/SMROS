@@ -703,6 +703,37 @@ fn ll_bitmap_mask(bit: usize) -> (out: u64)
     smros_ll_bitmap_mask_body!(bit)
 }
 
+fn verified_page_bit_free(word: u64, bit: usize) -> (out: bool)
+    requires
+        bit < 64,
+    ensures
+        out == ((word & (1u64 << bit)) == 0),
+{
+    smros_ll_page_bit_free_body!(word, bit)
+}
+
+fn verified_page_range_admitted(
+    start: usize,
+    end: usize,
+    page_size: usize,
+    words: usize,
+) -> (out: bool)
+    ensures
+        page_size == 0 ==> !out,
+        page_size > 0 && start >= end ==> !out,
+        page_size > 0
+            && start < end
+            && (start % page_size != 0 || end % page_size != 0) ==> !out,
+        page_size > 0
+            && start < end
+            && start % page_size == 0
+            && end % page_size == 0
+            && words <= usize::MAX / 64 ==> out
+            == ((end - start) as int / page_size as int <= words as int * 64),
+{
+    smros_ll_page_range_admit_body!(start, end, page_size, words)
+}
+
 fn ll_process_index_valid(index: usize) -> (out: bool)
     ensures
         out == (index < MAX_PROCESSES),

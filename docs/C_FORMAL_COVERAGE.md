@@ -19,10 +19,18 @@ modified and are not listed here or in `docs/VERUS_COVERAGE.md`.
 `scripts/posix/runtime/` is the SMROS compat layer, same class as the DDK
 compat layer, and is 待证明. `tests/guest/` is SMROS's own guest probes, not
 the upstream suite and not kernel TCB; those files stay 待证明 rather than
-超出范围. `benchmarks/` is a performance suite, not a conformance suite, and
-stays 未覆盖 until a C proof is assigned. Demos stay 超出范围:
+超出范围. `benchmarks/` is 超出范围 because each file is a performance
+benchmark and not kernel TCB (性能基准、非内核 TCB). That is not the
+standard-suite rule. Demos stay 超出范围:
 `include/smros/examples/hello_linux.c` and
 `src/user_level/apps/tensor_neon_mul.c`.
+
+- `third_party/posixtest/**`
+  - 超出范围
+    Pinned upstream Open POSIX Test Suite sources and the existing patch series. Not kernel TCB. Do not modify or prove these files.
+- `target/posix/**`
+  - 超出范围
+    Generated checkout of that pinned suite. Not kernel TCB. Do not modify or prove these files.
 
 Priority for the in-scope DDK layer is CBMC for bounds, overflow, and null
 dereference. ACSL with Frama-C Wp is appropriate once a function contract can
@@ -32,71 +40,71 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
 ## Classified C and C++ Files
 
 - `benchmarks/dhrystone_smros/dhry.h`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/dhrystone_smros/dhry_1.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/dhrystone_smros/dhry_2.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/dhrystone_smros/main.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/dhrystone_smros/smros_dhry.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/dhrystone_smros/smros_dhry.h`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/channels.cc`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/freestanding.cc`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/handles.cc`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/main.cc`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/perftest.h`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/smros_zircon.h`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/time.cc`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/fuchsia_microbenchmarks_smros/vmo.cc`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/arith.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/fstime.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/hanoi.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/main.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/pipe.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/smros_unix.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/smros_unix.h`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `benchmarks/unixbench_smros/syscall.c`
-  - 未覆盖
-    Performance test, not a conformance suite. Not yet assigned a C proof.
+  - 超出范围
+    性能基准、非内核 TCB
 - `include/asm/io.h`
   - 待证明
     MMIO accessors used by the compat layer. Priority CBMC for width and null.
@@ -179,8 +187,8 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
   - 待证明
     SMROS POSIX compat runtime. Not yet discharged. The upstream suite under `target/posix` is not this file.
 - `src/user_level/apps/pthread_mutex_futex.c`
-  - 待证明
-    EL0 futex mutex demo. Secondary CBMC target. Kernel futex proofs stay on the Verus track.
+  - 已证明
+    CBMC checks `lock_transition`, `unlock_transition`, and `trylock_transition` for the 0/1/2 futex word: free locks without a wait, unlock frees the word and wakes only from 2, trylock acquires only 0, and the word does not overflow. Raw log: `verification/logs/cbmc-futex.log`. The pthread demo around those transitions is not separately proved. Kernel futex proofs stay on the Verus track.
 - `src/user_level/apps/tensor_neon_mul.c`
   - 超出范围
     EL0 NEON GEMM demo, not kernel TCB.

@@ -992,6 +992,11 @@ fn driver_block_capacity_bytes_direct(blocks: usize, block_size: usize) -> (out:
     requires
         block_size > 0,
         blocks <= usize::MAX / block_size,
+    ensures
+        out == match blocks.checked_mul(block_size) {
+            Some(bytes) => bytes,
+            None => usize::MAX,
+        },
 {
     smros_driver_block_capacity_bytes_body!(blocks, block_size)
 }
@@ -1029,6 +1034,14 @@ fn driver_block_range_valid_direct(
         block_size > 0,
         blocks <= usize::MAX / block_size,
         offset <= usize::MAX - len,
+    ensures
+        out == match blocks.checked_mul(block_size) {
+            Some(capacity) => match offset.checked_add(len) {
+                Some(end) => end <= capacity,
+                None => false,
+            },
+            None => false,
+        },
 {
     smros_driver_block_range_valid_body!(offset, len, blocks, block_size)
 }
