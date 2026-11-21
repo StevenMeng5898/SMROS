@@ -1,8 +1,9 @@
 ===== verification log =====
-utc=2026-11-21T05:06:41Z
-git_head=783201c3ac537ea56d9defc2a478f8c104d7db9b
-git_dirty=false
+utc=2026-11-21T07:34:44Z
+git_head=ea61993c09aa0d2ba4b3ceda02296c12694e2100
+git_dirty=true
 git_status_before_log_write<<END
+ M scripts/__pycache__/smros-vm-launcher.cpython-312.pyc
 END
 Status above was recorded before this log file was written.
 A later commit whose diff is only verification/logs/ publishes this run and does not change the sources it checked.
@@ -39,371 +40,15 @@ Verus
 ===== output =====
 {
   "func-details": {
-    "lib::sched_credit_after_tick_spec": {
+    "vstd::view::impl&%4::view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::socket_option_masks_smoke": {
+    "lib::hypervisor_name_byte_valid": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::vmar_range_available_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%18::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LOG_LEVEL_FATAL": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_rights_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::Seq::len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::rights_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PORT_QUEUE_CAPACITY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_process_right_profile_is_restricted": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_THREADS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_option_masks_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%101::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%31::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%108::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::axiom_seq_new_len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SANDBOX_ROOT_VMAR_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_SET_POLICY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%49::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%46::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%96::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::page_aligned_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_PROCESS_RIGHT_CONFIG_ENTRIES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DEFAULT_THREAD_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_ring_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%92::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::futex_min_count": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::spec_vec_len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%102::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PORT_PACKET_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%96::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SCHED_POLICY_RR": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_SIGNAL_READ_THRESHOLD": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%75::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_kill_transition": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::axiom_spec_len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%22::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_task_allowed_on_cpu": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::futex_min_count_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%11::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::is_some": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_channel_message_fits": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%107::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_terminate_transition": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_SIGNAL": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_priority_should_preempt": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_packet_and_queue_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_policy_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_SET_PROPERTY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "verus_builtin::impl&%7::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_signal_packet_allowed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::object_signal_update_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_transfer_bytes": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_options_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SANDBOX_ROOT_VMAR_DENIED_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%3::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::Seq::new": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ranges_overlap_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SANDBOX_JOB_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_uptime_ticks_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%16::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LOG_LEVEL_ERR": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SCHED_POLICY_EDF": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%110::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_MANAGE_THREAD": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::axiom_vec_decreases_to_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%72::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_signal_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_min_count_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_ring_index_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%105::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::vec_clone_trigger": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%2::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::process_right_profile_is_restricted_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_uptime_ticks": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::WAIT_ASYNC_TIMESTAMP": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::handle_rights_allow_duplicate_found_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%8::saturating_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::DeepView::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::FIFO_MAX_ELEMS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%102::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_PEEK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%29::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::FIFO_CREATE_OPTIONS_MASK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_accounting_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::boot_process_right_config_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_EMPTY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::HYPERVISOR_VM_NAME_MAX": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_options_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%21::deep_view": {
+    "lib::ko_thread_is_runnable": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -411,51 +56,39 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::socket_refresh_read_signals_spec": {
+    "lib::ko_roundup_pages": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::vmo_checked_end_model": {
+    "lib::process_right_profile_is_restricted_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::sched_credit_better_spec": {
+    "lib::CHANNEL_SIGNAL_READABLE": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::WAIT_ASYNC_OPTIONS_MASK": {
+    "vstd::std_specs::convert::impl&%92::obeys_from_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::INVALID_HANDLE": {
+    "lib::SANDBOX_ROOT_VMAR_DENIED_RIGHTS": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::roundup_pages_spec": {
+    "lib::vmo_checked_end_rejects_overflow": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::std_specs::convert::impl&%112::from_spec": {
+    "lib::RIGHT_SET_PROPERTY": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::hypervisor_name_len_valid": {
+    "lib::SCHED_MAX_CREDIT_WEIGHT": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::log_level_from_raw_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::VmarMappingModel::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CHANNEL_SIGNAL_PEER_CLOSED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%10::checked_mul": {
+    "lib::FIFO_CREATE_OPTIONS_MASK": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -463,283 +96,19 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::SOCKET_SIGNAL_WRITE_THRESHOLD": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%105::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_state_count_delta": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::log_should_log": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_credit_after_elapsed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_WRITE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_transfer_bytes_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_SHUTDOWN_READ": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%27::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_deadline_due": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_options_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::futex_saturating_add_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%104::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_preemption_policy_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_READ_OPTIONS_MASK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_signal_packet_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SCHED_POLICY_CREDIT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ThreadModel::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_packet_ptr_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_should_preempt_policy_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_min_count": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_checked_end": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
     "lib::hypervisor_lifecycle_smoke": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::rights_subset_spec": {
+    "vstd::std_specs::vec::axiom_vec_index_decreases": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%48::view": {
+    "core::num::impl&%9::saturating_add": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "core::convert::num::impl&%68::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_credit_after_tick": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%103::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_priority_should_preempt_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::no_overlap_with_vmar_mappings": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_refresh_read_signals_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_time_slice_after_tick": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%6::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%74::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_options_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::process_right_profile_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_roundup_pages": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%11::checked_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_empty_peer_queue_read_error": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%20::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%23::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_mask_options_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%23::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_transfer_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%110::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_advance_deadline": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::range_within_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::log_level_from_match_flags_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_thread_is_idle": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_WAIT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_pick_next_for_cpu_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_capacity_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_policy_from_match_flags_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::vec_clone_deep_view_proof": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_packet_ptr_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::vec_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_can_run_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%6::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_name_policy_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SANDBOX_PROCESS_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_ring_index_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_option_masks_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_refill_credit": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%27::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::replace_rights_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PORT_CREATE_OPTIONS_MASK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::handle_get_rights_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_terminate_transition_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%34::view": {
+    "core::convert::From::from": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -747,15 +116,103 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_channel_signal_state": {
+    "lib::RIGHT_APPLY_PROFILE": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::std_specs::convert::impl&%97::from_spec": {
+    "vstd::std_specs::convert::impl&%103::obeys_from_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%17::deep_view": {
+    "vstd::std_specs::vec::VecAdditionalSpecFns::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SOCKET_CREATE_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::process_right_profile_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::OptionAdditionalFns::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%1::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DEFAULT_JOB_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_SET_POLICY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_task_allowed_on_cpu": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::vmar_range_available_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_task_allowed_on_cpu_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_priority_better_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_name_policy_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%64::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_rights_has": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::roundup_pages_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_ptr_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_credit_better": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_kill_transition_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::FIFO_MAX_ELEM_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_capacity_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_uptime_ticks_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -763,19 +220,691 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::hypervisor_name_byte_valid_spec": {
+    "lib::channel_signal_state_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::port_queue_has_space": {
+    "lib::WAIT_ASYNC_OPTIONS_MASK": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::boot_process_right_config_shape_spec": {
+    "vstd::view::impl&%16::view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ready_state": {
+    "lib::HYPERVISOR_STATE_CRASHED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LOG_LEVEL_WARNING": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_wake_transition": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ranges_overlap_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_decreases_to_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_ID_IDLE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::vmo_end_page_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::spec_vec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%53::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_WRITE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_advance_deadline": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::new": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::rights_has_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_packet_ptr_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%101::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SOCKET_SHUTDOWN_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%10::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_should_preempt_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::vmar_range_available_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_refresh_write_signals_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_CHANNEL_MSG_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_TERMINATED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::WAIT_ASYNC_BOOT_TIMESTAMP": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SANDBOX_ROOT_VMAR_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_name_len_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::log_level_from_raw": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%49::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_remaining_capacity_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_scheduler_can_run": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_packet_ptr_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_pages": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_cpu_usage_percent": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%28::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::rights_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%97::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::boxed::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_threshold_met_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_accounting_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_spec_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_crash_transition_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SOCKET_DATAGRAM": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%71::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::handle_is_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%29::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_kill_transition": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::no_overlap_with_vmar_mappings": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_ext_equal": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%109::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_refresh_write_signals": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::INVALID_HANDLE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_duplicate_rights_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_options_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHTS_ALL": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%104::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%102::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SOCKET_PEEK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_signal_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_remaining_capacity_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_policy_from_match_flags": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_ENUMERATE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%12::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::axiom_vec_has_resolved": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_intersect_rights": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_advance_deadline_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_policy_from_match_flags_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%46::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%108::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%96::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_DUPLICATE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_mask_options_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_publish_transition": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_should_preempt_policy": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LOG_LEVEL_INFO": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::handle_rights_allow_duplicate_found_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%35::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%7::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%14::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%19::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%50::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_campaign_deadline_exceeded": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%106::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::WAIT_ASYNC_EDGE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_transfer_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_cpu_usage_percent_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%74::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_MANAGE_SOCKET": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%15::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_name_len_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::VmarMappingModel::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_option_masks_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::page_aligned_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%109::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%33::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%31::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%0::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::DeepView::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%17::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_helper_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%111::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_terminate_transition_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::process_right_profile_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_scheduler_cpu_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_fair_better": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%105::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%67::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_ranges_overlap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PAGE_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::FUTEX_ALIGN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_deep_view_proof": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_refresh_read_signals_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%108::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_credit_after_tick_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_fair_better_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SCHED_POLICY_RR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_process_right_profile_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::spec_unwrap": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_saturating_inc_u32_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_CHANNEL_MSG_HANDLES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%11::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%19::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%27::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_ptr_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_min_count": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SCHED_POLICY_EDF": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SCHED_POLICY_FAIR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SCHED_DEFAULT_CREDIT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%66::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "alloc::vec::impl&%1::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_crash_transition": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_READ": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%22::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%25::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_rights_subset": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%5::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_threshold_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%72::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%97::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::FromSpec::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_credit_after_tick": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%3::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_none": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%106::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%41::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::CHANNEL_SIGNAL_WRITABLE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::channel_message_fits_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_EXECUTE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_wait_async_options_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::saturating_sub": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_process_right_profile_is_restricted": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SANDBOX_PROCESS_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::vec_clone_trigger": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::log_should_log": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_preemption_policy_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_INSPECT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%11::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_SIGNAL_PEER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "verus_builtin::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_ring_index_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_observer_should_queue_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::FromSpec::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%112::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DEFAULT_VMAR_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_handle_is_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::types_constants_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SOCKET_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_signal_packet_allowed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%36::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_deadline_due": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -787,371 +916,11 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::std_specs::vec::axiom_vec_has_resolved": {
+    "lib::sched_deadline_due_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::HYPERVISOR_STATE_STOPPED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::duplicate_rights_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_ID_IDLE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%111::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::FIFO_MAX_ELEM_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_capacity_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::HandleEntryModel::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_min_count_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_CHANNEL_MSG_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::FromSpec::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_CREATE_MASK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_page_aligned": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_ring_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_cpu_usage_percent": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::axiom_seq_ext_equal": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%65::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%41::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_refresh_read_signals": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_threshold_met": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_SIGNAL_PEER": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_SHUTDOWN_WRITE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_refresh_write_signals_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_READY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%26::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::axiom_vec_index_decreases": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_MAP": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_observer_should_queue_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%0::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::types_constants_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::futex_helper_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%19::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%106::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_SAME_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%109::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_capacity_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_wake_transition": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_remaining_capacity_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_DATAGRAM": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_remaining_capacity": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::impl&%0::spec_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::rights_has_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_edf_better_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%15::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CHANNEL_SIGNAL_READABLE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::PAGE_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%24::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_saturating_inc_u32_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%25::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_json_process_right_config_install_allowed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::View::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::handle_is_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::process_right_profile_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_rights_has": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::vmo_checked_end_rejects_overflow": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%103::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LOG_LEVEL_DEBUG": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_mask_options": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_tick_accounting_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::WAIT_ASYNC_BOOT_TIMESTAMP": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_state_count_delta_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%14::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_refresh_write_signals_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_refill_credit_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "alloc::vec::impl&%12::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%64::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_threshold_met_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%1::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%13::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_roundup_pages_bounded": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%112::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_credit_better": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_MANAGE_VMO": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::thread_state_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_APPLY_PROFILE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_scheduler_cpu_allowed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%25::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_MANAGE_PROCESS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%66::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "verus_builtin::impl&%9::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::option::impl&%6::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::saturating_sub": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::log_level_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_TRANSFER": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_remaining_capacity_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_pick_next_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%101::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_remaining_capacity": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::log_level_from_match_flags": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::strictly_cloned": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::log_level_from_raw": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_min_count": {
+    "vstd::view::impl&%21::deep_view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1163,471 +932,11 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%50::view": {
+    "lib::socket_mask_options": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::vmar_overlap_is_symmetric": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_threshold_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_MANAGE_SOCKET": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DEFAULT_PROCESS_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%97::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::json_process_right_config_install_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::verified_campaign_deadline_exceeded": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "alloc::boxed::impl&%15::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%17::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::From::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_options_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_GET_PROPERTY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_wake_transition_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::spec_unwrap": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_OP_CHILDREN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_RUNNING": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_deadline_due_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::vmo_end_page_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SANDBOX_PROCESS_DENIED_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_priority_better": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%35::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SANDBOX_JOB_DENIED_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%9::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::pervasive::cloned": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_should_preempt_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_ATTACH_VMO": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_queue_has_space_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "alloc::vec::impl&%1::len": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DEFAULT_VMAR_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_pages": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%37::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%7::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::FIFO_BUFFER_SIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SCHED_MAX_CREDIT_WEIGHT": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::DEFAULT_JOB_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_scheduler_should_preempt": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%32::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::channel_signal_state_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::seq::axiom_seq_index_decreases": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_publish_transition": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_RESIZE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%33::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%96::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_priority_better_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_DESTROY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::HYPERVISOR_STATE_CRASHED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::option::is_none": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::WAIT_ASYNC_EDGE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_time_slice_after_tick_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_options_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_wait_async_options_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_MANAGE_JOB": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::MAX_CHANNEL_MSG_HANDLES": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_refresh_read_signals": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::HYPERVISOR_STATE_RUNNING": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::fifo_refresh_write_signals": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_process_right_profile_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%9::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_refresh_write_signals": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_wait_async_options_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_saturating_inc_u32": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::FUTEX_ALIGN": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_replace_rights_allowed": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_crash_transition": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_TERMINATED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::checked_mul": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_kill_transition_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_policy_from_match_flags": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%109::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::socket_signal_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%11::checked_mul": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::vec::VecAdditionalSpecFns::spec_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHTS_ALL": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_GET_POLICY": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_cpu_allowed_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LOG_LEVEL_INFO": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::hypervisor_name_byte_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_ranges_overlap": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::vmar_range_available_model": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::log_should_log_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_signal_update": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_READ": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%5::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%73::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::THREAD_BLOCKED": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%19::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%30::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_scheduler_candidate_index": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SOCKET_SHUTDOWN_MASK": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::pages_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_fair_better_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::LOG_LEVEL_WARNING": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_fair_better": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::sched_should_preempt_policy": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_EXECUTE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::FromSpec::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::num::impl&%9::saturating_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::scheduler_publish_transition_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::futex_ptr_valid_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::futex_ptr_valid": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%8::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::clone::impls::impl&%15::clone": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%47::deep_view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::view::impl&%52::view": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::SANDBOX_THREAD_DENIED_RIGHTS": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::ko_boot_process_right_config_shape": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%111::from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%92::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::RIGHT_DUPLICATE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "core::convert::num::impl&%71::from": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "vstd::std_specs::convert::impl&%106::obeys_from_spec": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::CHANNEL_SIGNAL_WRITABLE": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::futex_saturating_add": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::port_signal_smoke": {
-      "obligation_proof_notes": [],
-      "failed_proof_notes": []
-    },
-    "lib::thread_is_runnable_spec": {
+    "lib::SOCKET_SIGNAL_WRITE_THRESHOLD": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1635,123 +944,191 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::RIGHT_INSPECT": {
+    "lib::replace_rights_allowed_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::std_specs::convert::impl&%108::from_spec": {
+    "lib::scheduler_can_run_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::sched_advance_deadline_spec": {
+    "lib::fifo_option_masks_smoke": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::sched_task_allowed_on_cpu_spec": {
+    "vstd::std_specs::convert::impl&%96::obeys_from_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::hypervisor_crash_transition_spec": {
+    "vstd::view::impl&%7::deep_view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_intersect_rights": {
+    "lib::SOCKET_SHUTDOWN_WRITE": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_duplicate_rights_allowed": {
+    "vstd::std_specs::vec::vec_index": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::std_specs::convert::impl&%104::obeys_from_spec": {
+    "vstd::view::impl&%52::view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_scheduler_can_run": {
+    "lib::SOCKET_SIGNAL_READ_THRESHOLD": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%4::view": {
+    "vstd::std_specs::convert::impl&%111::obeys_from_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::SCHED_DEFAULT_CREDIT": {
+    "lib::FIFO_MAX_ELEMS": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::futex_value_matches_spec": {
+    "lib::ko_replace_rights_allowed": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "core::convert::num::impl&%67::from": {
+    "lib::LOG_LEVEL_DEBUG": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::channel_limits_smoke": {
+    "lib::socket_min_count_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::sched_edf_better": {
+    "core::clone::impls::impl&%6::clone": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::checked_end_spec": {
+    "core::num::impl&%11::checked_add": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "core::convert::num::impl&%70::from": {
+    "core::num::impl&%8::saturating_add": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::hypervisor_name_len_valid_spec": {
+    "lib::scheduler_policy_smoke": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "core::convert::num::impl&%80::from": {
+    "core::clone::impls::impl&%17::clone": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::RIGHT_ENUMERATE": {
+    "lib::fifo_min_count_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_thread_is_runnable": {
+    "lib::ko_thread_is_idle": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::log_level_valid_spec": {
+    "vstd::std_specs::convert::impl&%101::from_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::fifo_capacity_valid_spec": {
+    "lib::ko_json_process_right_config_install_allowed": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_handle_is_valid": {
+    "lib::fifo_transfer_bytes_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::std_specs::vec::impl&%0::spec_index": {
+    "lib::HYPERVISOR_STATE_RUNNING": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "core::convert::num::impl&%76::from": {
+    "vstd::view::impl&%24::view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::channel_message_fits_spec": {
+    "lib::fifo_options_valid_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::capability_rights_smoke": {
+    "lib::socket_ring_index_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::MAX_HANDLES_PER_PROCESS": {
+    "lib::log_level_from_match_flags": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_range_within": {
+    "lib::socket_ring_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::pervasive::strictly_cloned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_MANAGE_THREAD": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::View::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_state_count_delta_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_scheduler_candidate_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_signal_packet_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%2::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%32::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_EMPTY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%26::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%112::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_wake_transition_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_GET_POLICY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_rights_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_index_decreases": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SANDBOX_JOB_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_capacity_smoke": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1759,31 +1136,171 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::std_specs::option::impl&%0::arrow_0": {
+    "lib::vmo_checked_end_model": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%36::view": {
+    "lib::socket_signal_smoke": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::ko_rights_subset": {
+    "lib::rights_subset_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%53::deep_view": {
+    "lib::scheduler_terminate_transition": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::hypervisor_cpu_usage_percent_spec": {
+    "lib::RIGHT_SIGNAL": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%51::deep_view": {
+    "lib::socket_option_masks_smoke": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::SANDBOX_THREAD_RIGHTS": {
+    "vstd::view::impl&%30::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_pick_next_for_cpu_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_min_count_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%18::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_TRANSFER": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_scheduler_should_preempt": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%37::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_pick_next_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_range_within": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_state_count_delta": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%107::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::boot_process_right_config_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_packet_and_queue_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%105::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ready_state": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_refresh_read_signals_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_roundup_pages_bounded": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::capability_rights_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%23::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SOCKET_SHUTDOWN_READ": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::Seq::len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_BLOCKED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_WAIT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_saturating_inc_u32": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SANDBOX_THREAD_DENIED_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::checked_end_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_saturating_add_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_uptime_ticks": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_RESIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_remaining_capacity": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_MANAGE_JOB": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_THREADS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_capacity_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_ATTACH_VMO": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::WAIT_ASYNC_TIMESTAMP": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
@@ -1791,11 +1308,495 @@ Verus
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "lib::SCHED_POLICY_FAIR": {
+    "lib::log_level_from_match_flags_spec": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     },
-    "vstd::view::impl&%28::view": {
+    "vstd::view::impl&%48::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_ring_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SANDBOX_PROCESS_DENIED_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_min_count": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LOG_LEVEL_ERR": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%9::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PORT_CREATE_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_value_matches_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::vmar_overlap_is_symmetric": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%68::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_refresh_write_signals_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::handle_get_rights_model": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_MAP": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::axiom_seq_new_len": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_refill_credit_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_DESTROY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%34::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::range_within_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_page_aligned": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%51::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%27::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::CHANNEL_SIGNAL_PEER_CLOSED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%103::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::log_level_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SCHED_POLICY_CREDIT": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::vec::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_queue_has_space": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%104::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_wait_async_options_valid": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::hypervisor_name_byte_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::futex_saturating_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%70::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%110::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_READY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_HANDLES_PER_PROCESS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%47::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%110::obeys_from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::duplicate_rights_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::is_some": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::LOG_LEVEL_FATAL": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_refresh_read_signals": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_queue_has_space_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%65::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_should_preempt_policy_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_MANAGE_PROCESS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_channel_signal_state": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_credit_after_elapsed": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_threshold_met": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::option::impl&%0::arrow_0": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%20::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::HandleEntryModel::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_MANAGE_VMO": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%6::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SANDBOX_THREAD_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::pages_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_mul": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::option::impl&%6::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PORT_QUEUE_CAPACITY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_SAME_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_cpu_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SOCKET_READ_OPTIONS_MASK": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_publish_transition_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_capacity_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_time_slice_after_tick": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_remaining_capacity": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_edf_better": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::boot_process_right_config_shape_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::PORT_PACKET_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_refresh_read_signals": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%15::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%102::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::object_signal_update_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_priority_should_preempt_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_OP_CHILDREN": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_refresh_write_signals": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::MAX_PROCESS_RIGHT_CONFIG_ENTRIES": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%8::view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::port_options_valid_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::thread_is_runnable_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_signal_update": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DEFAULT_THREAD_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::THREAD_RUNNING": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_credit_better_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%76::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%25::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::channel_limits_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_priority_should_preempt": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::scheduler_tick_accounting_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_refill_credit": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_priority_better": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::log_level_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::HYPERVISOR_STATE_STOPPED": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::SANDBOX_JOB_DENIED_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::std_specs::convert::impl&%92::from_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::RIGHT_GET_PROPERTY": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::log_should_log_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::verified_empty_peer_queue_read_error": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::thread_state_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::json_process_right_config_install_allowed_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_transfer_bytes": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::log_level_from_raw_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::socket_min_count": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::FIFO_BUFFER_SIZE": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%23::deep_view": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%73::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%80::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ThreadModel::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::num::impl&%9::checked_add": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::clone::impls::impl&%13::clone": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::seq::impl&%0::spec_index": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%96::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_time_slice_after_tick_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_channel_message_fits": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_checked_end": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "core::convert::num::impl&%75::from": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::fifo_signal_smoke": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::ko_boot_process_right_config_shape": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::sched_edf_better_spec": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::HYPERVISOR_VM_NAME_MAX": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "lib::DEFAULT_PROCESS_RIGHTS": {
+      "obligation_proof_notes": [],
+      "failed_proof_notes": []
+    },
+    "vstd::view::impl&%9::deep_view": {
       "obligation_proof_notes": [],
       "failed_proof_notes": []
     }
@@ -1814,86 +1815,86 @@ Verus
       "version": "0.2026.04.19.6f7d4de"
     },
     "num-threads": 1,
-    "total": 5045,
-    "estimated-cpu-time": 5045,
+    "total": 5087,
+    "estimated-cpu-time": 5087,
     "rust": {
-      "total": 308,
-      "init-and-types": 136,
-      "trait-conflicts": 35,
-      "compile": 136
+      "total": 294,
+      "init-and-types": 134,
+      "trait-conflicts": 32,
+      "compile": 127
     },
     "verification": {
-      "total": 4686,
+      "total": 4748,
       "vir": {
-        "total": 283,
-        "hir": 39,
-        "import": 127,
-        "rust-to-vir": 45
+        "total": 270,
+        "hir": 38,
+        "import": 119,
+        "rust-to-vir": 42
       }
     },
-    "total-verify": 4351,
+    "total-verify": 4428,
     "total-verify-module-times": [
       {
         "module": "",
-        "time": 4351
+        "time": 4428
       }
     ],
     "air": {
-      "total": 2511,
+      "total": 2581,
       "module-times": [
         {
           "module": "",
-          "time": 2511
+          "time": 2581
         }
       ]
     },
     "smt": {
-      "total": 1372,
-      "smt-init": 28,
+      "total": 1369,
+      "smt-init": 24,
       "rlimit-init": 15959,
       "smt-init-module-times": [
         {
           "module": "",
-          "time": 28,
-          "time-micros": 28790,
+          "time": 24,
+          "time-micros": 24152,
           "rlimit": 15959
         }
       ],
-      "smt-run": 1344,
+      "smt-run": 1345,
       "rlimit-run": 6065791,
       "smt-run-module-times": [
         {
           "module": "",
-          "time": 1344,
-          "time-micros": 1344014,
+          "time": 1345,
+          "time-micros": 1345648,
           "rlimit": 6065791,
           "function-breakdown": [
             {
-              "function": "lib::hypervisor_saturating_inc_u32",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7638,
-              "rlimit": 35234,
-              "success": true
-            },
-            {
-              "function": "lib::ko_range_within",
-              "mode:": "exec",
-              "time": 13,
-              "time-micros": 13719,
-              "rlimit": 112414,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_SIGNAL",
+              "function": "lib::SANDBOX_JOB_RIGHTS",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 29,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::WAIT_ASYNC_EDGE",
+              "function": "lib::handle_get_rights_model",
+              "mode:": "exec",
+              "time": 22,
+              "time-micros": 22461,
+              "rlimit": 131573,
+              "success": true
+            },
+            {
+              "function": "lib::vmar_overlap_is_symmetric",
+              "mode:": "proof",
+              "time": 9,
+              "time-micros": 9081,
+              "rlimit": 45811,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_MANAGE_JOB",
               "mode:": "spec",
               "time": 0,
               "time-micros": 28,
@@ -1901,47 +1902,31 @@ Verus
               "success": true
             },
             {
-              "function": "lib::futex_value_matches",
+              "function": "lib::hypervisor_crash_transition",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10286,
+              "rlimit": 54132,
+              "success": true
+            },
+            {
+              "function": "lib::verified_empty_peer_queue_read_error",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7282,
-              "rlimit": 34152,
+              "time-micros": 7435,
+              "rlimit": 33309,
               "success": true
             },
             {
-              "function": "lib::sched_policy_from_match_flags",
+              "function": "lib::vmo_checked_end_model",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7960,
-              "rlimit": 35881,
+              "time-micros": 7699,
+              "rlimit": 36207,
               "success": true
             },
             {
-              "function": "lib::process_right_profile_smoke",
-              "mode:": "exec",
-              "time": 41,
-              "time-micros": 41086,
-              "rlimit": 115544,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_THREADS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 30,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DEFAULT_THREAD_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DEFAULT_JOB_RIGHTS",
+              "function": "lib::SANDBOX_THREAD_DENIED_RIGHTS",
               "mode:": "spec",
               "time": 0,
               "time-micros": 27,
@@ -1949,87 +1934,7 @@ Verus
               "success": true
             },
             {
-              "function": "lib::ko_page_aligned",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7796,
-              "rlimit": 35641,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_ring_index",
-              "mode:": "exec",
-              "time": 11,
-              "time-micros": 11432,
-              "rlimit": 111491,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_CHANNEL_MSG_HANDLES",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 38,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PORT_CREATE_OPTIONS_MASK",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 33,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::VmarMappingModel::clone",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ko_checked_end",
-              "mode:": "exec",
-              "time": 10,
-              "time-micros": 10414,
-              "rlimit": 64036,
-              "success": true
-            },
-            {
-              "function": "lib::port_observer_should_queue",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8658,
-              "rlimit": 42510,
-              "success": true
-            },
-            {
-              "function": "lib::sched_edf_better",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7540,
-              "rlimit": 33777,
-              "success": true
-            },
-            {
-              "function": "lib::WAIT_ASYNC_OPTIONS_MASK",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::LOG_LEVEL_FATAL",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::WAIT_ASYNC_TIMESTAMP",
+              "function": "lib::WAIT_ASYNC_EDGE",
               "mode:": "spec",
               "time": 0,
               "time-micros": 30,
@@ -2037,7 +1942,159 @@ Verus
               "success": true
             },
             {
-              "function": "lib::THREAD_EMPTY",
+              "function": "lib::RIGHT_MANAGE_SOCKET",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_OP_CHILDREN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_DATAGRAM",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_BLOCKED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::DEFAULT_THREAD_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SANDBOX_ROOT_VMAR_DENIED_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ko_roundup_pages_bounded",
+              "mode:": "exec",
+              "time": 12,
+              "time-micros": 12259,
+              "rlimit": 123533,
+              "success": true
+            },
+            {
+              "function": "lib::CHANNEL_SIGNAL_WRITABLE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 25,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::handle_rights_allow_duplicate_found_model",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 938,
+              "rlimit": 2592,
+              "success": true
+            },
+            {
+              "function": "lib::ko_thread_is_runnable",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7202,
+              "rlimit": 33417,
+              "success": true
+            },
+            {
+              "function": "lib::hypervisor_name_len_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7457,
+              "rlimit": 33955,
+              "success": true
+            },
+            {
+              "function": "lib::hypervisor_cpu_usage_percent",
+              "mode:": "exec",
+              "time": 15,
+              "time-micros": 15564,
+              "rlimit": 87101,
+              "success": true
+            },
+            {
+              "function": "lib::verified_campaign_deadline_exceeded",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 62,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::socket_threshold_met",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7210,
+              "rlimit": 33797,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_capacity_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7342,
+              "rlimit": 34208,
+              "success": true
+            },
+            {
+              "function": "lib::ko_thread_is_idle",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7130,
+              "rlimit": 33195,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_ID_IDLE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_TERMINATED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 36,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_SET_POLICY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_MANAGE_THREAD",
               "mode:": "spec",
               "time": 0,
               "time-micros": 33,
@@ -2045,47 +2102,7 @@ Verus
               "success": true
             },
             {
-              "function": "lib::futex_saturating_add",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7586,
-              "rlimit": 36346,
-              "success": true
-            },
-            {
-              "function": "lib::no_overlap_with_vmar_mappings",
-              "mode:": "exec",
-              "time": 24,
-              "time-micros": 24390,
-              "rlimit": 140298,
-              "success": true
-            },
-            {
-              "function": "lib::vmo_checked_end_rejects_overflow",
-              "mode:": "proof",
-              "time": 10,
-              "time-micros": 10725,
-              "rlimit": 41507,
-              "success": true
-            },
-            {
-              "function": "lib::ko_scheduler_should_preempt",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7529,
-              "rlimit": 33589,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_THREAD_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::HYPERVISOR_VM_NAME_MAX",
+              "function": "lib::RIGHT_MANAGE_VMO",
               "mode:": "spec",
               "time": 0,
               "time-micros": 29,
@@ -2093,23 +2110,15 @@ Verus
               "success": true
             },
             {
-              "function": "lib::ko_process_right_profile_valid",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7894,
-              "rlimit": 36131,
-              "success": true
-            },
-            {
-              "function": "lib::HYPERVISOR_STATE_CRASHED",
+              "function": "lib::FIFO_MAX_ELEMS",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 26,
+              "time-micros": 25,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::THREAD_RUNNING",
+              "function": "lib::RIGHT_TRANSFER",
               "mode:": "spec",
               "time": 0,
               "time-micros": 29,
@@ -2120,76 +2129,84 @@ Verus
               "function": "lib::RIGHT_MAP",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 27,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::ko_rights_subset",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7443,
-              "rlimit": 34501,
-              "success": true
-            },
-            {
-              "function": "lib::ko_roundup_pages_bounded",
-              "mode:": "exec",
-              "time": 12,
-              "time-micros": 12574,
-              "rlimit": 123533,
-              "success": true
-            },
-            {
-              "function": "lib::socket_options_valid",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7334,
-              "rlimit": 33736,
-              "success": true
-            },
-            {
-              "function": "lib::socket_remaining_capacity",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7770,
-              "rlimit": 39438,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_SIGNAL_PEER",
+              "function": "lib::SANDBOX_ROOT_VMAR_RIGHTS",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 26,
+              "time-micros": 31,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::ko_thread_is_runnable",
+              "function": "lib::ko_ranges_overlap",
+              "mode:": "exec",
+              "time": 16,
+              "time-micros": 16381,
+              "rlimit": 122943,
+              "success": true
+            },
+            {
+              "function": "lib::ko_duplicate_rights_allowed",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9089,
+              "rlimit": 46922,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_remaining_capacity",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7458,
-              "rlimit": 33417,
+              "time-micros": 7773,
+              "rlimit": 39505,
               "success": true
             },
             {
-              "function": "lib::port_packet_ptr_valid",
-              "mode:": "exec",
-              "time": 11,
-              "time-micros": 11167,
-              "rlimit": 33580,
+              "function": "lib::SCHED_POLICY_FAIR",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::ko_scheduler_candidate_index",
+              "function": "lib::sched_refill_credit",
               "mode:": "exec",
               "time": 10,
-              "time-micros": 10345,
-              "rlimit": 85995,
+              "time-micros": 10418,
+              "rlimit": 64619,
               "success": true
             },
             {
-              "function": "lib::THREAD_BLOCKED",
+              "function": "lib::hypervisor_state_count_delta",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9343,
+              "rlimit": 46486,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_SET_PROPERTY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_SIGNAL",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SCHED_POLICY_RR",
               "mode:": "spec",
               "time": 0,
               "time-micros": 29,
@@ -2197,55 +2214,23 @@ Verus
               "success": true
             },
             {
-              "function": "lib::ko_scheduler_can_run",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7464,
-              "rlimit": 34423,
-              "success": true
-            },
-            {
-              "function": "lib::capability_rights_smoke",
-              "mode:": "exec",
-              "time": 101,
-              "time-micros": 101676,
-              "rlimit": 279024,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_signal_smoke",
+              "function": "lib::fifo_transfer_bytes",
               "mode:": "exec",
               "time": 0,
-              "time-micros": 427,
-              "rlimit": 1234,
+              "time-micros": 417,
+              "rlimit": 700,
               "success": true
             },
             {
-              "function": "lib::HYPERVISOR_STATE_RUNNING",
+              "function": "lib::LOG_LEVEL_WARNING",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 37,
+              "time-micros": 29,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::fifo_refresh_read_signals",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7745,
-              "rlimit": 34291,
-              "success": true
-            },
-            {
-              "function": "lib::sched_priority_should_preempt",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7345,
-              "rlimit": 33735,
-              "success": true
-            },
-            {
-              "function": "lib::SOCKET_SHUTDOWN_MASK",
+              "function": "lib::LOG_LEVEL_ERR",
               "mode:": "spec",
               "time": 0,
               "time-micros": 28,
@@ -2253,63 +2238,239 @@ Verus
               "success": true
             },
             {
-              "function": "lib::RIGHT_GET_POLICY",
+              "function": "lib::port_wait_async_options_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7261,
+              "rlimit": 34413,
+              "success": true
+            },
+            {
+              "function": "lib::hypervisor_kill_transition",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7388,
+              "rlimit": 34243,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_READ",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 28,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::FIFO_BUFFER_SIZE",
-              "mode:": "spec",
-              "time": 1,
-              "time-micros": 1265,
-              "rlimit": 5707,
+              "function": "lib::log_should_log",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7370,
+              "rlimit": 34113,
               "success": true
             },
             {
-              "function": "lib::RIGHT_DESTROY",
+              "function": "lib::types_constants_smoke",
+              "mode:": "proof",
+              "time": 0,
+              "time-micros": 969,
+              "rlimit": 3943,
+              "success": true
+            },
+            {
+              "function": "lib::hypervisor_saturating_inc_u32",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7959,
+              "rlimit": 35234,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_capacity_smoke",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9968,
+              "rlimit": 38228,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_PROCESS_RIGHT_CONFIG_ENTRIES",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 27,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::RIGHT_APPLY_PROFILE",
+              "function": "lib::socket_option_masks_smoke",
+              "mode:": "exec",
+              "time": 47,
+              "time-micros": 47338,
+              "rlimit": 116704,
+              "success": true
+            },
+            {
+              "function": "lib::ko_checked_end",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10127,
+              "rlimit": 64036,
+              "success": true
+            },
+            {
+              "function": "lib::socket_threshold_smoke",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9899,
+              "rlimit": 38288,
+              "success": true
+            },
+            {
+              "function": "lib::hypervisor_lifecycle_smoke",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9235,
+              "rlimit": 39493,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_RUNNING",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 28,
               "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 171,
+              "rlimit": 441,
+              "success": true
+            },
+            {
+              "function": "lib::DEFAULT_VMAR_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SCHED_POLICY_CREDIT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::futex_helper_smoke",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8970,
+              "rlimit": 45689,
+              "success": true
+            },
+            {
+              "function": "lib::scheduler_tick_accounting_smoke",
+              "mode:": "exec",
+              "time": 68,
+              "time-micros": 68423,
+              "rlimit": 232418,
+              "success": true
+            },
+            {
+              "function": "lib::scheduler_pick_next_for_cpu_model",
+              "mode:": "exec",
+              "time": 16,
+              "time-micros": 16267,
+              "rlimit": 78742,
               "success": true
             },
             {
               "function": "lib::port_options_valid",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7396,
+              "time-micros": 7111,
               "rlimit": 33705,
               "success": true
             },
             {
-              "function": "lib::port_signal_packet_allowed",
+              "function": "lib::fifo_min_count",
               "mode:": "exec",
-              "time": 7,
-              "time-micros": 7359,
-              "rlimit": 33725,
+              "time": 8,
+              "time-micros": 8477,
+              "rlimit": 44421,
               "success": true
             },
             {
-              "function": "lib::ko_channel_signal_state",
+              "function": "lib::hypervisor_uptime_ticks",
               "mode:": "exec",
-              "time": 7,
-              "time-micros": 7767,
-              "rlimit": 34890,
+              "time": 9,
+              "time-micros": 9071,
+              "rlimit": 48978,
               "success": true
             },
             {
-              "function": "lib::SOCKET_PEEK",
+              "function": "lib::hypervisor_name_policy_smoke",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8466,
+              "rlimit": 37116,
+              "success": true
+            },
+            {
+              "function": "lib::socket_mask_options",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7079,
+              "rlimit": 33322,
+              "success": true
+            },
+            {
+              "function": "lib::SANDBOX_JOB_DENIED_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SCHED_MAX_CREDIT_WEIGHT",
+              "mode:": "spec",
+              "time": 8,
+              "time-micros": 8138,
+              "rlimit": 33691,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_SIGNAL_PEER",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::sched_policy_from_match_flags",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8081,
+              "rlimit": 35881,
+              "success": true
+            },
+            {
+              "function": "lib::port_option_masks_smoke",
+              "mode:": "exec",
+              "time": 33,
+              "time-micros": 33433,
+              "rlimit": 83055,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_ATTACH_VMO",
               "mode:": "spec",
               "time": 0,
               "time-micros": 30,
@@ -2317,7 +2478,47 @@ Verus
               "success": true
             },
             {
-              "function": "lib::PORT_PACKET_SIZE",
+              "function": "lib::ko_intersect_rights",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 57,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::futex_ptr_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7989,
+              "rlimit": 38075,
+              "success": true
+            },
+            {
+              "function": "lib::scheduler_wake_transition",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7567,
+              "rlimit": 34130,
+              "success": true
+            },
+            {
+              "function": "lib::FUTEX_ALIGN",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::HandleEntryModel::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 44,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_EXECUTE",
               "mode:": "spec",
               "time": 0,
               "time-micros": 28,
@@ -2325,10 +2526,18 @@ Verus
               "success": true
             },
             {
-              "function": "lib::ThreadModel::clone",
-              "mode:": "exec",
+              "function": "lib::MAX_CHANNEL_MSG_HANDLES",
+              "mode:": "spec",
               "time": 0,
-              "time-micros": 27,
+              "time-micros": 26,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PORT_CREATE_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 35,
               "rlimit": 2,
               "success": true
             },
@@ -2336,64 +2545,312 @@ Verus
               "function": "lib::RIGHT_MANAGE_PROCESS",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 28,
               "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_DESTROY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::VmarMappingModel::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 161,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PROCESS_RIGHT_CONFIG_JSON_ENTRY_COUNT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::scheduler_policy_smoke",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10766,
+              "rlimit": 49264,
+              "success": true
+            },
+            {
+              "function": "lib::ko_process_right_profile_is_restricted",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9090,
+              "rlimit": 39852,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_READ_OPTIONS_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::PORT_PACKET_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SANDBOX_THREAD_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ko_page_aligned",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7338,
+              "rlimit": 35641,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_CREATE_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::WAIT_ASYNC_TIMESTAMP",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_HANDLES_PER_PROCESS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 37,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_ring_index",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10771,
+              "rlimit": 111491,
               "success": true
             },
             {
               "function": "lib::ko_roundup_pages",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7588,
+              "time-micros": 7036,
               "rlimit": 35194,
               "success": true
             },
             {
-              "function": "lib::RIGHT_ATTACH_VMO",
+              "function": "lib::port_packet_ptr_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7063,
+              "rlimit": 33580,
+              "success": true
+            },
+            {
+              "function": "lib::ko_scheduler_can_run",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7133,
+              "rlimit": 34423,
+              "success": true
+            },
+            {
+              "function": "lib::FIFO_CREATE_OPTIONS_MASK",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 35,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::ko_process_right_profile_is_restricted",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8641,
-              "rlimit": 39852,
+              "function": "lib::RIGHT_ENUMERATE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::handle_get_rights_model",
-              "mode:": "exec",
-              "time": 22,
-              "time-micros": 22500,
-              "rlimit": 131573,
-              "success": true
-            },
-            {
-              "function": "lib::ko_thread_is_idle",
+              "function": "lib::log_level_from_raw",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7175,
-              "rlimit": 33195,
+              "time-micros": 7479,
+              "rlimit": 34472,
               "success": true
             },
             {
-              "function": "lib::scheduler_terminate_transition",
+              "function": "lib::RIGHT_GET_PROPERTY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ko_scheduler_cpu_allowed",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7450,
+              "rlimit": 33476,
+              "success": true
+            },
+            {
+              "function": "lib::SANDBOX_PROCESS_DENIED_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ko_range_within",
+              "mode:": "exec",
+              "time": 13,
+              "time-micros": 13383,
+              "rlimit": 112414,
+              "success": true
+            },
+            {
+              "function": "lib::DEFAULT_PROCESS_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::port_queue_has_space",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7146,
+              "rlimit": 33652,
+              "success": true
+            },
+            {
+              "function": "lib::channel_limits_smoke",
+              "mode:": "proof",
+              "time": 6,
+              "time-micros": 6802,
+              "rlimit": 30339,
+              "success": true
+            },
+            {
+              "function": "lib::ThreadModel::clone",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 40,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_RESIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::WAIT_ASYNC_BOOT_TIMESTAMP",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::socket_capacity_smoke",
               "mode:": "exec",
               "time": 9,
-              "time-micros": 9963,
-              "rlimit": 50358,
+              "time-micros": 9636,
+              "rlimit": 41279,
               "success": true
             },
             {
-              "function": "lib::sched_task_allowed_on_cpu",
+              "function": "lib::scheduler_pick_next_model",
+              "mode:": "exec",
+              "time": 16,
+              "time-micros": 16224,
+              "rlimit": 76589,
+              "success": true
+            },
+            {
+              "function": "lib::sched_fair_better",
+              "mode:": "exec",
+              "time": 11,
+              "time-micros": 11688,
+              "rlimit": 65841,
+              "success": true
+            },
+            {
+              "function": "lib::socket_signal_smoke",
+              "mode:": "exec",
+              "time": 14,
+              "time-micros": 14186,
+              "rlimit": 36202,
+              "success": true
+            },
+            {
+              "function": "lib::hypervisor_accounting_smoke",
+              "mode:": "exec",
+              "time": 14,
+              "time-micros": 14110,
+              "rlimit": 69388,
+              "success": true
+            },
+            {
+              "function": "lib::ko_json_process_right_config_install_allowed",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7624,
-              "rlimit": 33500,
+              "time-micros": 7285,
+              "rlimit": 33797,
+              "success": true
+            },
+            {
+              "function": "lib::socket_min_count",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8276,
+              "rlimit": 44400,
+              "success": true
+            },
+            {
+              "function": "lib::sched_advance_deadline",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10714,
+              "rlimit": 63973,
+              "success": true
+            },
+            {
+              "function": "lib::sched_priority_should_preempt",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7324,
+              "rlimit": 33735,
               "success": true
             },
             {
@@ -2405,167 +2862,15 @@ Verus
               "success": true
             },
             {
-              "function": "lib::RIGHT_GET_PROPERTY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DEFAULT_PROCESS_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_EXECUTE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::sched_time_slice_after_tick",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7744,
-              "rlimit": 34583,
-              "success": true
-            },
-            {
-              "function": "lib::MAX_HANDLES_PER_PROCESS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 49,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_SET_PROPERTY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::sched_credit_after_tick",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8276,
-              "rlimit": 42407,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_state_count_delta",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9509,
-              "rlimit": 46486,
-              "success": true
-            },
-            {
-              "function": "lib::socket_mask_options",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7490,
-              "rlimit": 33322,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_name_byte_valid",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7603,
-              "rlimit": 34020,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_OP_CHILDREN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_MANAGE_JOB",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::sched_fair_better",
-              "mode:": "exec",
-              "time": 11,
-              "time-micros": 11746,
-              "rlimit": 65841,
-              "success": true
-            },
-            {
-              "function": "lib::vmar_range_available_model",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7860,
-              "rlimit": 35451,
-              "success": true
-            },
-            {
-              "function": "lib::futex_helper_smoke",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8964,
-              "rlimit": 45689,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_remaining_capacity",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7821,
-              "rlimit": 39505,
-              "success": true
-            },
-            {
-              "function": "lib::SOCKET_SHUTDOWN_READ",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_accounting_smoke",
-              "mode:": "exec",
-              "time": 14,
-              "time-micros": 14665,
-              "rlimit": 69388,
-              "success": true
-            },
-            {
-              "function": "lib::scheduler_tick_accounting_smoke",
-              "mode:": "exec",
-              "time": 70,
-              "time-micros": 70197,
-              "rlimit": 232418,
-              "success": true
-            },
-            {
-              "function": "lib::sched_advance_deadline",
+              "function": "lib::scheduler_terminate_transition",
               "mode:": "exec",
               "time": 10,
-              "time-micros": 10497,
-              "rlimit": 63973,
+              "time-micros": 10143,
+              "rlimit": 50358,
               "success": true
             },
             {
-              "function": "lib::SOCKET_SIGNAL_READ_THRESHOLD",
+              "function": "lib::WAIT_ASYNC_OPTIONS_MASK",
               "mode:": "spec",
               "time": 0,
               "time-micros": 28,
@@ -2573,66 +2878,58 @@ Verus
               "success": true
             },
             {
-              "function": "lib::scheduler_wake_transition",
+              "function": "lib::ko_pages",
               "mode:": "exec",
-              "time": 7,
-              "time-micros": 7671,
-              "rlimit": 34130,
+              "time": 14,
+              "time-micros": 14086,
+              "rlimit": 103335,
               "success": true
             },
             {
-              "function": "lib::port_packet_and_queue_smoke",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9630,
-              "rlimit": 45518,
-              "success": true
-            },
-            {
-              "function": "lib::scheduler_preemption_policy_smoke",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8402,
-              "rlimit": 35273,
-              "success": true
-            },
-            {
-              "function": "lib::ko_channel_message_fits",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7589,
-              "rlimit": 34071,
-              "success": true
-            },
-            {
-              "function": "lib::verified_time_slice_after_elapsed",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9360,
-              "rlimit": 48545,
-              "success": true
-            },
-            {
-              "function": "lib::SOCKET_CREATE_MASK",
+              "function": "lib::HYPERVISOR_STATE_CRASHED",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 29,
+              "time-micros": 28,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::RIGHT_READ",
+              "function": "lib::ko_channel_signal_state",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7619,
+              "rlimit": 34890,
+              "success": true
+            },
+            {
+              "function": "lib::HYPERVISOR_VM_NAME_MAX",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 26,
+              "time-micros": 28,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::THREAD_READY",
+              "function": "lib::socket_refresh_write_signals",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9773,
+              "rlimit": 49917,
+              "success": true
+            },
+            {
+              "function": "lib::PAGE_SIZE",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 27,
+              "time-micros": 58,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::INVALID_HANDLE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 49,
               "rlimit": 2,
               "success": true
             },
@@ -2640,20 +2937,68 @@ Verus
               "function": "lib::RIGHT_WAIT",
               "mode:": "spec",
               "time": 0,
+              "time-micros": 36,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SCHED_POLICY_EDF",
+              "mode:": "spec",
+              "time": 0,
               "time-micros": 27,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::MAX_PROCESS_RIGHT_CONFIG_ENTRIES",
+              "function": "lib::SCHED_DEFAULT_CREDIT",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 27,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::SCHED_POLICY_CREDIT",
+              "function": "lib::futex_value_matches",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7244,
+              "rlimit": 34152,
+              "success": true
+            },
+            {
+              "function": "lib::sched_priority_better",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7342,
+              "rlimit": 33694,
+              "success": true
+            },
+            {
+              "function": "lib::sched_time_slice_after_tick",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7282,
+              "rlimit": 34583,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_signal_smoke",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 920,
+              "rlimit": 1234,
+              "success": true
+            },
+            {
+              "function": "lib::port_packet_and_queue_smoke",
+              "mode:": "exec",
+              "time": 12,
+              "time-micros": 12990,
+              "rlimit": 45518,
+              "success": true
+            },
+            {
+              "function": "lib::CHANNEL_SIGNAL_READABLE",
               "mode:": "spec",
               "time": 0,
               "time-micros": 24,
@@ -2661,27 +3006,483 @@ Verus
               "success": true
             },
             {
+              "function": "lib::HYPERVISOR_STATE_STOPPED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ko_rights_has",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7590,
+              "rlimit": 33702,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_refresh_write_signals",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7370,
+              "rlimit": 34278,
+              "success": true
+            },
+            {
+              "function": "lib::port_observer_should_queue",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8369,
+              "rlimit": 42510,
+              "success": true
+            },
+            {
+              "function": "lib::socket_options_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7277,
+              "rlimit": 33736,
+              "success": true
+            },
+            {
+              "function": "lib::no_overlap_with_vmar_mappings",
+              "mode:": "exec",
+              "time": 24,
+              "time-micros": 24455,
+              "rlimit": 140298,
+              "success": true
+            },
+            {
+              "function": "lib::port_signal_smoke",
+              "mode:": "exec",
+              "time": 22,
+              "time-micros": 22259,
+              "rlimit": 68128,
+              "success": true
+            },
+            {
+              "function": "lib::ko_channel_message_fits",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7205,
+              "rlimit": 34071,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_THREADS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::MAX_CHANNEL_MSG_SIZE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::FIFO_BUFFER_SIZE",
+              "mode:": "spec",
+              "time": 1,
+              "time-micros": 1546,
+              "rlimit": 5707,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_WRITE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::sched_edf_better",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7158,
+              "rlimit": 33777,
+              "success": true
+            },
+            {
+              "function": "lib::socket_ring_index",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10586,
+              "rlimit": 102414,
+              "success": true
+            },
+            {
+              "function": "lib::verified_credit_after_elapsed",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9259,
+              "rlimit": 45611,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_refresh_read_signals",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7171,
+              "rlimit": 34291,
+              "success": true
+            },
+            {
+              "function": "lib::sched_credit_better",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7138,
+              "rlimit": 33723,
+              "success": true
+            },
+            {
+              "function": "lib::ko_process_right_profile_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7940,
+              "rlimit": 36131,
+              "success": true
+            },
+            {
+              "function": "lib::socket_refresh_read_signals",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9721,
+              "rlimit": 47624,
+              "success": true
+            },
+            {
+              "function": "lib::log_level_smoke",
+              "mode:": "exec",
+              "time": 16,
+              "time-micros": 16331,
+              "rlimit": 78763,
+              "success": true
+            },
+            {
+              "function": "lib::ko_signal_update",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7235,
+              "rlimit": 33061,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_SIGNAL_READ_THRESHOLD",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
               "function": "lib::ko_rights_valid",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7415,
+              "time-micros": 7314,
               "rlimit": 33730,
               "success": true
             },
             {
-              "function": "lib::ko_json_process_right_config_install_allowed",
+              "function": "lib::ko_replace_rights_allowed",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8438,
+              "rlimit": 44636,
+              "success": true
+            },
+            {
+              "function": "lib::CHANNEL_SIGNAL_PEER_CLOSED",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::futex_saturating_add",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7266,
-              "rlimit": 33797,
+              "time-micros": 7324,
+              "rlimit": 36346,
+              "success": true
+            },
+            {
+              "function": "lib::capability_rights_smoke",
+              "mode:": "exec",
+              "time": 104,
+              "time-micros": 104229,
+              "rlimit": 279024,
+              "success": true
+            },
+            {
+              "function": "lib::ko_scheduler_should_preempt",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7166,
+              "rlimit": 33589,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_option_masks_smoke",
+              "mode:": "exec",
+              "time": 13,
+              "time-micros": 13716,
+              "rlimit": 33148,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_GET_POLICY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LOG_LEVEL_FATAL",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
               "success": true
             },
             {
               "function": "lib::fifo_options_valid",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7761,
+              "time-micros": 7635,
               "rlimit": 33826,
+              "success": true
+            },
+            {
+              "function": "lib::PORT_QUEUE_CAPACITY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ko_rights_subset",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7493,
+              "rlimit": 34501,
+              "success": true
+            },
+            {
+              "function": "lib::sched_should_preempt_policy",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7781,
+              "rlimit": 35493,
+              "success": true
+            },
+            {
+              "function": "lib::ko_boot_process_right_config_shape",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7504,
+              "rlimit": 33674,
+              "success": true
+            },
+            {
+              "function": "lib::vmo_end_page_model",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9079,
+              "rlimit": 47272,
+              "success": true
+            },
+            {
+              "function": "lib::boot_process_right_config_smoke",
+              "mode:": "exec",
+              "time": 28,
+              "time-micros": 28230,
+              "rlimit": 87141,
+              "success": true
+            },
+            {
+              "function": "lib::ko_handle_is_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7419,
+              "rlimit": 33642,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_DUPLICATE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::sched_credit_after_tick",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8206,
+              "rlimit": 42407,
+              "success": true
+            },
+            {
+              "function": "lib::log_level_from_match_flags",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9619,
+              "rlimit": 36729,
+              "success": true
+            },
+            {
+              "function": "lib::verified_time_slice_after_elapsed",
+              "mode:": "exec",
+              "time": 9,
+              "time-micros": 9418,
+              "rlimit": 48545,
+              "success": true
+            },
+            {
+              "function": "lib::THREAD_EMPTY",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SANDBOX_PROCESS_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::port_signal_packet_allowed",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7250,
+              "rlimit": 33725,
+              "success": true
+            },
+            {
+              "function": "lib::vmar_range_available_model",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7532,
+              "rlimit": 35451,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_INSPECT",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 30,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_SHUTDOWN_WRITE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_SAME_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::LOG_LEVEL_INFO",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::fifo_transfer_smoke",
+              "mode:": "exec",
+              "time": 0,
+              "time-micros": 291,
+              "rlimit": 521,
+              "success": true
+            },
+            {
+              "function": "lib::scheduler_preemption_policy_smoke",
+              "mode:": "exec",
+              "time": 8,
+              "time-micros": 8477,
+              "rlimit": 35273,
+              "success": true
+            },
+            {
+              "function": "lib::DEFAULT_JOB_RIGHTS",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 31,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::vmo_checked_end_rejects_overflow",
+              "mode:": "proof",
+              "time": 11,
+              "time-micros": 11274,
+              "rlimit": 41507,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_SHUTDOWN_READ",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 28,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::thread_state_smoke",
+              "mode:": "proof",
+              "time": 8,
+              "time-micros": 8329,
+              "rlimit": 43940,
+              "success": true
+            },
+            {
+              "function": "lib::RIGHT_APPLY_PROFILE",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 29,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::hypervisor_name_byte_valid",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7551,
+              "rlimit": 34020,
+              "success": true
+            },
+            {
+              "function": "lib::SOCKET_SHUTDOWN_MASK",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 27,
+              "rlimit": 2,
               "success": true
             },
             {
@@ -2693,778 +3494,10 @@ Verus
               "success": true
             },
             {
-              "function": "lib::socket_threshold_met",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7557,
-              "rlimit": 33797,
-              "success": true
-            },
-            {
-              "function": "lib::sched_refill_credit",
-              "mode:": "exec",
-              "time": 10,
-              "time-micros": 10327,
-              "rlimit": 64619,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_cpu_usage_percent",
-              "mode:": "exec",
-              "time": 15,
-              "time-micros": 15336,
-              "rlimit": 87101,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_transfer_bytes",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 368,
-              "rlimit": 700,
-              "success": true
-            },
-            {
-              "function": "lib::ko_replace_rights_allowed",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8352,
-              "rlimit": 44636,
-              "success": true
-            },
-            {
-              "function": "lib::ko_ranges_overlap",
-              "mode:": "exec",
-              "time": 15,
-              "time-micros": 15473,
-              "rlimit": 122943,
-              "success": true
-            },
-            {
-              "function": "lib::port_queue_has_space",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7248,
-              "rlimit": 33652,
-              "success": true
-            },
-            {
-              "function": "lib::CHANNEL_SIGNAL_WRITABLE",
+              "function": "lib::LOG_LEVEL_DEBUG",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::vmar_overlap_is_symmetric",
-              "mode:": "proof",
-              "time": 8,
-              "time-micros": 8894,
-              "rlimit": 45811,
-              "success": true
-            },
-            {
-              "function": "lib::port_option_masks_smoke",
-              "mode:": "exec",
-              "time": 31,
-              "time-micros": 31319,
-              "rlimit": 83055,
-              "success": true
-            },
-            {
-              "function": "lib::socket_ring_index",
-              "mode:": "exec",
-              "time": 10,
-              "time-micros": 10878,
-              "rlimit": 102414,
-              "success": true
-            },
-            {
-              "function": "lib::handle_rights_allow_duplicate_found_model",
-              "mode:": "exec",
-              "time": 1,
-              "time-micros": 1219,
-              "rlimit": 2592,
-              "success": true
-            },
-            {
-              "function": "lib::socket_threshold_smoke",
-              "mode:": "exec",
-              "time": 11,
-              "time-micros": 11080,
-              "rlimit": 38288,
-              "success": true
-            },
-            {
-              "function": "lib::sched_priority_better",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7286,
-              "rlimit": 33694,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_WRITE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ko_signal_update",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7206,
-              "rlimit": 33061,
-              "success": true
-            },
-            {
-              "function": "lib::INVALID_HANDLE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_TRANSFER",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::futex_ptr_valid",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8033,
-              "rlimit": 38075,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_capacity_valid",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7520,
-              "rlimit": 34208,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_crash_transition",
-              "mode:": "exec",
-              "time": 10,
-              "time-micros": 10287,
-              "rlimit": 54132,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_THREAD_DENIED_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SOCKET_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 254,
-              "rlimit": 441,
-              "success": true
-            },
-            {
-              "function": "lib::SCHED_POLICY_EDF",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::verified_empty_peer_queue_read_error",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7492,
-              "rlimit": 33309,
-              "success": true
-            },
-            {
-              "function": "lib::scheduler_pick_next_for_cpu_model",
-              "mode:": "exec",
-              "time": 16,
-              "time-micros": 16721,
-              "rlimit": 78742,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_MANAGE_THREAD",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 30,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::types_constants_smoke",
-              "mode:": "proof",
-              "time": 1,
-              "time-micros": 1111,
-              "rlimit": 3943,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_PROCESS_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SOCKET_DATAGRAM",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 31,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::socket_capacity_smoke",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9270,
-              "rlimit": 41279,
-              "success": true
-            },
-            {
-              "function": "lib::PROCESS_RIGHT_CONFIG_JSON_ENTRY_COUNT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_min_count",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8568,
-              "rlimit": 44421,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_SET_POLICY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::PORT_QUEUE_CAPACITY",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SCHED_POLICY_FAIR",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 28,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ko_pages",
-              "mode:": "exec",
-              "time": 14,
-              "time-micros": 14566,
-              "rlimit": 103335,
-              "success": true
-            },
-            {
-              "function": "lib::ko_intersect_rights",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 181,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SOCKET_SHUTDOWN_WRITE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 30,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_PROCESS_DENIED_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::socket_refresh_write_signals",
-              "mode:": "exec",
-              "time": 10,
-              "time-micros": 10134,
-              "rlimit": 49917,
-              "success": true
-            },
-            {
-              "function": "lib::vmo_end_page_model",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9015,
-              "rlimit": 47272,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_ENUMERATE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ko_scheduler_cpu_allowed",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7540,
-              "rlimit": 33476,
-              "success": true
-            },
-            {
-              "function": "lib::LOG_LEVEL_INFO",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::sched_credit_better",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7194,
-              "rlimit": 33723,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_JOB_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_ID_IDLE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_MANAGE_VMO",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::DEFAULT_VMAR_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::LOG_LEVEL_ERR",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::HYPERVISOR_STATE_STOPPED",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::sched_deadline_due",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7406,
-              "rlimit": 33904,
-              "success": true
-            },
-            {
-              "function": "lib::PAGE_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 544,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_kill_transition",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7526,
-              "rlimit": 34243,
-              "success": true
-            },
-            {
-              "function": "lib::scheduler_pick_next_model",
-              "mode:": "exec",
-              "time": 16,
-              "time-micros": 16265,
-              "rlimit": 76589,
-              "success": true
-            },
-            {
-              "function": "lib::channel_limits_smoke",
-              "mode:": "proof",
-              "time": 6,
-              "time-micros": 6956,
-              "rlimit": 30339,
-              "success": true
-            },
-            {
-              "function": "lib::SOCKET_READ_OPTIONS_MASK",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 30,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::FIFO_CREATE_OPTIONS_MASK",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 43,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::boot_process_right_config_smoke",
-              "mode:": "exec",
-              "time": 28,
-              "time-micros": 28433,
-              "rlimit": 87141,
-              "success": true
-            },
-            {
-              "function": "lib::FUTEX_ALIGN",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 42,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_name_policy_smoke",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8572,
-              "rlimit": 37116,
-              "success": true
-            },
-            {
-              "function": "lib::verified_credit_after_elapsed",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9036,
-              "rlimit": 45611,
-              "success": true
-            },
-            {
-              "function": "lib::ko_boot_process_right_config_shape",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7569,
-              "rlimit": 33674,
-              "success": true
-            },
-            {
-              "function": "lib::SCHED_POLICY_RR",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ko_handle_is_valid",
-              "mode:": "exec",
-              "time": 6,
-              "time-micros": 6967,
-              "rlimit": 33642,
-              "success": true
-            },
-            {
-              "function": "lib::port_wait_async_options_valid",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7684,
-              "rlimit": 34413,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_uptime_ticks",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9159,
-              "rlimit": 48978,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_option_masks_smoke",
-              "mode:": "exec",
-              "time": 12,
-              "time-micros": 12979,
-              "rlimit": 33148,
-              "success": true
-            },
-            {
-              "function": "lib::vmo_checked_end_model",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7873,
-              "rlimit": 36207,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_MANAGE_SOCKET",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ko_duplicate_rights_allowed",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9493,
-              "rlimit": 46922,
-              "success": true
-            },
-            {
-              "function": "lib::log_level_smoke",
-              "mode:": "exec",
-              "time": 16,
-              "time-micros": 16243,
-              "rlimit": 78763,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_refresh_write_signals",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7509,
-              "rlimit": 34278,
-              "success": true
-            },
-            {
-              "function": "lib::scheduler_smoke",
-              "mode:": "exec",
-              "time": 13,
-              "time-micros": 13689,
-              "rlimit": 64187,
-              "success": true
-            },
-            {
-              "function": "lib::scheduler_policy_smoke",
-              "mode:": "exec",
-              "time": 10,
-              "time-micros": 10569,
-              "rlimit": 49264,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_capacity_smoke",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8840,
-              "rlimit": 38228,
-              "success": true
-            },
-            {
-              "function": "lib::verified_campaign_deadline_exceeded",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 46,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::fifo_transfer_smoke",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 627,
-              "rlimit": 521,
-              "success": true
-            },
-            {
-              "function": "lib::WAIT_ASYNC_BOOT_TIMESTAMP",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 29,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_DUPLICATE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 26,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_JOB_DENIED_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_lifecycle_smoke",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9181,
-              "rlimit": 39493,
-              "success": true
-            },
-            {
-              "function": "lib::FIFO_MAX_ELEMS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::THREAD_TERMINATED",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_INSPECT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::scheduler_publish_transition",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7550,
-              "rlimit": 34372,
-              "success": true
-            },
-            {
-              "function": "lib::CHANNEL_SIGNAL_READABLE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::log_level_from_raw",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7726,
-              "rlimit": 34472,
-              "success": true
-            },
-            {
-              "function": "lib::hypervisor_name_len_valid",
-              "mode:": "exec",
-              "time": 7,
-              "time-micros": 7243,
-              "rlimit": 33955,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_SAME_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::socket_refresh_read_signals",
-              "mode:": "exec",
-              "time": 9,
-              "time-micros": 9421,
-              "rlimit": 47624,
-              "success": true
-            },
-            {
-              "function": "lib::socket_option_masks_smoke",
-              "mode:": "exec",
-              "time": 43,
-              "time-micros": 43002,
-              "rlimit": 116704,
-              "success": true
-            },
-            {
-              "function": "lib::SCHED_MAX_CREDIT_WEIGHT",
-              "mode:": "spec",
-              "time": 8,
-              "time-micros": 8656,
-              "rlimit": 33691,
-              "success": true
-            },
-            {
-              "function": "lib::RIGHT_RESIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_ROOT_VMAR_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::SCHED_DEFAULT_CREDIT",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
+              "time-micros": 27,
               "rlimit": 2,
               "success": true
             },
@@ -3472,128 +3505,96 @@ Verus
               "function": "lib::futex_min_count",
               "mode:": "exec",
               "time": 8,
-              "time-micros": 8546,
+              "time-micros": 8473,
               "rlimit": 43649,
               "success": true
             },
             {
-              "function": "lib::socket_min_count",
+              "function": "lib::sched_deadline_due",
               "mode:": "exec",
-              "time": 8,
-              "time-micros": 8401,
-              "rlimit": 44400,
+              "time": 7,
+              "time-micros": 7367,
+              "rlimit": 33904,
+              "success": true
+            },
+            {
+              "function": "lib::socket_remaining_capacity",
+              "mode:": "exec",
+              "time": 7,
+              "time-micros": 7756,
+              "rlimit": 39438,
+              "success": true
+            },
+            {
+              "function": "lib::scheduler_smoke",
+              "mode:": "exec",
+              "time": 13,
+              "time-micros": 13552,
+              "rlimit": 64187,
               "success": true
             },
             {
               "function": "lib::RIGHTS_ALL",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 28,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::port_signal_smoke",
-              "mode:": "exec",
-              "time": 20,
-              "time-micros": 20049,
-              "rlimit": 68128,
-              "success": true
-            },
-            {
-              "function": "lib::socket_signal_smoke",
-              "mode:": "exec",
-              "time": 12,
-              "time-micros": 12739,
-              "rlimit": 36202,
-              "success": true
-            },
-            {
-              "function": "lib::CHANNEL_SIGNAL_PEER_CLOSED",
+              "function": "lib::SOCKET_PEEK",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 24,
+              "time-micros": 28,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::sched_should_preempt_policy",
+              "function": "lib::HYPERVISOR_STATE_RUNNING",
+              "mode:": "spec",
+              "time": 0,
+              "time-micros": 37,
+              "rlimit": 2,
+              "success": true
+            },
+            {
+              "function": "lib::ko_scheduler_candidate_index",
+              "mode:": "exec",
+              "time": 10,
+              "time-micros": 10077,
+              "rlimit": 85995,
+              "success": true
+            },
+            {
+              "function": "lib::sched_task_allowed_on_cpu",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7656,
-              "rlimit": 35493,
+              "time-micros": 7288,
+              "rlimit": 33500,
               "success": true
             },
             {
-              "function": "lib::LOG_LEVEL_WARNING",
+              "function": "lib::THREAD_READY",
               "mode:": "spec",
               "time": 0,
-              "time-micros": 25,
+              "time-micros": 30,
               "rlimit": 2,
               "success": true
             },
             {
-              "function": "lib::thread_state_smoke",
-              "mode:": "proof",
-              "time": 8,
-              "time-micros": 8186,
-              "rlimit": 43940,
-              "success": true
-            },
-            {
-              "function": "lib::LOG_LEVEL_DEBUG",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 24,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::log_should_log",
+              "function": "lib::scheduler_publish_transition",
               "mode:": "exec",
               "time": 7,
-              "time-micros": 7496,
-              "rlimit": 34113,
+              "time-micros": 7426,
+              "rlimit": 34372,
               "success": true
             },
             {
-              "function": "lib::MAX_CHANNEL_MSG_SIZE",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 236,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::ko_rights_has",
+              "function": "lib::process_right_profile_smoke",
               "mode:": "exec",
-              "time": 7,
-              "time-micros": 7404,
-              "rlimit": 33702,
-              "success": true
-            },
-            {
-              "function": "lib::SANDBOX_ROOT_VMAR_DENIED_RIGHTS",
-              "mode:": "spec",
-              "time": 0,
-              "time-micros": 25,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::HandleEntryModel::clone",
-              "mode:": "exec",
-              "time": 0,
-              "time-micros": 58,
-              "rlimit": 2,
-              "success": true
-            },
-            {
-              "function": "lib::log_level_from_match_flags",
-              "mode:": "exec",
-              "time": 8,
-              "time-micros": 8361,
-              "rlimit": 36729,
+              "time": 40,
+              "time-micros": 40166,
+              "rlimit": 115544,
               "success": true
             }
           ]
