@@ -342,10 +342,37 @@ verus-coverage:
 	@./scripts/audit-verus-coverage.sh
 
 # Verify all currently wired Verus proof harnesses
-verus: verus-coverage verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services
+verus: verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services verus-coverage
+
+# Bounded check of the pthread futex-word lock, unlock, and trylock transitions.
+cbmc-futex:
+	@command -v cbmc >/dev/null
+	@mkdir -p verification/logs
+	@{ \
+		echo "utc=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
+		echo "git_head=$$(git rev-parse HEAD)"; \
+		echo "git_dirty=$$(if git status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' | grep -q .; then echo true; else echo false; fi)"; \
+		echo "A later commit whose diff is only verification/logs/ publishes this run."; \
+		echo "command=cbmc src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --unwinding-assertions --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check"; \
+		cbmc src/user_level/apps/pthread_mutex_futex.c \
+			--function cbmc_futex_word \
+			-DCBMC \
+			--unwind 1 \
+			--unwinding-assertions \
+			--bounds-check \
+			--pointer-check \
+			--signed-overflow-check \
+			--unsigned-overflow-check; \
+		rc=$$?; \
+		echo "exit=$$rc"; \
+		exit $$rc; \
+	} > verification/logs/cbmc-futex.log 2>&1; \
+	status=$$?; \
+	tail -n 20 verification/logs/cbmc-futex.log; \
+	exit $$status
 
 # Full local confidence suite, including QEMU smoke and Verus
-verify: test skt verus
+verify: test skt verus cbmc-futex
 
 # Show help
 help:

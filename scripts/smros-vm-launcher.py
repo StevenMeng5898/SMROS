@@ -367,6 +367,7 @@ def fixed_test_jobs() -> set[str]:
         "posix-baseline",
         "launcher-test",
         "verus",
+        "cbmc-futex",
     }
 
 

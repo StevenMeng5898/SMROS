@@ -1,0 +1,83 @@
+utc=2026-11-21T12:54:30Z
+git_head=8344569ea1a45fb528b517d86e15a9cf670e1dfd
+git_dirty=true
+A later commit whose diff is only verification/logs/ publishes this run.
+command=cbmc src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --unwinding-assertions --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check
+CBMC version 5.95.1 (cbmc-5.95.1) 64-bit x86_64 linux
+Parsing src/user_level/apps/pthread_mutex_futex.c
+Converting
+Type-checking pthread_mutex_futex
+Generating GOTO Program
+Adding CPROVER library (x86_64)
+Removal of function pointers and virtual functions
+Generic Property Instrumentation
+Running with 8 object bits, 56 offset bits (default)
+Starting Bounded Model Checking
+**** WARNING: no body for function __CPROVER_cover
+Runtime Symex: 0.00441126s
+size of program expression: 112 steps
+simple slicing removed 26 assignments
+Generated 38 VCC(s), 7 remaining after simplification
+Runtime Postprocess Equation: 7.89e-06s
+Passing problem to propositional reduction
+converting SSA
+Runtime Convert SSA: 0.000773337s
+Running propositional reduction
+Post-processing
+Runtime Post-process: 4.3973e-05s
+Solving with MiniSAT 2.2.1 with simplifier
+835 variables, 1114 clauses
+SAT checker: instance is UNSATISFIABLE
+Runtime Solver: 0.000678819s
+Runtime decision procedure: 0.00148071s
+
+** Results:
+src/user_level/apps/pthread_mutex_futex.c function cbmc_futex_word
+[cbmc_futex_word.assertion.1] line 95 lock result is 1 or 2: SUCCESS
+[cbmc_futex_word.assertion.2] line 96 lock does not overflow the futex word: SUCCESS
+[cbmc_futex_word.assertion.3] line 97 free locks without waiting; held locks record a waiter: SUCCESS
+[cbmc_futex_word.assertion.4] line 101 unlock frees the word: SUCCESS
+[cbmc_futex_word.assertion.5] line 102 wake exactly one waiter only when word was 2: SUCCESS
+[cbmc_futex_word.assertion.6] line 105 trylock acquires only a free word: SUCCESS
+[cbmc_futex_word.assertion.7] line 106 failed trylock leaves the word unchanged: SUCCESS
+[cbmc_futex_word.assertion.8] line 107 trylock does not overflow the futex word: SUCCESS
+
+src/user_level/apps/pthread_mutex_futex.c function lock_transition
+[lock_transition.pointer_dereference.1] line 56 dereference failure: pointer NULL in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.2] line 56 dereference failure: pointer invalid in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.3] line 56 dereference failure: deallocated dynamic object in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.4] line 56 dereference failure: dead object in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.5] line 56 dereference failure: pointer outside object bounds in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.6] line 56 dereference failure: invalid integer address in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.7] line 59 dereference failure: pointer NULL in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.8] line 59 dereference failure: pointer invalid in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.9] line 59 dereference failure: deallocated dynamic object in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.10] line 59 dereference failure: dead object in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.11] line 59 dereference failure: pointer outside object bounds in *needs_wait: SUCCESS
+[lock_transition.pointer_dereference.12] line 59 dereference failure: invalid integer address in *needs_wait: SUCCESS
+
+src/user_level/apps/pthread_mutex_futex.c function trylock_transition
+[trylock_transition.pointer_dereference.1] line 72 dereference failure: pointer NULL in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.2] line 72 dereference failure: pointer invalid in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.3] line 72 dereference failure: deallocated dynamic object in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.4] line 72 dereference failure: dead object in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.5] line 72 dereference failure: pointer outside object bounds in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.6] line 72 dereference failure: invalid integer address in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.7] line 75 dereference failure: pointer NULL in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.8] line 75 dereference failure: pointer invalid in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.9] line 75 dereference failure: deallocated dynamic object in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.10] line 75 dereference failure: dead object in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.11] line 75 dereference failure: pointer outside object bounds in *acquired: SUCCESS
+[trylock_transition.pointer_dereference.12] line 75 dereference failure: invalid integer address in *acquired: SUCCESS
+
+src/user_level/apps/pthread_mutex_futex.c function unlock_transition
+[unlock_transition.pointer_dereference.1] line 65 dereference failure: pointer NULL in *needs_wake: SUCCESS
+[unlock_transition.pointer_dereference.2] line 65 dereference failure: pointer invalid in *needs_wake: SUCCESS
+[unlock_transition.pointer_dereference.3] line 65 dereference failure: deallocated dynamic object in *needs_wake: SUCCESS
+[unlock_transition.pointer_dereference.4] line 65 dereference failure: dead object in *needs_wake: SUCCESS
+[unlock_transition.pointer_dereference.5] line 65 dereference failure: pointer outside object bounds in *needs_wake: SUCCESS
+[unlock_transition.pointer_dereference.6] line 65 dereference failure: invalid integer address in *needs_wake: SUCCESS
+
+** 0 of 38 failed (1 iterations)
+VERIFICATION SUCCESSFUL
+exit=0

@@ -15,34 +15,70 @@ pub const KERNEL_BUDGET_ADDRESS_SPACE_BYTES: usize = 16 * 1024;
 pub const KERNEL_BUDGET_OBJECT_BYTES: usize = 4 * 1024;
 pub const KERNEL_BUDGET_MMAP_PER_PAGE_BYTES: usize = 64;
 
+macro_rules! smros_kernel_budget_admit_heap_body {
+    ($allocated:expr, $heap:expr, $reserve:expr, $extra:expr) => {{
+        if $extra == 0 {
+            match $allocated.checked_add($reserve) {
+                Some(sum) => sum <= $heap || $heap == 0,
+                None => $heap == usize::MAX || $heap == 0,
+            }
+        } else {
+            match $allocated.checked_add($extra) {
+                Some(sum) => match sum.checked_add($reserve) {
+                    Some(need) => need <= $heap,
+                    None => false,
+                },
+                None => false,
+            }
+        }
+    }};
+}
+
+macro_rules! smros_kernel_budget_admit_process_body {
+    ($current:expr, $limit:expr, $extra:expr) => {{
+        if $extra == 0 {
+            $current <= $limit
+        } else {
+            match $current.checked_add($extra) {
+                Some(next) => next <= $limit,
+                None => false,
+            }
+        }
+    }};
+}
+
+macro_rules! smros_kernel_budget_mmap_metadata_bytes_body {
+    ($pages:expr, $per_page:expr) => {{
+        $pages.checked_mul($per_page)
+    }};
+}
+
+macro_rules! smros_kernel_budget_uncharge_body {
+    ($current:expr, $bytes:expr) => {{
+        if $current >= $bytes {
+            $current - $bytes
+        } else {
+            0
+        }
+    }};
+}
+
 /// `true` when `extra` bytes can be taken from the heap without crossing the
 /// reserve that is kept for the kernel and the shell.
 pub fn admit_heap(allocated: usize, heap: usize, reserve: usize, extra: usize) -> bool {
-    if extra == 0 {
-        return allocated.saturating_add(reserve) <= heap || heap == 0;
-    }
-    match allocated.checked_add(extra).and_then(|sum| sum.checked_add(reserve)) {
-        Some(need) => need <= heap,
-        None => false,
-    }
+    smros_kernel_budget_admit_heap_body!(allocated, heap, reserve, extra)
 }
 
 /// `true` when charging `extra` to one process stays within its limit.
 pub fn admit_process(current: usize, limit: usize, extra: usize) -> bool {
-    if extra == 0 {
-        return current <= limit;
-    }
-    match current.checked_add(extra) {
-        Some(next) => next <= limit,
-        None => false,
-    }
+    smros_kernel_budget_admit_process_body!(current, limit, extra)
 }
 
 pub fn mmap_metadata_bytes(pages: usize) -> Option<usize> {
-    pages.checked_mul(KERNEL_BUDGET_MMAP_PER_PAGE_BYTES)
+    smros_kernel_budget_mmap_metadata_bytes_body!(pages, KERNEL_BUDGET_MMAP_PER_PAGE_BYTES)
 }
 
 /// Release `bytes` from an account without wrapping.
 pub fn uncharge(current: usize, bytes: usize) -> usize {
-    current.saturating_sub(bytes)
+    smros_kernel_budget_uncharge_body!(current, bytes)
 }

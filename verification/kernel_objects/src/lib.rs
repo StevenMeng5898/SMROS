@@ -10,6 +10,7 @@ include!("../../../src/kernel_objects/socket_logic_shared.rs");
 include!("../../../src/kernel_objects/log_logic_shared.rs");
 include!("../../../src/kernel_objects/scheduler_logic_shared.rs");
 include!("../../../src/kernel_objects/hypervisor_logic_shared.rs");
+include!("../../../src/kernel_objects/campaign_watch_logic_shared.rs");
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAX_HANDLES_PER_PROCESS: usize = 1024;
@@ -3297,7 +3298,41 @@ fn hypervisor_lifecycle_smoke() {
     assert(inc_saturated == u32::MAX);
 }
 
-proof fn kernel_object_mod_has_no_pure_runtime_obligation() {
+fn verified_campaign_deadline_exceeded(armed: bool, deadline: u64, now: u64) -> (out: bool)
+    ensures
+        out == (armed && deadline != 0 && now >= deadline),
+{
+    smros_campaign_deadline_exceeded_body!(armed, deadline, now)
+}
+
+fn verified_empty_peer_queue_read_error(
+    peer_open: bool,
+    would_wait_error: u32,
+    peer_closed_error: u32,
+) -> (out: u32)
+    ensures
+        peer_open ==> out == would_wait_error,
+        !peer_open ==> out == peer_closed_error,
+{
+    smros_ko_empty_peer_queue_read_error_body!(peer_open, would_wait_error, peer_closed_error)
+}
+
+fn verified_time_slice_after_elapsed(time_slice: u32, elapsed: u64) -> (out: u32)
+    ensures
+        elapsed == 0 || time_slice == 0 ==> out == time_slice,
+        elapsed > 0 && time_slice > 0 && elapsed >= time_slice as u64 ==> out == 0,
+        elapsed > 0 && time_slice > 0 && elapsed < time_slice as u64 ==> out == time_slice - elapsed as u32,
+{
+    smros_sched_time_slice_after_elapsed_body!(time_slice, elapsed)
+}
+
+fn verified_credit_after_elapsed(credit: i32, elapsed: u64) -> (out: i32)
+    ensures
+        credit <= 0 || elapsed == 0 ==> out == credit,
+        credit > 0 && elapsed >= credit as u64 ==> out == 0,
+        credit > 0 && elapsed < credit as u64 ==> out == credit - elapsed as i32,
+{
+    smros_sched_credit_after_elapsed_body!(credit, elapsed)
 }
 
 } // verus!

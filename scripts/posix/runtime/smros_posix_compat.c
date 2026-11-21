@@ -6486,6 +6486,7 @@ int shm_open(const char *name, int oflag, mode_t mode) {
     return target(name, oflag, mode);
 }
 
+__attribute__((used))
 static int smros_open_impl(const char *path, int flags, ...) {
     mode_t mode = 0;
     int has_mode = (flags & O_CREAT) != 0;

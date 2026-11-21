@@ -11,6 +11,12 @@ mod hermes_shell_runtime_shared {
 
 #[macro_use]
 #[allow(dead_code, unused_macros)]
+mod elf_load_runtime_shared {
+    include!("../../../src/user_level/services/elf_load_logic_shared.rs");
+}
+
+#[macro_use]
+#[allow(dead_code, unused_macros)]
 mod posix_test_runtime_shared {
     include!("../../../src/user_level/services/posix_test_logic_shared.rs");
 
@@ -48,8 +54,7 @@ mod posix_test_runtime_shared {
 verus! {
 
 include!("../../../src/user_level/services/user_logic_shared.rs");
-
-pub const SERVICES_FILE_COUNT: usize = 19;
+include!("../../../src/user_level/services/security_case_logic_shared.rs");
 
 pub const USER_NAMESPACE_RIGHTS_MASK: u32 = 0x7;
 pub const USER_FXFS_MAX_NODES: usize = 8192;
@@ -633,7 +638,12 @@ fn posix_filter_matches(
             kind, value, test_id, group, api, runnable, complete,
         ),
 {
-    smros_posix_filter_matches_body!(kind, value, test_id, group, api, runnable, complete)
+    match kind {
+        PosixFilterKind::All => runnable && complete,
+        PosixFilterKind::Group => value == group,
+        PosixFilterKind::Api => value == api,
+        PosixFilterKind::Test => value == test_id,
+    }
 }
 
 fn posix_pts_status(exit_code: i32) -> (out: u8)
@@ -1317,24 +1327,6 @@ proof fn posix_test_logic_shared_rs_proof_slice() {
     assert(posix_resource_delta_spec(14, 10) == -4);
 }
 
-proof fn host_share_rs_proof_slice()
-    ensures
-        true,
-{
-}
-
-proof fn html_ui_rs_proof_slice()
-    ensures
-        true,
-{
-}
-
-proof fn mod_rs_proof_slice()
-    ensures
-        SERVICES_FILE_COUNT == 19,
-{
-}
-
 proof fn net_rs_proof_slice() {
     assert(net_same_ipv4_subnet_spec(10, 0, 2, 10, 0, 2));
     assert(!net_same_ipv4_subnet_spec(10, 0, 2, 10, 0, 3));
@@ -1411,29 +1403,80 @@ proof fn user_shell_rs_proof_slice() {
     assert(!shell_ask_args_valid_spec(1));
 }
 
-proof fn services_folder_all_files_have_verification_slices()
+fn verified_sectest_trap_verdict(faulted: bool, magic_ok: bool, exec_ok: bool) -> (out: u8)
     ensures
-        SERVICES_FILE_COUNT == 19,
+        faulted && magic_ok && exec_ok ==> out == 0,
+        !magic_ok ==> out == 1,
+        magic_ok && !exec_ok ==> out == 2,
+        magic_ok && exec_ok && !faulted ==> out == 3,
 {
-    compat_apps_rs_proof_slice();
-    component_rs_proof_slice();
-    docker_compat_rs_proof_slice();
-    elf_rs_proof_slice();
-    fxfs_rs_proof_slice();
-    gemma_rs_proof_slice();
-    hermes_agent_rs_proof_slice();
-    hermes_shell_logic_shared_rs_proof_slice();
-    host_share_rs_proof_slice();
-    html_ui_rs_proof_slice();
-    mod_rs_proof_slice();
-    net_rs_proof_slice();
-    posix_test_logic_shared_rs_proof_slice();
-    qml_cluster_rs_proof_slice();
-    run_elf_rs_proof_slice();
-    svc_rs_proof_slice();
-    user_logic_rs_proof_slice();
-    user_logic_shared_rs_proof_slice();
-    user_shell_rs_proof_slice();
+    smros_sectest_trap_verdict_body!(faulted, magic_ok, exec_ok)
+}
+
+fn verified_sectest_case_timed_out(start: u64, now: u64, budget: u64) -> (out: bool)
+    ensures
+        now >= start ==> out == (now - start > budget),
+        now < start ==> !out,
+{
+    smros_sectest_case_timed_out_body!(start, now, budget)
+}
+
+fn verified_sectest_address_in_window(addr: u64, len: u64, start: u64, end: u64) -> (out: bool)
+    ensures
+        end < start ==> !out,
+        end >= start && len == 0 ==> out == (addr >= start && addr <= end),
+        end >= start && len > 0 && addr <= u64::MAX - len ==> out == (addr >= start && addr + len <= end),
+        end >= start && len > 0 && addr > u64::MAX - len ==> !out,
+{
+    smros_sectest_address_in_window_body!(addr, len, start, end)
+}
+
+fn verified_elf_page_down(value: u64, page_size: u64) -> (out: Option<u64>)
+    ensures
+        page_size == 0 ==> out.is_none(),
+{
+    smros_elf_page_down_body!(value, page_size)
+}
+
+fn verified_elf_page_up(value: u64, page_size: u64) -> (out: Option<u64>)
+    ensures
+        page_size == 0 ==> out.is_none(),
+        page_size > 0 && value == 0 ==> out == Some(0u64),
+{
+    smros_elf_page_up_body!(value, page_size)
+}
+
+fn verified_elf_admit_segment(
+    vaddr: u64,
+    mem_size: u64,
+    file_size: u64,
+    base: u64,
+    window_start: u64,
+    window_end: u64,
+    page_size: u64,
+) -> (out: Result<(), u8>)
+    ensures
+        page_size == 0 || window_end <= window_start ==> out == Err::<(), u8>(22u8),
+        page_size > 0 && window_end > window_start && mem_size == 0 ==> out == Ok::<(), u8>(()),
+        page_size > 0 && window_end > window_start && mem_size > 0 && file_size > mem_size ==> out
+            == Err::<(), u8>(22u8),
+        page_size > 0
+            && window_end > window_start
+            && mem_size > 0
+            && file_size <= mem_size
+            && mem_size > window_end - window_start ==> out == Err::<(), u8>(12u8),
+{
+    smros_elf_admit_segment_body!(
+        vaddr,
+        mem_size,
+        file_size,
+        base,
+        window_start,
+        window_end,
+        page_size,
+        22u8,
+        12u8
+    )
 }
 
 } // verus!

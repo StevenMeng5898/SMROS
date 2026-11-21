@@ -992,6 +992,11 @@ fn driver_block_capacity_bytes_direct(blocks: usize, block_size: usize) -> (out:
     requires
         block_size > 0,
         blocks <= usize::MAX / block_size,
+    ensures
+        out == match blocks.checked_mul(block_size) {
+            Some(bytes) => bytes,
+            None => usize::MAX,
+        },
 {
     smros_driver_block_capacity_bytes_body!(blocks, block_size)
 }
@@ -1029,6 +1034,14 @@ fn driver_block_range_valid_direct(
         block_size > 0,
         blocks <= usize::MAX / block_size,
         offset <= usize::MAX - len,
+    ensures
+        out == match blocks.checked_mul(block_size) {
+            Some(capacity) => match offset.checked_add(len) {
+                Some(end) => end <= capacity,
+                None => false,
+            },
+            None => false,
+        },
 {
     smros_driver_block_range_valid_body!(offset, len, blocks, block_size)
 }
@@ -2485,6 +2498,13 @@ proof fn user_test_syscall_smoke() {
     ));
     assert(0x3C5u64 == smros_user_el1h_spsr_masked_body!());
     assert(0u64 == smros_user_syscall_should_advance_elr_body!());
+}
+
+fn verified_virtio_completion_timed_out(now: u64, deadline: u64) -> (out: bool)
+    ensures
+        out == (now >= deadline),
+{
+    smros_driver_virtio_completion_timed_out_body!(now, deadline)
 }
 
 } // verus!

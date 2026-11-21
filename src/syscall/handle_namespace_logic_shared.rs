@@ -13,6 +13,12 @@ pub const PROCESS_HANDLE_PREFIX_MASK: u32 = 0xC000_0000;
 const PROCESS_HANDLE_INDEX_MASK: u32 = (1 << PROCESS_HANDLE_INDEX_BITS) - 1;
 const PROCESS_HANDLE_GENERATION_MAX: u32 = (1 << (30 - PROCESS_HANDLE_INDEX_BITS)) - 1;
 
+macro_rules! smros_handle_generation_matches_body {
+    ($slot_generation:expr, $handle_generation:expr) => {{
+        $slot_generation == $handle_generation
+    }};
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleNamespaceError {
     Missing,
@@ -87,7 +93,7 @@ impl<T: Copy> HandleNamespace<T> {
     pub fn lookup(&self, handle: u32, object_id: impl Fn(&T) -> u32) -> Option<&T> {
         if let Some((index, generation)) = decode_process_handle(handle) {
             let slot = self.slots.get(index)?;
-            if slot.generation != generation {
+            if !smros_handle_generation_matches_body!(slot.generation, generation) {
                 return None;
             }
             return slot.value.as_ref();
@@ -116,7 +122,9 @@ impl<T: Copy> HandleNamespace<T> {
     pub fn close(&mut self, handle: u32, object_id: impl Fn(&T) -> u32) -> Result<T, HandleNamespaceError> {
         let index = if let Some((index, generation)) = decode_process_handle(handle) {
             let slot = self.slots.get(index).ok_or(HandleNamespaceError::Missing)?;
-            if slot.generation != generation || slot.value.is_none() {
+            if !smros_handle_generation_matches_body!(slot.generation, generation)
+                || slot.value.is_none()
+            {
                 return Err(HandleNamespaceError::Missing);
             }
             index
@@ -242,24 +250,84 @@ impl<T: Copy> HandleNamespace<T> {
     }
 }
 
+macro_rules! smros_handle_encode_body {
+    ($index:expr, $generation:expr, $slots:expr, $gen_max:expr, $prefix:expr, $index_bits:expr) => {{
+        if $index >= $slots || $generation == 0 || $generation > $gen_max {
+            None
+        } else {
+            Some($prefix | ($generation << $index_bits) | ($index as u32))
+        }
+    }};
+}
+
+macro_rules! smros_handle_decode_body {
+    ($value:expr, $prefix:expr, $prefix_mask:expr, $index_mask:expr, $index_bits:expr, $slots:expr) => {{
+        if $value & $prefix_mask != $prefix {
+            None
+        } else {
+            let index = ($value & $index_mask) as usize;
+            let generation = ($value & !$prefix_mask) >> $index_bits;
+            if index >= $slots || generation == 0 {
+                None
+            } else {
+                Some((index, generation))
+            }
+        }
+    }};
+}
+
+/// `0` allowed, `1` missing, `2` wrong type, `3` access denied.
+macro_rules! smros_handle_authorize_body {
+    ($found:expr, $actual_type:expr, $expected_type:expr, $rights:expr, $required_rights:expr) => {{
+        if !$found {
+            1u8
+        } else if $actual_type != $expected_type {
+            2u8
+        } else if ($rights & $required_rights) != $required_rights {
+            3u8
+        } else {
+            0u8
+        }
+    }};
+}
+
+macro_rules! smros_handle_next_generation_body {
+    ($generation:expr, $gen_max:expr) => {{
+        let next = $generation.wrapping_add(1);
+        if next == 0 || next > $gen_max {
+            1u32
+        } else {
+            next
+        }
+    }};
+}
+
+macro_rules! smros_handle_fd_slot_available_body {
+    ($open_fds:expr, $limit:expr, $replacing:expr) => {{
+        $replacing || $open_fds < $limit
+    }};
+}
+
 pub fn encode_process_handle(index: usize, generation: u32) -> Option<u32> {
-    if index >= PROCESS_HANDLE_SLOTS || generation == 0 || generation > PROCESS_HANDLE_GENERATION_MAX
-    {
-        return None;
-    }
-    Some(PROCESS_HANDLE_PREFIX | (generation << PROCESS_HANDLE_INDEX_BITS) | (index as u32))
+    smros_handle_encode_body!(
+        index,
+        generation,
+        PROCESS_HANDLE_SLOTS,
+        PROCESS_HANDLE_GENERATION_MAX,
+        PROCESS_HANDLE_PREFIX,
+        PROCESS_HANDLE_INDEX_BITS
+    )
 }
 
 pub fn decode_process_handle(value: u32) -> Option<(usize, u32)> {
-    if value & PROCESS_HANDLE_PREFIX_MASK != PROCESS_HANDLE_PREFIX {
-        return None;
-    }
-    let index = (value & PROCESS_HANDLE_INDEX_MASK) as usize;
-    let generation = (value & !PROCESS_HANDLE_PREFIX_MASK) >> PROCESS_HANDLE_INDEX_BITS;
-    if index >= PROCESS_HANDLE_SLOTS || generation == 0 {
-        return None;
-    }
-    Some((index, generation))
+    smros_handle_decode_body!(
+        value,
+        PROCESS_HANDLE_PREFIX,
+        PROCESS_HANDLE_PREFIX_MASK,
+        PROCESS_HANDLE_INDEX_MASK,
+        PROCESS_HANDLE_INDEX_BITS,
+        PROCESS_HANDLE_SLOTS
+    )
 }
 
 pub fn authorize_handle_use(
@@ -269,27 +337,18 @@ pub fn authorize_handle_use(
     rights: u32,
     required_rights: u32,
 ) -> Result<(), HandleNamespaceError> {
-    if !found {
-        return Err(HandleNamespaceError::Missing);
+    match smros_handle_authorize_body!(found, actual_type, expected_type, rights, required_rights) {
+        0 => Ok(()),
+        2 => Err(HandleNamespaceError::WrongType),
+        3 => Err(HandleNamespaceError::AccessDenied),
+        _ => Err(HandleNamespaceError::Missing),
     }
-    if actual_type != expected_type {
-        return Err(HandleNamespaceError::WrongType);
-    }
-    if rights & required_rights != required_rights {
-        return Err(HandleNamespaceError::AccessDenied);
-    }
-    Ok(())
 }
 
 fn next_generation(generation: u32) -> u32 {
-    let next = generation.wrapping_add(1);
-    if next == 0 || next > PROCESS_HANDLE_GENERATION_MAX {
-        1
-    } else {
-        next
-    }
+    smros_handle_next_generation_body!(generation, PROCESS_HANDLE_GENERATION_MAX)
 }
 
 pub fn fd_slot_available(open_fds: usize, limit: usize, replacing: bool) -> bool {
-    replacing || open_fds < limit
+    smros_handle_fd_slot_available_body!(open_fds, limit, replacing)
 }
