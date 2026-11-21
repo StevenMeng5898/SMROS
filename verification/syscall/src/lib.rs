@@ -22,12 +22,6 @@ mod linux_record_lock_runtime_shared {
     include!("../../../src/syscall/linux_record_lock_logic_shared.rs");
 }
 
-#[macro_use]
-#[allow(dead_code, unused_macros)]
-mod uaccess_runtime_shared {
-    include!("../../../src/syscall/uaccess_logic_shared.rs");
-}
-
 #[allow(dead_code)]
 mod linux_shm_cache_runtime_shared {
     include!("../../../src/syscall/linux_shm_cache_logic_shared.rs");
@@ -85,6 +79,7 @@ mod address_runtime_macro_checks {
 
 verus! {
 
+include!("../../../src/syscall/uaccess_logic_shared.rs");
 include!("../../../src/syscall/linux_riscv_syscall_context_logic_shared.rs");
 
 #[repr(u8)]
@@ -2531,11 +2526,64 @@ fn verified_handle_fd_slot(open_fds: usize, limit: usize, replacing: bool) -> (o
 
 fn verified_handle_next_generation(generation: u32, gen_max: u32) -> (out: u32)
     requires
-        gen_max >= 1,
+        gen_max > 1,
     ensures
         1 <= out && out <= gen_max,
+        out != generation,
 {
     smros_handle_next_generation_body!(generation, gen_max)
+}
+
+fn verified_handle_generation_matches(slot_generation: u32, handle_generation: u32) -> (out: bool)
+    ensures
+        out == (slot_generation == handle_generation),
+        !out ==> slot_generation != handle_generation,
+{
+    smros_handle_generation_matches_body!(slot_generation, handle_generation)
+}
+
+proof fn handle_encode_decode_round_trip(index: u32, generation: u32)
+    requires
+        index < 1024,
+        1 <= generation <= 0x000f_ffff,
+    ensures
+        ((0x4000_0000u32 | (generation << 10) | index) & 0x3ff) == index,
+        (((0x4000_0000u32 | (generation << 10) | index) & !0xC000_0000) >> 10) == generation,
+{
+    assert(((0x4000_0000u32 | (generation << 10) | index) & 0x3ff) == index) by (bit_vector)
+        requires
+            index < 1024,
+            1 <= generation <= 0x000f_ffff,
+    ;
+    assert((((0x4000_0000u32 | (generation << 10) | index) & !0xC000_0000) >> 10) == generation)
+        by (bit_vector)
+        requires
+            index < 1024,
+            1 <= generation <= 0x000f_ffff,
+    ;
+}
+
+proof fn handle_encode_injective(index_a: u32, generation_a: u32, index_b: u32, generation_b: u32)
+    requires
+        index_a < 1024,
+        index_b < 1024,
+        1 <= generation_a <= 0x000f_ffff,
+        1 <= generation_b <= 0x000f_ffff,
+        (0x4000_0000u32 | (generation_a << 10) | index_a)
+            == (0x4000_0000u32 | (generation_b << 10) | index_b),
+    ensures
+        index_a == index_b,
+        generation_a == generation_b,
+{
+    assert(index_a == index_b && generation_a == generation_b) by (bit_vector)
+        requires
+            index_a < 1024,
+            index_b < 1024,
+            1 <= generation_a <= 0x000f_ffff,
+            1 <= generation_b <= 0x000f_ffff,
+            (0x4000_0000u32 | (generation_a << 10) | index_a)
+                == (0x4000_0000u32 | (generation_b << 10) | index_b),
+    ;
 }
 
 fn verified_handle_encode(

@@ -13,6 +13,12 @@ pub const PROCESS_HANDLE_PREFIX_MASK: u32 = 0xC000_0000;
 const PROCESS_HANDLE_INDEX_MASK: u32 = (1 << PROCESS_HANDLE_INDEX_BITS) - 1;
 const PROCESS_HANDLE_GENERATION_MAX: u32 = (1 << (30 - PROCESS_HANDLE_INDEX_BITS)) - 1;
 
+macro_rules! smros_handle_generation_matches_body {
+    ($slot_generation:expr, $handle_generation:expr) => {{
+        $slot_generation == $handle_generation
+    }};
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleNamespaceError {
     Missing,
@@ -87,7 +93,7 @@ impl<T: Copy> HandleNamespace<T> {
     pub fn lookup(&self, handle: u32, object_id: impl Fn(&T) -> u32) -> Option<&T> {
         if let Some((index, generation)) = decode_process_handle(handle) {
             let slot = self.slots.get(index)?;
-            if slot.generation != generation {
+            if !smros_handle_generation_matches_body!(slot.generation, generation) {
                 return None;
             }
             return slot.value.as_ref();
@@ -116,7 +122,9 @@ impl<T: Copy> HandleNamespace<T> {
     pub fn close(&mut self, handle: u32, object_id: impl Fn(&T) -> u32) -> Result<T, HandleNamespaceError> {
         let index = if let Some((index, generation)) = decode_process_handle(handle) {
             let slot = self.slots.get(index).ok_or(HandleNamespaceError::Missing)?;
-            if slot.generation != generation || slot.value.is_none() {
+            if !smros_handle_generation_matches_body!(slot.generation, generation)
+                || slot.value.is_none()
+            {
                 return Err(HandleNamespaceError::Missing);
             }
             index

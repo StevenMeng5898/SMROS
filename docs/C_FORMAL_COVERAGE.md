@@ -187,8 +187,17 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
   - 待证明
     SMROS POSIX compat runtime. Not yet discharged. The upstream suite under `target/posix` is not this file.
 - `src/user_level/apps/pthread_mutex_futex.c`
+  - 待证明
+    The pthread demo, futex syscall, and thread interleaving are not model-checked. The slow path stores `lock_transition`'s result, but CBMC does not run the atomics.
+- `src/user_level/apps/pthread_mutex_futex.c::lock_transition`
   - 已证明
-    CBMC checks `lock_transition`, `unlock_transition`, and `trylock_transition` for the 0/1/2 futex word: free locks without a wait, unlock frees the word and wakes only from 2, trylock acquires only 0, and the word does not overflow. Raw log: `verification/logs/cbmc-futex.log`. The pthread demo around those transitions is not separately proved. Kernel futex proofs stay on the Verus track.
+    CBMC: a free word becomes 1 with no wait; any other word becomes 2 and waits. Log: `verification/logs/cbmc-futex.log`.
+- `src/user_level/apps/pthread_mutex_futex.c::unlock_transition`
+  - 已证明
+    CBMC: unlock stores 0 and requests a wake exactly when the previous word was 2.
+- `src/user_level/apps/pthread_mutex_futex.c::trylock_transition`
+  - 已证明
+    CBMC: trylock acquires only a free word and leaves any other word unchanged.
 - `src/user_level/apps/tensor_neon_mul.c`
   - 超出范围
     EL0 NEON GEMM demo, not kernel TCB.

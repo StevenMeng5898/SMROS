@@ -372,7 +372,7 @@ cbmc-futex:
 	exit $$status
 
 # Full local confidence suite, including QEMU smoke and Verus
-verify: test skt verus
+verify: test skt verus cbmc-futex
 
 # Show help
 help:

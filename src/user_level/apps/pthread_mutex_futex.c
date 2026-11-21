@@ -105,6 +105,15 @@ void cbmc_futex_word(void)
     __CPROVER_assert(acquired == (word == 0), "trylock acquires only a free word");
     __CPROVER_assert(acquired ? tried == 1 : tried == word, "failed trylock leaves the word unchanged");
     __CPROVER_assert(tried <= 2, "trylock does not overflow the futex word");
+    if (word == 0) {
+        __CPROVER_cover(1);
+    }
+    if (word == 1) {
+        __CPROVER_cover(1);
+    }
+    if (word == 2) {
+        __CPROVER_cover(1);
+    }
 }
 #else
 static atomic_uint mutex_word;
@@ -162,8 +171,25 @@ static void mutex_lock(void)
             &mutex_word, &expected, next, memory_order_acquire, memory_order_relaxed)) {
         return;
     }
-    while (atomic_exchange_explicit(&mutex_word, 2, memory_order_acquire) != 0) {
-        if (futex_wait(&mutex_word, 2) < 0 && errno != EAGAIN && errno != EINTR) {
+    for (;;) {
+        unsigned observed = atomic_load_explicit(&mutex_word, memory_order_relaxed);
+        int slow_wait = 0;
+        unsigned stored = lock_transition(observed, &slow_wait);
+        if (!slow_wait) {
+            unsigned retry = 0;
+            if (atomic_compare_exchange_strong_explicit(
+                    &mutex_word, &retry, stored, memory_order_acquire, memory_order_relaxed)) {
+                return;
+            }
+            continue;
+        }
+        unsigned previous = atomic_exchange_explicit(&mutex_word, stored, memory_order_acquire);
+        int acquired_free = 0;
+        (void)lock_transition(previous, &acquired_free);
+        if (!acquired_free) {
+            return;
+        }
+        if (futex_wait(&mutex_word, stored) < 0 && errno != EAGAIN && errno != EINTR) {
             die("futex wait");
         }
     }

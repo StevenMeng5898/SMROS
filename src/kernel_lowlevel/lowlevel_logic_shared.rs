@@ -171,6 +171,55 @@ macro_rules! smros_ll_page_bit_free_body {
     }};
 }
 
+macro_rules! smros_ll_bitmap_word_index_body {
+    ($pfn:expr) => {{
+        ($pfn as usize) / 64
+    }};
+}
+
+macro_rules! smros_ll_bitmap_bit_index_body {
+    ($pfn:expr) => {{
+        ($pfn as usize) % 64
+    }};
+}
+
+macro_rules! smros_ll_bitmap_mask_body {
+    ($bit:expr) => {{
+        1u64 << $bit
+    }};
+}
+
+macro_rules! smros_ll_pfn_index_body {
+    ($pfn:expr, $base_pfn:expr, $total_pages:expr) => {{
+        match ($pfn).checked_sub($base_pfn) {
+            Some(index) => {
+                if index < $total_pages as u64 {
+                    Some(index as usize)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    }};
+}
+
+macro_rules! smros_ll_pfn_address_body {
+    ($pfn:expr, $base_pfn:expr, $total_pages:expr, $page_size:expr) => {{
+        if $pfn > usize::MAX as u64 {
+            None
+        } else {
+            match smros_ll_pfn_index_body!($pfn, $base_pfn, $total_pages) {
+                Some(index) => {
+                    let _ = index;
+                    ($pfn as usize).checked_mul($page_size)
+                }
+                None => None,
+            }
+        }
+    }};
+}
+
 impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
     pub(crate) const fn new(total_pages: usize) -> Self {
         Self {
@@ -205,9 +254,9 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
         let start = self.next_search_page.min(self.total_pages - 1);
         for offset in 0..self.total_pages {
             let page_index = (start + offset) % self.total_pages;
-            let word_index = page_index / 64;
-            let bit_index = page_index % 64;
-            let mask = 1u64 << bit_index;
+            let word_index = smros_ll_bitmap_word_index_body!(page_index);
+            let bit_index = smros_ll_bitmap_bit_index_body!(page_index);
+            let mask = smros_ll_bitmap_mask_body!(bit_index);
             if smros_ll_page_bit_free_body!(self.bitmap[word_index], bit_index) {
                 self.bitmap[word_index] |= mask;
                 self.allocated_pages += 1;
@@ -228,8 +277,8 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
         else {
             return false;
         };
-        let word_index = page_index / 64;
-        let bit_index = page_index % 64;
+        let word_index = smros_ll_bitmap_word_index_body!(page_index);
+        let bit_index = smros_ll_bitmap_bit_index_body!(page_index);
         !smros_ll_page_bit_free_body!(self.bitmap[word_index], bit_index)
     }
 
@@ -241,13 +290,13 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
         else {
             return false;
         };
-        let word_index = page_index / 64;
-        let bit_index = page_index % 64;
+        let word_index = smros_ll_bitmap_word_index_body!(page_index);
+        let bit_index = smros_ll_bitmap_bit_index_body!(page_index);
         if smros_ll_page_bit_free_body!(self.bitmap[word_index], bit_index) {
             return false;
         }
 
-        let mask = 1u64 << bit_index;
+        let mask = smros_ll_bitmap_mask_body!(bit_index);
         self.bitmap[word_index] &= !mask;
         self.allocated_pages -= 1;
         self.next_search_page = self.next_search_page.min(page_index);
@@ -255,17 +304,12 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
     }
 
     pub(crate) fn pfn_address(&self, pfn: u64, page_size: usize) -> Option<usize> {
-        let index = pfn.checked_sub(self.base_pfn)?;
-        if index >= self.total_pages as u64 || pfn > usize::MAX as u64 {
-            return None;
-        }
-        (pfn as usize).checked_mul(page_size)
+        smros_ll_pfn_address_body!(pfn, self.base_pfn, self.total_pages, page_size)
     }
 
     #[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
     pub(crate) fn pfn_index(&self, pfn: u64) -> Option<usize> {
-        let index = pfn.checked_sub(self.base_pfn)?;
-        (index < self.total_pages as u64).then_some(index as usize)
+        smros_ll_pfn_index_body!(pfn, self.base_pfn, self.total_pages)
     }
 
     pub(crate) const fn total_pages(&self) -> usize {
@@ -285,45 +329,6 @@ impl<const WORDS: usize> PageFrameAllocatorCore<WORDS> {
 macro_rules! smros_ll_pfn_from_index_body {
     ($index:expr, $base_pfn:expr) => {{
         ($base_pfn).checked_add($index as u64)
-    }};
-}
-
-#[allow(unused_macros)]
-macro_rules! smros_ll_pfn_index_body {
-    ($pfn:expr, $base_pfn:expr, $total_pages:expr) => {{
-        ($pfn)
-            .checked_sub($base_pfn)
-            .filter(|index| *index < $total_pages as u64)
-            .map(|index| index as usize)
-    }};
-}
-
-#[allow(unused_macros)]
-macro_rules! smros_ll_pfn_address_body {
-    ($pfn:expr, $base_pfn:expr, $total_pages:expr, $page_size:expr) => {{
-        smros_ll_pfn_index_body!($pfn, $base_pfn, $total_pages)
-            .and_then(|_| ($pfn as usize).checked_mul($page_size))
-    }};
-}
-
-#[cfg(not(target_os = "none"))]
-macro_rules! smros_ll_bitmap_word_index_body {
-    ($pfn:expr) => {{
-        ($pfn as usize) / 64
-    }};
-}
-
-#[cfg(not(target_os = "none"))]
-macro_rules! smros_ll_bitmap_bit_index_body {
-    ($pfn:expr) => {{
-        ($pfn as usize) % 64
-    }};
-}
-
-#[cfg(not(target_os = "none"))]
-macro_rules! smros_ll_bitmap_mask_body {
-    ($bit:expr) => {{
-        1u64 << $bit
     }};
 }
 

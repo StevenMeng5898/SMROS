@@ -130,12 +130,12 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
     Global charge table and interrupt masking. Pure admission is proven in kernel_budget_logic_shared.rs; this file is not compiled by Verus.
 - `src/kernel_lowlevel/kernel_budget_logic_shared.rs`
   - 已证明
-    The four macros expand inside specified kernel_lowlevel functions (`verified_kernel_budget_*` in func-details). Runtime wrappers `admit_heap`, `admit_process`, `mmap_metadata_bytes`, and `uncharge` are not in func-details. mmap metadata is proved only when `per_page > 0` and the product does not overflow.
+    The four macros expand inside `verified_kernel_budget_*`, which are `lib::` func-details entries with postconditions. `scripts/audit-verus-proofs.py` lists `admit_heap`, `admit_process`, `mmap_metadata_bytes`, and `uncharge` in `UNVERIFIED_WRAPPERS`: those wrappers are not the proof. mmap metadata's specified success path is the checked multiply; overflow returns None from that macro.
 - `src/kernel_lowlevel/lowlevel_logic.rs`
   - 待证明
 - `src/kernel_lowlevel/lowlevel_logic_shared.rs`
   - 待证明
-    The file stays 待证明. `verified_page_bit_free` and `verified_page_range_admitted` are in the kernel_lowlevel func-details and are the bit test and admission check used by `alloc`, `free`, `is_allocated`, and `init_range`. The methods themselves are not separate func-details entries. `pfn_address`, `pfn_index`, and `total_pages` are not proved as methods.
+    The file stays 待证明. `ll_pfn_index` and `ll_pfn_address` expand `smros_ll_pfn_index_body` and `smros_ll_pfn_address_body`, which `pfn_index` and `pfn_address` also call. The address postcondition is `pfn_address_spec`, including `None` when `checked_mul` overflows, with no precondition that assumes the product fits. `smros_ll_bitmap_mask_body` is compiled for the kernel target and used by `alloc` and `free`. `verified_page_bit_free` and `verified_page_range_admitted` are the bit test and the `init_range` admission check.
 - `src/kernel_lowlevel/memory.rs`
   - 待证明
 - `src/kernel_lowlevel/mmu.rs`
@@ -225,7 +225,10 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/handle_namespace_logic_shared.rs`
   - 待证明
-    Encode, decode, authorization, generation bump, and fd-slot checks are proven. The Vec slot table is not included in the Verus AST.
+    The Vec slot table is not in the Verus AST. `verified_handle_next_generation` ensures the bumped generation differs from the old one while `gen_max > 1`. `verified_handle_round_trip` and `verified_handle_encode_injective` cover encode/decode. `lookup` and `close` call `smros_handle_generation_matches_body`.
+- `src/syscall/handle_namespace_logic_shared.rs generation wrap`
+  - 规范假设
+    `next_generation` returns 1 once the value exceeds `0x000f_ffff`. A stale handle can match a later occupant of the same slot after that wrap. Single-step inequality is proved; the wrap alias is not.
 - `src/syscall/linux_fork_logic_shared.rs`
   - 待证明
     Included as ordinary Rust for the fork ledger. It is not a Verus proof.
@@ -233,7 +236,7 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/linux_futex_logic_shared.rs`
   - 待证明
-    The file's plain futex helpers and waiter methods are absent from func-details. Only harness wrappers around a few macros are verified.
+    The file's plain futex helpers and waiter methods are absent from func-details. `futex_value_matches` is not counted: its spec is the same equality as the body.
 - `src/syscall/linux_mqueue.rs`
   - 待证明
     Syscall wrapper around the queue state machine. Attribute and name predicates are proven in the shared file; the wrapper is not compiled by Verus.
@@ -300,7 +303,7 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
     Per-thread SPSR slot and EL0 detection. The range predicate is proven in uaccess_logic_shared.rs.
 - `src/syscall/uaccess_logic_shared.rs`
   - 已证明
-    `smros_uaccess_el0_range_body` expands inside `verified_el0_user_range`, which is in func-details and has a postcondition. Runtime wrapper `el0_user_range_plausible` is not in func-details.
+    `smros_uaccess_el0_range_body` expands inside `verified_el0_user_range`. That proof is only the numeric window: zero length is accepted, and a non-zero length must not overflow and must sit inside `[user_base, user_limit)`. It does not prove that the range is mapped or that the access is permitted. `el0_user_range_plausible` is in `UNVERIFIED_WRAPPERS` and is not the proof.
 - `src/user_level/apps/epoll_coro.rs`
   - 超出范围
     EL0 epoll demo. Kernel epoll proofs stay on the syscall side.

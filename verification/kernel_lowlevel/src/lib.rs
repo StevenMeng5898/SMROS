@@ -32,14 +32,9 @@ mod lowlevel_runtime_macro_checks {
     }
 }
 
-#[macro_use]
-#[allow(dead_code, unused_macros)]
-mod kernel_budget_runtime_shared {
-    include!("../../../src/kernel_lowlevel/kernel_budget_logic_shared.rs");
-}
-
 verus! {
 
+include!("../../../src/kernel_lowlevel/kernel_budget_logic_shared.rs");
 include!("../../../src/kernel_lowlevel/lowlevel_logic_shared.rs");
 include!("../../../src/kernel_lowlevel/aarch64_exception_logic_shared.rs");
 include!("../../../src/kernel_lowlevel/aarch64_vm_logic_shared.rs");
@@ -535,10 +530,7 @@ fn ll_pfn_index(pfn: u64, base_pfn: u64, total_pages: usize) -> (out: Option<usi
                 == Option::<int>::None,
         },
 {
-    match pfn.checked_sub(base_pfn) {
-        Some(index) if index < total_pages as u64 => Some(index as usize),
-        _ => None,
-    }
+    smros_ll_pfn_index_body!(pfn, base_pfn, total_pages)
 }
 
 fn ll_pfn_address(
@@ -547,10 +539,6 @@ fn ll_pfn_address(
     total_pages: usize,
     page_size: usize,
 ) -> (out: Option<usize>)
-    requires
-        page_size > 0,
-        pfn <= usize::MAX as u64,
-        pfn as int * page_size as int <= usize::MAX as int,
     ensures
         match out {
             Some(address) => pfn_address_spec(
@@ -567,10 +555,7 @@ fn ll_pfn_address(
             ) == Option::<int>::None,
         },
 {
-    match ll_pfn_index(pfn, base_pfn, total_pages) {
-        Some(_) => Some((pfn as usize) * page_size),
-        None => None,
-    }
+    smros_ll_pfn_address_body!(pfn, base_pfn, total_pages, page_size)
 }
 
 fn find_segment_model(segments: &Vec<SegmentModel>, vaddr: usize) -> (out: Option<usize>)

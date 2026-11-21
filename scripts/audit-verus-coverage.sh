@@ -9,17 +9,33 @@ cd "$ROOT_DIR"
 status=0
 
 if [ -f verification/logs/verus-syscall.log ]; then
-    {
-        echo "===== assembled make verus log ====="
-        echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        echo "git_head=$(git rev-parse HEAD)"
-        echo "The per-harness logs below are the raw Verus JSON. This file only concatenates them."
-        for name in verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services; do
-            echo "########## verification/logs/${name}.log ##########"
-            cat "verification/logs/${name}.log"
-            echo
-        done
-    } >verification/logs/make-verus.log
+    python3 - <<'PY'
+import json, pathlib, re
+root = pathlib.Path("verification/logs")
+names = [
+    "verus-syscall",
+    "verus-kernel-objects",
+    "verus-kernel-lowlevel",
+    "verus-user-level",
+    "verus-services",
+]
+first = (root / "verus-syscall.log").read_text()
+header = first.split("\n{", 1)[0]
+lines = ["===== make verus summary ====="]
+for key in ("utc", "git_head", "git_dirty"):
+    match = re.search(rf"^{key}=(.*)$", header, re.M)
+    if match:
+        lines.append(f"{key}={match.group(1)}")
+lines.append("Per-harness totals from Verus --output-json. Full JSON stays local and is not committed.")
+for name in names:
+    text = (root / f"{name}.log").read_text()
+    data, _ = json.JSONDecoder().raw_decode(text[text.find("{") :])
+    result = data.get("verification-results", {})
+    lines.append(
+        f"{name}: verified={result.get('verified')} errors={result.get('errors')} success={result.get('success')}"
+    )
+(root / "make-verus-summary.txt").write_text("\n".join(lines) + "\n")
+PY
 fi
 
 contains_fixed() {

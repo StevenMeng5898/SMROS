@@ -103,6 +103,9 @@ def nonempty_spec(header):
         header,
         re.S,
     )
+    compact = re.sub(r"\s+", "", " ".join(clauses))
+    if re.fullmatch(r"(?:true,?|out==out,?)*", compact or ""):
+        return False
     atoms = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", " ".join(clauses))
     return any(atom != "true" for atom in atoms)
 
@@ -172,8 +175,7 @@ def main():
 
     for rel in proved:
         if "inside" not in includes.get(rel, set()):
-            # Macros may be defined outside verus! and expanded inside it.
-            print(f"proved file included outside verus! only: {rel}")
+            status |= fail(f"已证明 file is not included inside verus!: {rel}")
 
     headers = {}
     func_names = set()
@@ -194,7 +196,7 @@ def main():
         if "only verification/logs/" not in header and "only verification/logs" not in header:
             status |= fail(f"{log.name} does not state that a log-only commit publishes the run")
         for key in data.get("func-details", {}):
-            func_names.add(key.split("::")[-1])
+            func_names.add(key)
         for path, text in harness_text:
             headers.setdefault(path, function_headers(text))
 
@@ -261,7 +263,8 @@ def main():
             if name in exempt:
                 print(f"documented unverified runtime wrapper: {rel} {name}")
                 continue
-            if name not in func_names or not nonempty_spec(all_headers.get(name, "")):
+            qualified = f"lib::{name}"
+            if qualified not in func_names or not nonempty_spec(all_headers.get(name, "")):
                 status |= fail(
                     f"已证明 function has no specified func-details entry: {rel} {name}"
                 )
@@ -282,7 +285,7 @@ def main():
                 name = previous[-1].group(1)
                 if not inside(previous[-1].start(), combined_spans):
                     continue
-                if name in func_names and nonempty_spec(all_headers.get(name, "")):
+                if f"lib::{name}" in func_names and nonempty_spec(all_headers.get(name, "")):
                     found = True
                     break
             if not found:

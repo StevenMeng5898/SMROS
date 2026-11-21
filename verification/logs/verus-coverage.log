@@ -1,6 +1,0 @@
-===== utc 2026-11-20T11:05:59Z =====
-===== command =====
-make verus-coverage
-===== output =====
-Verus coverage audit passed.
-===== exit 0 =====
