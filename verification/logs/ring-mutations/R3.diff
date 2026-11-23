@@ -1,0 +1,17 @@
+--- a/src/kernel_objects/socket_logic_shared.rs
++++ b/src/kernel_objects/socket_logic_shared.rs
+@@ -16,12 +16,8 @@
+             0
+         } else {
+             let base = $read_pos % $capacity;
+-            let offset = $offset % $capacity;
+-            if base >= $capacity - offset {
+-                base - ($capacity - offset)
+-            } else {
+-                base + offset
+-            }
++            let _offset = $offset % $capacity;
++            base
+         }
+     }};
+ }

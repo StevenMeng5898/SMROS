@@ -1,21 +1,6 @@
-diff --git a/src/syscall/syscall_dispatch_logic_shared.rs b/src/syscall/syscall_dispatch_logic_shared.rs
-index 786ad92..9df75af 100644
 --- a/src/syscall/syscall_dispatch_logic_shared.rs
 +++ b/src/syscall/syscall_dispatch_logic_shared.rs
-@@ -67,14 +67,17 @@ macro_rules! smros_linux_stub_errno_body {
-     }};
- }
- 
--/// Numbers the Linux dispatcher match sends to a real handler and that this
--/// proof treats as the lifecycle and scheduler map. This is not the whole match.
-+/// Exact set of dispatcher arms this proof names.
-+///
-+/// Lifecycle: exit 93, exit_group 94, waitid 95, kill 129, clone 220, execve
-+/// 221, wait4 260, clone3 435, fork 1000, vfork 1001. Scheduler: 118-127,
-+/// setpriority 140, getpriority 141. Futex 98 stays because that arm is a real
-+/// handler. This is not the whole `dispatch_linux_syscall` match.
- #[allow(unused_macros)]
- macro_rules! smros_linux_critical_handler_body {
+@@ -80,7 +80,6 @@
      ($syscall_num:expr) => {{
          $syscall_num == 93
              || $syscall_num == 94
@@ -23,36 +8,3 @@ index 786ad92..9df75af 100644
              || $syscall_num == 98
              || $syscall_num == 118
              || $syscall_num == 119
-@@ -86,9 +89,13 @@ macro_rules! smros_linux_critical_handler_body {
-             || $syscall_num == 125
-             || $syscall_num == 126
-             || $syscall_num == 127
-+            || $syscall_num == 129
-             || $syscall_num == 140
-+            || $syscall_num == 141
-             || $syscall_num == 220
-+            || $syscall_num == 221
-             || $syscall_num == 260
-+            || $syscall_num == 435
-             || $syscall_num == 1000
-             || $syscall_num == 1001
-     }};
-@@ -124,18 +131,3 @@ macro_rules! smros_linux_handler_class_body {
-     }};
- }
- 
--#[allow(unused_macros)]
--macro_rules! smros_linux_unhandled_syscall_errno_body {
--    ($known:expr, $enosys:expr) => {{
--        let _known = $known;
--        $enosys
--    }};
--}
--
--#[allow(unused_macros)]
--macro_rules! smros_zircon_unhandled_rejected_body {
--    ($known:expr) => {{
--        let _known = $known;
--        true
--    }};
--}

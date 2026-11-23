@@ -1,0 +1,17 @@
+--- a/src/kernel_objects/fifo_logic_shared.rs
++++ b/src/kernel_objects/fifo_logic_shared.rs
+@@ -20,12 +20,8 @@
+             0
+         } else {
+             let base = $read_pos % $capacity;
+-            let offset = $offset % $capacity;
+-            if base >= $capacity - offset {
+-                base - ($capacity - offset)
+-            } else {
+-                base + offset
+-            }
++            let _offset = $offset % $capacity;
++            base
+         }
+     }};
+ }
