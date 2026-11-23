@@ -120,13 +120,41 @@ CROSS_CPU_NOTE = (
 )
 
 
+def _git_describe() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(ROOT), "describe", "--always", "--dirty"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    text = (completed.stdout or "").strip()
+    if completed.returncode != 0 or not text or any(char.isspace() for char in text):
+        return "unknown"
+    return text
+
+
 def campaign_serial_preamble(argv: list[str]) -> str:
-    """Lines written at the start of a guest serial log before QEMU runs."""
+    """Header written at the start of a guest serial log before QEMU runs.
+
+    utc, git_head, git_dirty, and smros_commit come from this function. The
+    kernel later prints the commit that was compiled into the image; the
+    summary requires that line to match git_head as well.
+    """
+    described = _git_describe()
+    utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     return (
         "qemu_argv=" + shlex.join(argv) + "\n"
         "hardware_online_cpus=1\n"
         + CROSS_CPU_NOTE
         + "\n"
+        + f"utc={utc}\n"
+        + f"git_head={described}\n"
+        + f"git_dirty={'true' if described.endswith('-dirty') else 'false'}\n"
+        + f"smros_commit={described}\n"
     )
 
 

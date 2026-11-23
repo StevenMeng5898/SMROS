@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 import selectors
 import shutil
@@ -1908,7 +1909,8 @@ def _host_mqueue_env() -> tuple[tuple[str, str], ...]:
 
 
 def _emfile_count(attempt: RuntimeAttempt) -> int:
-    return attempt.stdout.count("EMFILE") + attempt.stderr.count("EMFILE")
+    text = attempt.stdout + "\n" + attempt.stderr
+    return len(re.findall(r"\bEMFILE\b|\bENFILE\b|Too many open files", text))
 
 
 # posix-build compiles this preload and stages it. It is not a toolchain

@@ -40,19 +40,26 @@ SECTEST_FINAL = "SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0"
 NOTIFY_GATE_LATE_MAX = 1
 
 
-def _event_commit_allowed(event_sha, git_head):
-    """POSIX event commits may be the booted commit or an ancestor of it.
+# A later boot may keep an older POSIX stage only when the commits differ by
+# logs, docs, or these host runners. src/, build.rs, and proof or gate scripts
+# are not allowed to lag.
+_LAG_ALLOW_EXACT = {
+    "scripts/posix/baseline.py",
+    "scripts/posix/cli.py",
+    "scripts/smros-vm-launcher.py",
+    "scripts/run-hermes-campaign.sh",
+    "scripts/measure-notify-gate-sleep.sh",
+}
+_LAG_ALLOW_PREFIX = (
+    "verification/logs/",
+    "docs/",
+)
 
-    The stage records a full SHA when posix-build runs. A later kernel rebuild
-    can boot a descendant without rewriting that stage. A commit that is not an
-    ancestor of the booted git_head is rejected.
-    """
-    head = git_head[: -len("-dirty")] if git_head.endswith("-dirty") else git_head
-    if not head or head == "missing":
-        return False
+
+def _git_ok(args):
     try:
-        ancestor = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", event_sha, head],
+        completed = subprocess.run(
+            ["git", *args],
             cwd=ROOT,
             check=False,
             capture_output=True,
@@ -60,8 +67,49 @@ def _event_commit_allowed(event_sha, git_head):
             timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
+def _event_commit_allowed(event_sha, git_head):
+    """Prefer an equal commit. A lag is allowed only for logs, docs, and host runners."""
+    head = git_head[: -len("-dirty")] if git_head.endswith("-dirty") else git_head
+    if not head or head == "missing":
         return False
-    return ancestor.returncode == 0
+    event_full = _git_ok(["rev-parse", "--verify", event_sha + "^{commit}"])
+    head_full = _git_ok(["rev-parse", "--verify", head + "^{commit}"])
+    if not event_full or not head_full:
+        return False
+    if event_full.strip() == head_full.strip():
+        return True
+    if _git_ok(["merge-base", "--is-ancestor", event_sha, head]) is None:
+        return False
+    names = _git_ok(["diff", "--name-only", event_sha, head])
+    if names is None:
+        return False
+    for path in names.splitlines():
+        if not path:
+            continue
+        if path.startswith(_LAG_ALLOW_PREFIX) or path in _LAG_ALLOW_EXACT:
+            continue
+        return False
+    return True
+
+
+def _published_results_sha256():
+    """Raw ndjson hash, and the hash recorded in cases.txt when that file exists."""
+    found = []
+    archive = ROOT / "verification/logs/posix-baseline-results.ndjson.gz"
+    if archive.is_file():
+        found.append(hashlib.sha256(gzip.decompress(archive.read_bytes())).hexdigest())
+    cases = ROOT / "verification/logs/posix-baseline-cases.txt"
+    if cases.is_file():
+        match = re.search(r"^results_sha256=([0-9a-f]{64})$", cases.read_text(), re.M)
+        if match:
+            found.append(match.group(1))
+    return found
 
 
 def _meta(text, key):
@@ -154,13 +202,21 @@ def _problems(kept, text):
                 phase_ok = True
         if SECTEST_FINAL not in kept or not phase_ok:
             problems.append("sectest-mismatch")
-    if not any(
-        line.startswith("Host stage ")
-        and re.search(r"(?:^|_)run_id=[0-9a-f]{16,64}(?:_|$)", line)
-        and re.search(r"(?:^|_)results_sha256=[0-9a-f]{64}(?:_|$)", line)
-        for line in kept
-    ):
+    claimed_hashes = []
+    for line in kept:
+        if not line.startswith("Host stage "):
+            continue
+        match = re.search(r"(?:^|_)results_sha256=([0-9a-f]{64})(?:_|$)", line)
+        run_id = re.search(r"(?:^|_)run_id=[0-9a-f]{16,64}(?:_|$)", line)
+        if match and run_id:
+            claimed_hashes.append(match.group(1))
+    if not claimed_hashes:
         problems.append("missing-baseline-identity")
+    published = _published_results_sha256()
+    if claimed_hashes and published and (
+        len(set(published)) != 1 or any(value != published[0] for value in claimed_hashes)
+    ):
+        problems.append("baseline-sha-mismatch")
     for sha in sorted(set(re.findall(r'"smros_commit":"([0-9a-f]{40})"', text))):
         if not _event_commit_allowed(sha, _meta(text, "git_head")):
             problems.append("posix-event-commit")
@@ -172,9 +228,10 @@ def _problems(kept, text):
         problems.append("notify-gate-campaign-late")
     commit = _meta(text, "smros_commit")
     head = _meta(text, "git_head")
+    commits = re.findall(r"^smros_commit=(.*)$", text, re.M)
     if commit == "missing" or head == "missing":
         problems.append("missing-commit")
-    elif commit != head:
+    elif any(item != head for item in commits):
         problems.append("commit-mismatch")
     if commit.endswith("-dirty") or head.endswith("-dirty"):
         problems.append("commit-dirty")
@@ -234,7 +291,11 @@ def _passing_serial():
         "Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0\n"
         "Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0\n"
         "Hermes phase posix-baseline phase=done pass=1392 fail=208 unavailable=0\n"
-        "Host stage PASS reference_selected=1600_reference_passed=1392_reference_nonpass=208_run_id=0123456789abcdef_results_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+        "Host stage PASS reference_selected=1600_reference_passed=1392_reference_nonpass=208_run_id=0123456789abcdef_results_sha256="
+        + (
+            (_published_results_sha256() or ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"])[0]
+        )
+        + "\n"
         "Hermes test-all summary posixtest=1600/1600 fail=0 sectest=91/0/0/0 overall=PASS\n"
         "Hermes test-all result: PASS\n"
     )
@@ -332,12 +393,31 @@ def main():
                 "sectest=80/0",
             ),
             (
-                _passing_serial().replace(
-                    "Host stage PASS reference_selected=1600_reference_passed=1392_reference_nonpass=208_run_id=0123456789abcdef_results_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
-                    "",
-                ),
+                "\n".join(
+                    line
+                    for line in _passing_serial().splitlines()
+                    if not line.startswith("Host stage ")
+                )
+                + "\n",
                 "missing-baseline-identity",
                 "deleted Host stage line",
+            ),
+            (
+                re.sub(
+                    r"results_sha256=[0-9a-f]{64}",
+                    "results_sha256=" + ("ab" * 32),
+                    _passing_serial(),
+                ),
+                "baseline-sha-mismatch",
+                "wrong results_sha256",
+            ),
+            (
+                _passing_serial()
+                .replace("git_head=abc", "git_head=479b0b5")
+                .replace("smros_commit=abc", "smros_commit=479b0b5")
+                + 'SMROS_POSIX_EVENT {"smros_commit":"3bd7e4162ab2481a3674f7844d40364516163e24"}\n',
+                "posix-event-commit",
+                "3bd7e41 under git_head=479b0b5",
             ),
             (
                 _passing_serial().replace(

@@ -113,12 +113,25 @@ file, and it rewrites a stamp on every run so the next build recomputes
 `--dirty` even when the branch ref did not move. The campaign summary fails
 when those two strings differ or either ends in `-dirty`.
 
-POSIX event `smros_commit` is the full SHA recorded by `posix-build` and then
-embedded in the kernel image. It is allowed to be the booted commit or an
-ancestor of it, because a later kernel rebuild can leave the previous stage
-in place. The summary runs `git merge-base --is-ancestor` against `git_head`
-and rejects any other event commit. An event SHA of `3bd7e41` under boot
-`61d48f8` is that ancestor case, not a second kernel.
+POSIX event `smros_commit` is the full SHA recorded by `posix-build`. The
+summary prefers that SHA to be the same commit as `git_head`. An older stage
+is accepted only when `git diff` from that SHA to `git_head` touches
+`verification/logs/`, `docs/`, or the host runner files
+`scripts/posix/baseline.py`, `scripts/posix/cli.py`,
+`scripts/smros-vm-launcher.py`, `scripts/run-hermes-campaign.sh`, and
+`scripts/measure-notify-gate-sleep.sh`. A diff that includes `src/`,
+`build.rs`, a Verus harness, or a gate script is rejected.
+
+The 31 status changes between the `cf68ddc` baseline (1365 pass) and the
+`8eb3bda` baseline (1357 pass) are not only mqueue. They are 8
+`clock_settime`, 3 `mq_close`, 2 `aio_fsync`, 2 `sched_setparam`, 2
+`sched_setscheduler`, 2 `shm_open`, 2 `sigqueue`, and one each of
+`aio_error`, `fork`, `mlock`, `mlockall`, `mq_timedsend`,
+`pthread_cond_init`, `pthread_detach`, `sched_getparam`,
+`sched_getscheduler`, and `sem_open`. The `8eb3bda` ndjson has no literal
+`EMFILE` token and was reported as `emfile=0`, but 40 mqueue attempts contain
+the text `Too many open files`. The counter now includes that text and
+`ENFILE`.
 
 - A later commit whose diff is only `verification/logs/` republishes the host
   Verus, CBMC, and futex logs for the documentation commit that contains this
