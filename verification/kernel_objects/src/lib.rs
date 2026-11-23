@@ -1242,54 +1242,70 @@ fn fifo_transfer_bytes(elem_size: usize, count: usize) -> (out: Option<usize>)
     smros_fifo_transfer_bytes_body!(elem_size, count)
 }
 
+#[verifier::spinoff_prover]
+proof fn ring_wrap_is_mod(read_pos: int, offset: int, capacity: int)
+    requires
+        capacity > 0,
+        read_pos >= 0,
+        offset >= 0,
+    ensures
+        ({
+            let base = read_pos % capacity;
+            let off = offset % capacity;
+            let computed = if base >= capacity - off {
+                base - (capacity - off)
+            } else {
+                base + off
+            };
+            computed == (read_pos + offset) % capacity
+        }),
+{
+    let base = read_pos % capacity;
+    let off = offset % capacity;
+    let sum_mod = (read_pos + offset) % capacity;
+    vstd::arithmetic::div_mod::lemma_mod_adds(read_pos, offset, capacity);
+    assert(base + off == sum_mod + capacity * ((base + off) / capacity));
+    if base >= capacity - off {
+        assert((base + off) >= capacity);
+        assert((base + off) < (capacity * 2)) by(nonlinear_arith)
+            requires
+                capacity > 0,
+                0 <= base,
+                base < capacity,
+                0 <= off,
+                off < capacity,
+        ;
+        assert((base + off) / capacity == 1) by(nonlinear_arith)
+            requires
+                capacity > 0,
+                (base + off) >= capacity,
+                (base + off) < (capacity * 2),
+        ;
+        assert(base + off == sum_mod + capacity);
+        assert(sum_mod == base + off - capacity);
+    } else {
+        assert((base + off) < capacity);
+        assert((base + off) / capacity == 0) by(nonlinear_arith)
+            requires
+                capacity > 0,
+                0 <= base + off,
+                (base + off) < capacity,
+        ;
+        assert(base + off == sum_mod);
+    }
+}
+
 fn fifo_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
     ensures
         capacity == 0 ==> out == 0,
         capacity > 0 ==> out as int == (read_pos as int + offset as int) % (capacity as int),
 {
-    let out = smros_fifo_ring_index_body!(read_pos, offset, capacity);
-    if capacity > 0 {
-        let base = read_pos % capacity;
-        let off = offset % capacity;
-        assert(base < capacity && off < capacity);
-        assert(out == if base >= capacity - off { base - (capacity - off) } else { base + off });
-        if base >= capacity - off {
-            assert((base as int + off as int) >= (capacity as int));
-            assert((base as int + off as int) < ((capacity as int) * 2)) by(nonlinear_arith)
-                requires
-                    capacity > 0,
-                    base < capacity,
-                    off < capacity,
-            ;
-            assert(out as int == (base as int + off as int - capacity as int));
-            assert(base as int == (read_pos as int) % (capacity as int));
-            assert(off as int == (offset as int) % (capacity as int));
-            assert(((read_pos as int + offset as int) % (capacity as int)) == (out as int)) by {
-                let a = read_pos as int;
-                let b = offset as int;
-                let d = capacity as int;
-                vstd::arithmetic::div_mod::lemma_mod_adds(a, b, d);
-                assert((a % d + b % d) / d == 1) by(nonlinear_arith)
-                    requires
-                        d > 0,
-                        a % d + b % d >= d,
-                        a % d + b % d < d * 2,
-                ;
-                assert((a + b) % d == a % d + b % d - d);
-            }
-        } else {
-            assert((base as int + off as int) < (capacity as int));
-            assert(out as int == (base as int + off as int));
-            assert(((read_pos as int + offset as int) % (capacity as int)) == (out as int)) by {
-                vstd::arithmetic::div_mod::lemma_mod_adds(
-                    read_pos as int,
-                    offset as int,
-                    capacity as int,
-                );
-            }
+    proof {
+        if capacity > 0 {
+            ring_wrap_is_mod(read_pos as int, offset as int, capacity as int);
         }
     }
-    out
+    smros_fifo_ring_index_body!(read_pos, offset, capacity)
 }
 
 fn fifo_remaining_capacity(len: usize, capacity: usize) -> (out: usize)
@@ -1429,49 +1445,12 @@ fn socket_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: u
         capacity == 0 ==> out == 0,
         capacity > 0 ==> out as int == (read_pos as int + offset as int) % (capacity as int),
 {
-    let out = smros_socket_ring_index_body!(read_pos, offset, capacity);
-    if capacity > 0 {
-        let base = read_pos % capacity;
-        let off = offset % capacity;
-        assert(base < capacity && off < capacity);
-        assert(out == if base >= capacity - off { base - (capacity - off) } else { base + off });
-        if base >= capacity - off {
-            assert((base as int + off as int) >= (capacity as int));
-            assert((base as int + off as int) < ((capacity as int) * 2)) by(nonlinear_arith)
-                requires
-                    capacity > 0,
-                    base < capacity,
-                    off < capacity,
-            ;
-            assert(out as int == (base as int + off as int - capacity as int));
-            assert(base as int == (read_pos as int) % (capacity as int));
-            assert(off as int == (offset as int) % (capacity as int));
-            assert(((read_pos as int + offset as int) % (capacity as int)) == (out as int)) by {
-                let a = read_pos as int;
-                let b = offset as int;
-                let d = capacity as int;
-                vstd::arithmetic::div_mod::lemma_mod_adds(a, b, d);
-                assert((a % d + b % d) / d == 1) by(nonlinear_arith)
-                    requires
-                        d > 0,
-                        a % d + b % d >= d,
-                        a % d + b % d < d * 2,
-                ;
-                assert((a + b) % d == a % d + b % d - d);
-            }
-        } else {
-            assert((base as int + off as int) < (capacity as int));
-            assert(out as int == (base as int + off as int));
-            assert(((read_pos as int + offset as int) % (capacity as int)) == (out as int)) by {
-                vstd::arithmetic::div_mod::lemma_mod_adds(
-                    read_pos as int,
-                    offset as int,
-                    capacity as int,
-                );
-            }
+    proof {
+        if capacity > 0 {
+            ring_wrap_is_mod(read_pos as int, offset as int, capacity as int);
         }
     }
-    out
+    smros_socket_ring_index_body!(read_pos, offset, capacity)
 }
 
 fn socket_remaining_capacity(len: usize, capacity: usize) -> (out: usize)
