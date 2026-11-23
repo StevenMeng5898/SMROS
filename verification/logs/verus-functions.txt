@@ -1,8 +1,8 @@
 ===== verus function evidence =====
-git_head=be0b69698560f33de381c9f4d33eee6b456a9df5
-git_dirty=false
+git_head=1ae7249e77d592b581fcc490af9d31d3b782ba02
+git_dirty=true
 dirty_files<<END
-
+ M scripts/__pycache__/smros-vm-launcher.cpython-312.pyc
 END
 source_sha256:
 45b913c10ed3d5a18bc6841ca5dd2d6e4ba909c6a1b5674f210fd63cdc46a889  src/kernel_lowlevel/kernel_budget_logic_shared.rs
