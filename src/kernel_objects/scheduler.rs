@@ -2020,16 +2020,8 @@ impl Scheduler {
         let tick_count = self.tick_count;
         let mut advance_deadline = false;
         let mut force_preempt = false;
-        let charged_priority = if current.0 < MAX_THREADS {
-            self.schedule_info[current.0].priority
-        } else {
-            0
-        };
         if let Some(tcb) = self.get_thread_mut(current) {
-            let (priority, time_slice) =
-                smros_sched_tick_charge_body!(charged_priority, tcb.time_slice, elapsed);
-            let _ = priority;
-            tcb.time_slice = time_slice;
+            tcb.time_slice = smros_sched_time_slice_after_elapsed_body!(tcb.time_slice, elapsed);
             let add = elapsed.min(u32::MAX as u64) as u32;
             tcb.total_ticks = tcb.total_ticks.saturating_add(add);
             if current.0 != 0 && policy == SchedulePolicy::Edf && tcb.time_slice == 0 {

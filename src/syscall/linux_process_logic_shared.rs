@@ -373,12 +373,19 @@ impl<const N: usize> LinuxProcessTable<N> {
         else {
             return Err(LinuxProcessError::Capacity);
         };
+        let Some(state) = smros_process_install_running_body!(
+            self.processes[slot].state,
+            LinuxProcessState::Empty,
+            LinuxProcessState::Running
+        ) else {
+            return Err(LinuxProcessError::Capacity);
+        };
         self.processes[slot] = LinuxProcessCore {
             pid: LINUX_ROOT_PID,
             parent_pid: 0,
             process_group: LINUX_ROOT_PID,
             root_scheduler_thread: scheduler_thread,
-            state: LinuxProcessState::Running,
+            state,
             stopped: false,
             wait_status: 0,
             exit_signal: 0,
@@ -890,7 +897,16 @@ impl<const N: usize> LinuxProcessTable<N> {
         }
         let mut reaped = 0;
         for process in &mut self.processes {
-            if Self::is_visible(*process) && process.parent_pid == LINUX_LAUNCH_REAPER_PID {
+            if process.parent_pid == LINUX_LAUNCH_REAPER_PID {
+                let Some(_next) = smros_process_clear_visible_body!(
+                    process.state,
+                    LinuxProcessState::Running,
+                    LinuxProcessState::Exiting,
+                    LinuxProcessState::Zombie,
+                    LinuxProcessState::Empty
+                ) else {
+                    continue;
+                };
                 *process = LinuxProcessCore::EMPTY;
                 reaped += 1;
             }

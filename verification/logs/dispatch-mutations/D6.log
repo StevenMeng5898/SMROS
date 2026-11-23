@@ -1,0 +1,7 @@
+verification results:: 330 verified, 2 errors
+error: postcondition not satisfied
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ failed this postcondition
+error: postcondition not satisfied
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ failed this postcondition
+error: aborting due to 2 previous errors
+exit=1

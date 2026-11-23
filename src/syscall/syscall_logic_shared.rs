@@ -1401,10 +1401,30 @@ pub(crate) fn linux_audited_stub_errno(syscall_num: u32) -> Option<i32> {
     )
 }
 
-/// Dispatcher class for the lifecycle and scheduler numbers, the audited
-/// stubs, and everything else. See `smros_linux_handler_class_body`.
+/// Reference classifier. `dispatch_linux_syscall` does not route on this
+/// value; the giant match stays 待证明. The proved table is
+/// `smros_linux_handler_class_body`.
+#[allow(dead_code)]
 pub(crate) fn linux_syscall_handler_class(syscall_num: u32) -> u8 {
     smros_linux_handler_class_body!(syscall_num, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8)
+}
+
+/// Constant tails. Not coverage: both branches ignore `known` and return one
+/// value. They live in this 待证明 file so the audit does not count them.
+#[allow(unused_macros)]
+macro_rules! smros_linux_unhandled_syscall_errno_body {
+    ($known:expr, $enosys:expr) => {{
+        let _known = $known;
+        $enosys
+    }};
+}
+
+#[allow(unused_macros)]
+macro_rules! smros_zircon_unhandled_rejected_body {
+    ($known:expr) => {{
+        let _known = $known;
+        true
+    }};
 }
 
 pub(crate) fn linux_unhandled_errno(known: bool) -> i32 {

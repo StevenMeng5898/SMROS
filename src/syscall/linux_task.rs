@@ -113,11 +113,18 @@ pub(crate) fn ensure_dispatch_task(pid: usize, scheduler_thread: usize) -> Resul
             .iter()
             .position(|task| task.state == LinuxTaskState::Empty)
             .ok_or(SysError::EAGAIN)?;
+        let Some(state) = smros_task_install_runnable_body!(
+            runtime.tasks.tasks[slot].state,
+            LinuxTaskState::Empty,
+            LinuxTaskState::Runnable
+        ) else {
+            return Err(SysError::EAGAIN);
+        };
         runtime.tasks.tasks[slot] = LinuxTaskCore {
             tid: pid,
             tgid: pid,
             scheduler_thread,
-            state: LinuxTaskState::Runnable,
+            state,
             block_reason: LinuxBlockReason::None,
         };
         runtime.tasks.signal_states[slot].reset_in_place();

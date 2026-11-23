@@ -3431,18 +3431,6 @@ fn sched_best_priority_candidate(
     )
 }
 
-fn sched_tick_charge(priority: u8, time_slice: u32, elapsed: u64) -> (out: (u8, u32))
-    ensures
-        out.0 == priority,
-        out.1 <= time_slice,
-        elapsed == 0 || time_slice == 0 ==> out.1 == time_slice,
-        elapsed > 0 && (time_slice as u64) > 0 && elapsed >= (time_slice as u64) ==> out.1 == 0,
-        elapsed > 0 && (time_slice as u64) > 0 && elapsed < (time_slice as u64)
-            ==> out.1 == time_slice - (elapsed as u32),
-{
-    smros_sched_tick_charge_body!(priority, time_slice, elapsed)
-}
-
 fn sched_retire_record_accepted(
     cpu_id: u64,
     cpu_count: u64,

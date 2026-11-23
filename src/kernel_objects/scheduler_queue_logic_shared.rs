@@ -73,17 +73,6 @@ macro_rules! smros_sched_best_priority_candidate_body {
     }};
 }
 
-/// One timer charge. The priority word is returned unchanged; the slice
-/// shrinks by the elapsed ticks and stops at zero.
-#[allow(unused_macros)]
-macro_rules! smros_sched_tick_charge_body {
-    ($priority:expr, $time_slice:expr, $elapsed:expr) => {{
-        let priority = $priority;
-        let time_slice = smros_sched_time_slice_after_elapsed_body!($time_slice, $elapsed);
-        (priority, time_slice)
-    }};
-}
-
 #[allow(unused_macros)]
 macro_rules! smros_sched_retire_record_accepted_body {
     ($cpu_id:expr, $cpu_count:expr, $thread:expr, $reclaimable_bit:expr) => {{

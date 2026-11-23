@@ -17456,16 +17456,10 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         num if syscall_logic::linux_audited_stub(num).is_some() => linux_audited_stub_result(num),
         num if syscall_logic::linux_syscall_interface_known(num) => {
             warn!("Unimplemented Linux syscall interface: {}", syscall_num);
-            let class = syscall_logic::linux_syscall_handler_class(num);
-            debug_assert_ne!(class, 1);
-            let _ = class;
             linux_errno_result(syscall_logic::linux_unhandled_errno(true))
         }
         _ => {
             warn!("Unimplemented Linux syscall: {}", syscall_num);
-            let class = syscall_logic::linux_syscall_handler_class(syscall_num);
-            debug_assert_ne!(class, 1);
-            let _ = class;
             linux_errno_result(syscall_logic::linux_unhandled_errno(false))
         }
     };

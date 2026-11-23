@@ -1782,11 +1782,18 @@ impl<const N: usize> LinuxTaskTable<N> {
         else {
             return Err(LinuxTaskError::Capacity);
         };
+        let Some(state) = smros_task_install_runnable_body!(
+            self.tasks[slot].state,
+            LinuxTaskState::Empty,
+            LinuxTaskState::Runnable
+        ) else {
+            return Err(LinuxTaskError::Capacity);
+        };
         self.tasks[slot] = LinuxTaskCore {
             tid: LINUX_ROOT_TID,
             tgid: LINUX_ROOT_TID,
             scheduler_thread,
-            state: LinuxTaskState::Runnable,
+            state,
             block_reason: LinuxBlockReason::None,
         };
         self.signal_states[slot].reset_in_place();
@@ -1918,12 +1925,15 @@ impl<const N: usize> LinuxTaskTable<N> {
         let Some(task) = self.tasks.get_mut(reservation.slot) else {
             return false;
         };
-        if !matches!(
+        let Some(_next) = smros_task_rollback_body!(
             task.state,
-            LinuxTaskState::Starting | LinuxTaskState::Runnable
-        ) || task.tid != reservation.tid
-            || task.scheduler_thread != reservation.scheduler_thread
-        {
+            LinuxTaskState::Starting,
+            LinuxTaskState::Runnable,
+            LinuxTaskState::Empty
+        ) else {
+            return false;
+        };
+        if task.tid != reservation.tid || task.scheduler_thread != reservation.scheduler_thread {
             return false;
         }
         *task = LinuxTaskCore::EMPTY;

@@ -142,12 +142,19 @@ pub(crate) fn ensure_dispatch_process(pid: usize, scheduler_thread: usize) -> Re
             .iter()
             .position(|process| process.state == LinuxProcessState::Empty)
             .ok_or(SysError::EAGAIN)?;
+        let Some(state) = smros_process_install_running_body!(
+            runtime.processes.processes[slot].state,
+            LinuxProcessState::Empty,
+            LinuxProcessState::Running
+        ) else {
+            return Err(SysError::EAGAIN);
+        };
         runtime.processes.processes[slot] = LinuxProcessCore {
             pid,
             parent_pid: 0,
             process_group: pid,
             root_scheduler_thread: scheduler_thread,
-            state: LinuxProcessState::Running,
+            state,
             stopped: false,
             wait_status: 0,
             exit_signal: 0,
@@ -181,6 +188,12 @@ pub(crate) fn abandon_dispatch_identity() {
         if let Some(slot) = runtime.processes.processes.iter().position(|process| {
             process.pid == LINUX_DISPATCH_PID && process.state != LinuxProcessState::Empty
         }) {
+            let Some(_next) = smros_process_clear_occupied_body!(
+                runtime.processes.processes[slot].state,
+                LinuxProcessState::Empty
+            ) else {
+                return;
+            };
             runtime.processes.processes[slot] = LinuxProcessCore::EMPTY;
             runtime.signal_states[slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
         }

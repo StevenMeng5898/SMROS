@@ -254,3 +254,65 @@ macro_rules! smros_task_retire_body {
         }
     }};
 }
+
+/// Empty slot becomes Running. Used by root registration and the kernel
+/// dispatch identity. Not the Reserved path.
+#[allow(unused_macros)]
+macro_rules! smros_process_install_running_body {
+    ($state:expr, $empty:expr, $running:expr) => {{
+        if $state == $empty {
+            Some($running)
+        } else {
+            None
+        }
+    }};
+}
+
+/// Occupied slot becomes Empty. Used when the dispatch identity is abandoned.
+#[allow(unused_macros)]
+macro_rules! smros_process_clear_occupied_body {
+    ($state:expr, $empty:expr) => {{
+        if $state != $empty {
+            Some($empty)
+        } else {
+            None
+        }
+    }};
+}
+
+/// A visible launch descendant (Running, Exiting, or Zombie) becomes Empty.
+/// `stopped` is not a state in this model.
+#[allow(unused_macros)]
+macro_rules! smros_process_clear_visible_body {
+    ($state:expr, $running:expr, $exiting:expr, $zombie:expr, $empty:expr) => {{
+        if $state == $running || $state == $exiting || $state == $zombie {
+            Some($empty)
+        } else {
+            None
+        }
+    }};
+}
+
+/// Empty slot becomes Runnable. Root and dispatch task installation.
+#[allow(unused_macros)]
+macro_rules! smros_task_install_runnable_body {
+    ($state:expr, $empty:expr, $runnable:expr) => {{
+        if $state == $empty {
+            Some($runnable)
+        } else {
+            None
+        }
+    }};
+}
+
+/// Starting or Runnable reservation becomes Empty.
+#[allow(unused_macros)]
+macro_rules! smros_task_rollback_body {
+    ($state:expr, $starting:expr, $runnable:expr, $empty:expr) => {{
+        if $state == $starting || $state == $runnable {
+            Some($empty)
+        } else {
+            None
+        }
+    }};
+}

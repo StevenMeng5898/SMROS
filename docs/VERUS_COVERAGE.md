@@ -30,7 +30,7 @@ Counted from the classified `src/*.rs` and `src/*.S` entries below.
 - 超出范围: 1 source file (`src/user_level/apps/epoll_coro.rs`). `third_party/posixtest/**` and `target/posix/**` are 超出范围 and are not kernel sources.
 - 未覆盖: 0
 
-The three files added for scheduling, lifecycle, and syscall dispatch are 已证明. The 待证明 count did not drop, because the live scheduler, process table, task table, and syscall `match` stay 待证明.
+The three files for scheduling, lifecycle, and syscall dispatch stay 已证明. Counted rows are only macros in those files whose harness postcondition is the full spec or the successor state. Constant unhandled tails, `sched_highest_ready_priority`, and the constant-input reap-once lemmas are not coverage. The 待证明 count did not drop: the live scheduler, process table, task table, `stopped`, and the syscall `match` stay 待证明.
 
 ## Coverage Model
 
@@ -208,13 +208,13 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/kernel_objects/scheduler.rs`
   - 待证明
-    Live ready bitmap, priority counts, and `pick_*` loops. The bit update, count step, best-priority candidate test, and tick charge they call are proved in `scheduler_queue_logic_shared.rs`.
+    Live ready bitmap, priority counts, and `pick_*` loops. The bit update, count step, and best-priority candidate test they call are proved in `scheduler_queue_logic_shared.rs`. The timer path calls `smros_sched_time_slice_after_elapsed_body` directly. A returned priority that the tick never stores is not counted.
 - `src/kernel_objects/scheduler_logic_shared.rs`
   - 待证明
     Scheduler arithmetic macros expand inside specified harness functions. `record_before_switch`, `confirm_after_switch`, and `take_reclaimable` still perform the atomic CAS. Their accept predicates, and `scheduler_retired_slot_reuse_action`, are proved in `scheduler_queue_logic_shared.rs`.
 - `src/kernel_objects/scheduler_queue_logic_shared.rs`
   - 已证明
-    Ready-bit word and mask, the single-bit update that leaves other bits alone, the saturating ready-count step, the best-priority candidate test, tick charge (priority unchanged, slice does not grow), retirement accept/confirm/take, and retired-slot reuse. `sched_highest_ready_priority` proves that a scan using `smros_sched_priority_better_body` returns a ready priority and no ready priority is higher. The atomic slots and the `Scheduler` struct stay in the files above.
+    Ready-bit word and mask, the single-bit update that leaves other bits alone, the saturating ready-count step, the best-priority candidate test, retirement accept/confirm/take, and retired-slot reuse. `sched_highest_ready_priority` is a harness lemma over a vector; the live picker uses the priority counts and is not that function, so the lemma is not coverage. The atomic slots and the `Scheduler` struct stay in the files above.
 - `src/kernel_objects/socket.rs`
   - 待证明
 - `src/kernel_objects/socket_logic.rs`
@@ -264,7 +264,7 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/linux_process_logic_shared.rs`
   - 待证明
-    The process table, wait scan, and reparent loops are absent from func-details. Reserve, publish, fork publish, rollback, begin/abort exit, exit, and reap call the proved edges in `process_lifecycle_logic_shared.rs`.
+    The process table, wait scan, and reparent loops are absent from func-details. Reserve, publish, fork publish, rollback, begin/abort exit, exit, reap, root/dispatch install (Empty to Running), dispatch abandon, and launch-descendant clear call the proved edges in `process_lifecycle_logic_shared.rs`. `stopped` is a bool beside the state enum. Stop and continue do not change that enum and are not in the proved model. `reset` fills every slot and stays 待证明. `process_wait_reaps_once` is a constant-input lemma, not coverage.
 - `src/syscall/linux_process_memory.rs`
   - 待证明
 - `src/syscall/linux_process_memory_logic_shared.rs`
@@ -296,12 +296,12 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/linux_task_logic_shared.rs`
   - 待证明
-    Task, signal, and sleep functions in this file are absent from func-details. Reserve, publish, block, wake, exit, and retire call the proved edges in `process_lifecycle_logic_shared.rs`. `smros_linux_task_publish_transition_allowed_body` remains a harness smoke of the same Starting -> Runnable edge.
+    Task, signal, and sleep functions in this file are absent from func-details. Reserve, publish, block, wake, exit, retire, root/dispatch install (Empty to Runnable), and rollback call the proved edges in `process_lifecycle_logic_shared.rs`. `task_retire_reclaims_once` is a constant-input lemma, not coverage. `smros_linux_task_publish_transition_allowed_body` remains a harness smoke of the same Starting to Runnable edge.
 - `src/syscall/mod.rs`
   - 待证明
 - `src/syscall/syscall.rs`
   - 待证明
-    The handler `match` is not compiled by Verus. Its default arms call `linux_unhandled_errno` and `zircon_unhandled_rejected`, and the audited-stub arm calls `linux_audited_stub_errno`. Those three are proved in `syscall_dispatch_logic_shared.rs`.
+    The handler `match` is not compiled by Verus and does not route on `linux_syscall_handler_class`. The audited-stub arm calls `linux_audited_stub_errno`. The default arms call `linux_unhandled_errno` and `zircon_unhandled_rejected`, which are constant tails in the 待证明 shared file and are not coverage.
 - `src/syscall/syscall_bridge.rs`
   - 待证明
 - `src/syscall/syscall_bridge_shared.rs`
@@ -309,7 +309,7 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
     Register and errno macros expand inside specified syscall functions. `smros_saved_regs_ptr_from_el0_sp_body` builds a raw pointer and is only smoked outside `verus!`.
 - `src/syscall/process_lifecycle_logic_shared.rs`
   - 已证明
-    Process edges Empty/Reserved/Publishing/Running/Exiting/Zombie and task edges Empty/Starting/Runnable/Blocked/Exited. Each proved function's postcondition names the successor and refuses every other source state. `process_wait_reaps_once` shows a zombie reap yields Empty and a second reap of Empty is refused. `task_retire_reclaims_once` is the same for Exited. The table that stores those tokens stays 待证明.
+    Process edges include Empty to Running for root and dispatch install, the Reserved/Publishing/Running/Exiting/Zombie path, occupied-slot clear, and visible launch-descendant clear. Task edges include Empty to Runnable, Starting or Runnable rollback to Empty, and the block/wake/exit/retire path. Each counted function's postcondition names the successor. `process_wait_reaps_once` and `task_retire_reclaims_once` take constant tokens and are lemmas, not coverage. `stopped` is outside the enum and is not proved here. The table that stores the tokens stays 待证明.
 - `src/syscall/syscall_dispatch.rs`
   - 待证明
     Assembly entry and the register spill. Number classification is proved in `syscall_dispatch_logic_shared.rs`.
@@ -319,10 +319,10 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/syscall_dispatch_logic_shared.rs`
   - 已证明
-    Audited-stub class (fail-closed ENOSYS, fail-closed EPERM, harmless, personality), stub errno (`None` only for harmless; every other class is an error), the critical handler numbers for exit/wait/clone/futex/sched/fork, the handler class that keeps those numbers off the fail-closed class, and unhandled Linux/Zircon results. Unhandled Linux is ENOSYS whether or not the number is in the known interface. Unhandled Zircon is rejected. The giant `match` in `syscall.rs` stays 待证明.
+    `linux_audited_stub_class` ensures `out == linux_audited_stub_class_spec(n)` for the whole stub table (1 ENOSYS, 2 EPERM, 3 harmless, 4 personality, 0 otherwise). `linux_critical_handler` ensures set equality with the named lifecycle and scheduler numbers: exit 93, exit_group 94, waitid 95, futex 98, sched 118-127, kill 129, setpriority 140, getpriority 141, clone 220, execve 221, wait4 260, clone3 435, fork 1000, vfork 1001. `linux_handler_class` ensures `out == linux_handler_class_spec(n)`, composed from that table, that set, and the known-interface predicate. It is a reference classifier. `dispatch_linux_syscall` does not branch on it, and the giant match stays 待证明. The constant unhandled tails are not in this file and are not coverage.
 - `src/syscall/syscall_logic_shared.rs`
   - 待证明
-    Dozens of plain helpers (`linux_exit_status`, clock-id predicates, epoll reject, and others) are absent from func-details. `linux_audited_stub`, `linux_audited_stub_errno`, `linux_syscall_handler_class`, `linux_unhandled_errno`, and `zircon_unhandled_rejected` are wrappers around the proved macros in `syscall_dispatch_logic_shared.rs`.
+    Dozens of plain helpers (`linux_exit_status`, clock-id predicates, epoll reject, and others) are absent from func-details. `linux_audited_stub` and `linux_audited_stub_errno` wrap the proved table. `linux_syscall_handler_class` wraps the reference classifier and is not used by the dispatcher. `linux_unhandled_errno` and `zircon_unhandled_rejected` are constant tails defined here; they are not coverage.
 - `src/syscall/uaccess.rs`
   - 待证明
     Per-thread SPSR slot and EL0 detection. The range predicate is proven in uaccess_logic_shared.rs.

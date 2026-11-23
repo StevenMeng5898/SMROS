@@ -2800,11 +2800,7 @@ fn process_publish(
     ensures
         state == 1 && pid == want_pid && parent == want_parent ==> out == Some(3u8),
         !(state == 1 && pid == want_pid && parent == want_parent) ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_publish_body!(state, pid, parent, want_pid, want_parent, 1u8, 3u8)
 }
 
@@ -2818,11 +2814,7 @@ fn process_publish_fork(
     ensures
         state == 1 && pid == want_pid && parent == want_parent ==> out == Some(2u8),
         !(state == 1 && pid == want_pid && parent == want_parent) ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_publish_fork_body!(state, pid, parent, want_pid, want_parent, 1u8, 2u8)
 }
 
@@ -2836,11 +2828,7 @@ fn process_complete_fork(
     ensures
         state == 2 && pid == want_pid && parent == want_parent ==> out == Some(3u8),
         !(state == 2 && pid == want_pid && parent == want_parent) ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_complete_fork_body!(state, pid, parent, want_pid, want_parent, 2u8, 3u8)
 }
 
@@ -2854,11 +2842,7 @@ fn process_rollback(
     ensures
         state == 1 && pid == want_pid && parent == want_parent ==> out == Some(0u8),
         !(state == 1 && pid == want_pid && parent == want_parent) ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_rollback_body!(state, pid, parent, want_pid, want_parent, 1u8, 0u8)
 }
 
@@ -2873,11 +2857,7 @@ fn process_rollback_fork(
         (state == 1 || state == 2) && pid == want_pid && parent == want_parent ==> out == Some(0u8),
         !((state == 1 || state == 2) && pid == want_pid && parent == want_parent)
             ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_rollback_fork_body!(state, pid, parent, want_pid, want_parent, 1u8, 2u8, 0u8)
 }
 
@@ -2885,11 +2865,7 @@ fn process_begin_exit(state: u8) -> (out: Option<u8>)
     ensures
         state == 3 ==> out == Some(4u8),
         state != 3 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_begin_exit_body!(state, 3u8, 4u8)
 }
 
@@ -2897,11 +2873,7 @@ fn process_abort_exit(state: u8) -> (out: Option<u8>)
     ensures
         state == 4 ==> out == Some(3u8),
         state != 4 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_abort_exit_body!(state, 4u8, 3u8)
 }
 
@@ -2909,11 +2881,7 @@ fn process_exit(state: u8) -> (out: Option<u8>)
     ensures
         state == 3 || state == 4 ==> out == Some(5u8),
         state != 3 && state != 4 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_exit_body!(state, 3u8, 4u8, 5u8)
 }
 
@@ -2921,11 +2889,7 @@ fn process_reap(state: u8, parent: u64, pid: u64, want_parent: u64, want_pid: u6
     ensures
         state == 5 && parent == want_parent && pid == want_pid ==> out == Some(0u8),
         !(state == 5 && parent == want_parent && pid == want_pid) ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => process_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_process_reap_body!(state, parent, pid, want_parent, want_pid, 5u8, 0u8)
 }
 
@@ -2943,11 +2907,7 @@ fn task_reserve(state: u8) -> (out: Option<u8>)
     ensures
         state == 0 ==> out == Some(1u8),
         state != 0 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => task_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_task_reserve_body!(state, 0u8, 1u8)
 }
 
@@ -2955,11 +2915,7 @@ fn task_publish(state: u8, tid: u64, thread: u64, want_tid: u64, want_thread: u6
     ensures
         state == 1 && tid == want_tid && thread == want_thread ==> out == Some(2u8),
         !(state == 1 && tid == want_tid && thread == want_thread) ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => task_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_task_publish_body!(state, tid, thread, want_tid, want_thread, 1u8, 2u8)
 }
 
@@ -2967,11 +2923,7 @@ fn task_block(state: u8, reason_is_none: bool) -> (out: Option<u8>)
     ensures
         !reason_is_none && state == 2 ==> out == Some(3u8),
         reason_is_none || state != 2 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => task_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_task_block_body!(state, 2u8, 3u8, reason_is_none)
 }
 
@@ -2979,11 +2931,7 @@ fn task_wake(state: u8) -> (out: Option<u8>)
     ensures
         state == 3 ==> out == Some(2u8),
         state != 3 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => task_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_task_wake_body!(state, 3u8, 2u8)
 }
 
@@ -2991,11 +2939,7 @@ fn task_exit(state: u8) -> (out: Option<u8>)
     ensures
         state == 2 || state == 3 ==> out == Some(4u8),
         state != 2 && state != 3 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => task_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_task_exit_body!(state, 2u8, 3u8, 4u8)
 }
 
@@ -3003,11 +2947,7 @@ fn task_retire(state: u8) -> (out: Option<u8>)
     ensures
         state == 4 ==> out == Some(0u8),
         state != 4 ==> out == Option::<u8>::None,
-        match out {
-            Some(next) => task_edge_legal(state as int, next as int),
-            None => true,
-        },
-{
+        {
     smros_task_retire_body!(state, 4u8, 0u8)
 }
 
@@ -3023,16 +2963,71 @@ fn task_retire_reclaims_once(state_after_exit: u8) -> (out: (Option<u8>, Option<
     (first, second)
 }
 
+fn process_install_running(state: u8) -> (out: Option<u8>)
+    ensures
+        state == 0 ==> out == Some(3u8),
+        state != 0 ==> out == Option::<u8>::None,
+{
+    smros_process_install_running_body!(state, 0u8, 3u8)
+}
+
+fn process_clear_occupied(state: u8) -> (out: Option<u8>)
+    ensures
+        state != 0 ==> out == Some(0u8),
+        state == 0 ==> out == Option::<u8>::None,
+{
+    smros_process_clear_occupied_body!(state, 0u8)
+}
+
+fn process_clear_visible(state: u8) -> (out: Option<u8>)
+    ensures
+        state == 3 || state == 4 || state == 5 ==> out == Some(0u8),
+        state != 3 && state != 4 && state != 5 ==> out == Option::<u8>::None,
+{
+    smros_process_clear_visible_body!(state, 3u8, 4u8, 5u8, 0u8)
+}
+
+fn task_install_runnable(state: u8) -> (out: Option<u8>)
+    ensures
+        state == 0 ==> out == Some(2u8),
+        state != 0 ==> out == Option::<u8>::None,
+{
+    smros_task_install_runnable_body!(state, 0u8, 2u8)
+}
+
+fn task_rollback(state: u8) -> (out: Option<u8>)
+    ensures
+        state == 1 || state == 2 ==> out == Some(0u8),
+        state != 1 && state != 2 ==> out == Option::<u8>::None,
+{
+    smros_task_rollback_body!(state, 1u8, 2u8, 0u8)
+}
+
+spec fn linux_audited_stub_class_spec(n: int) -> int {
+    if n == 0 || n == 1 || n == 2 || n == 3 || n == 4 || n == 292 || n == 18 || n == 42
+        || n == 60 || n == 104 || n == 105 || n == 106 || n == 273 || n == 294 || n == 217
+        || n == 218 || n == 219 || n == 234 || n == 235 || n == 236 || n == 237 || n == 241
+        || n == 264 || n == 265 || n == 270 || n == 271 || n == 280 || n == 281 || n == 282
+        || n == 288 || n == 289 || n == 290 || n == 293 || n == 425 || n == 426 || n == 427
+        || n == 428 || n == 429 || n == 430 || n == 431 || n == 432 || n == 433 || n == 442
+        || n == 434 || n == 444 || n == 445 || n == 446 {
+        1
+    } else if n == 30 || n == 58 || n == 89 || n == 116 || n == 117 || n == 142 || n == 224
+        || n == 225 || n == 238 || n == 239 || n == 262 || n == 263 || n == 272 || n == 274
+        || n == 424 || n == 438 || n == 440 {
+        2
+    } else if n == 31 || n == 128 || n == 284 {
+        3
+    } else if n == 92 {
+        4
+    } else {
+        0
+    }
+}
+
 fn linux_audited_stub_class(syscall_num: u32) -> (out: u8)
     ensures
-        syscall_num == 0 ==> out == 1,
-        syscall_num == 31 ==> out == 3,
-        syscall_num == 92 ==> out == 4,
-        syscall_num == 93 ==> out == 0,
-        syscall_num == 142 ==> out == 2,
-        syscall_num == 280 ==> out == 1,
-        syscall_num == 447 ==> out == 0,
-        out == 1 || out == 2 ==> out != 3,
+        out as int == linux_audited_stub_class_spec(syscall_num as int),
 {
     smros_linux_audited_stub_class_body!(syscall_num)
 }
@@ -3040,45 +3035,47 @@ fn linux_audited_stub_class(syscall_num: u32) -> (out: u8)
 fn linux_stub_errno(class: u8) -> (out: Option<i32>)
     ensures
         class == 3 ==> out == Option::<i32>::None,
-        class == 1 ==> out == Some(38i32),
         class == 2 ==> out == Some(1i32),
         class == 4 ==> out == Some(22i32),
-        class == 0 ==> out == Some(38i32),
-        class != 3 ==> out != Option::<i32>::None,
+        class != 2 && class != 3 && class != 4 ==> out == Some(38i32),
 {
     smros_linux_stub_errno_body!(class, 38, 1, 22)
 }
 
+spec fn linux_critical_handler_spec(n: int) -> bool {
+    n == 93 || n == 94 || n == 95 || n == 98 || n == 118 || n == 119 || n == 120 || n == 121
+        || n == 122 || n == 123 || n == 124 || n == 125 || n == 126 || n == 127 || n == 129
+        || n == 140 || n == 141 || n == 220 || n == 221 || n == 260 || n == 435 || n == 1000
+        || n == 1001
+}
+
 fn linux_critical_handler(syscall_num: u32) -> (out: bool)
     ensures
-        syscall_num == 93 ==> out,
-        syscall_num == 260 ==> out,
-        syscall_num == 220 ==> out,
-        syscall_num == 98 ==> out,
-        syscall_num == 124 ==> out,
-        syscall_num == 1000 ==> out,
-        syscall_num == 1001 ==> out,
-        syscall_num == 0 ==> !out,
-        syscall_num == 447 ==> !out,
+        out == linux_critical_handler_spec(syscall_num as int),
 {
     smros_linux_critical_handler_body!(syscall_num)
 }
 
+spec fn linux_handler_class_spec(n: int) -> int {
+    let stub = linux_audited_stub_class_spec(n);
+    if stub == 1 || stub == 2 {
+        2
+    } else if stub == 3 {
+        3
+    } else if stub == 4 {
+        4
+    } else if linux_critical_handler_spec(n) {
+        1
+    } else if n <= 446 || n == 600 {
+        5
+    } else {
+        6
+    }
+}
+
 fn linux_handler_class(syscall_num: u32) -> (out: u8)
     ensures
-        syscall_num == 93 ==> out == 1,
-        syscall_num == 260 ==> out == 1,
-        syscall_num == 220 ==> out == 1,
-        syscall_num == 98 ==> out == 1,
-        syscall_num == 124 ==> out == 1,
-        syscall_num == 1000 ==> out == 1,
-        syscall_num == 0 ==> out == 2,
-        syscall_num == 142 ==> out == 2,
-        syscall_num == 31 ==> out == 3,
-        syscall_num == 92 ==> out == 4,
-        syscall_num == 600 ==> out == 5,
-        syscall_num == 447 ==> out == 6,
-        syscall_num == 93 ==> out != 2,
+        out as int == linux_handler_class_spec(syscall_num as int),
 {
     smros_linux_handler_class_body!(syscall_num, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8)
 }
