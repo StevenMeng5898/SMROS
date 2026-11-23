@@ -116,9 +116,21 @@ macro_rules! smros_syscall_wait_satisfied_body {
     }};
 }
 
+macro_rules! smros_linux_cpu_clock_id_supported_body {
+    ($clock_id:expr) => {{
+        let low = $clock_id as u32;
+        if low < 0x8000_0000 {
+            false
+        } else {
+            let kind = low & 7;
+            kind == 0 || kind == 1 || kind == 2 || kind == 4 || kind == 5 || kind == 6
+        }
+    }};
+}
+
 macro_rules! smros_linux_clock_id_supported_body {
     ($clock_id:expr) => {{
-        $clock_id <= 7 || linux_cpu_clock_id_supported($clock_id)
+        $clock_id <= 7 || smros_linux_cpu_clock_id_supported_body!($clock_id)
     }};
 }
 
@@ -498,12 +510,7 @@ pub(crate) const fn linux_cpu_clock_id_signed(clock_id: usize) -> i32 {
 }
 
 pub(crate) const fn linux_cpu_clock_id_supported(clock_id: usize) -> bool {
-    let signed = linux_cpu_clock_id_signed(clock_id);
-    if signed >= 0 {
-        return false;
-    }
-    let kind = (signed as u32) & 7;
-    kind == 0 || kind == 1 || kind == 2 || kind == 4 || kind == 5 || kind == 6
+    smros_linux_cpu_clock_id_supported_body!(clock_id)
 }
 
 pub(crate) const fn linux_cpu_clock_id_pid(clock_id: usize) -> Option<i32> {

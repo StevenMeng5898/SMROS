@@ -1,0 +1,6 @@
+utc=2026-11-21T17:31:00Z
+git_head=c6d045dec24beaaa2c201a8179eb2bf458b997fd
+git_dirty=false
+command=make ut
+test result: ok. 389 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+EXIT:0

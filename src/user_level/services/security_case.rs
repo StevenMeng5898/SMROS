@@ -51,6 +51,8 @@ const MPROTECT_SECOND: u64 = 0x3333;
 const MAGIC: u64 = 0x5345_434d_4147_4943;
 const CASE_TIMEOUT_NS: u64 = 2_000_000_000;
 
+include!("security_case_logic_shared.rs");
+
 /// Bytes of `tests/security/aarch64/el0_probe.S` (`.text` only).
 const PROBE_CODE: &[u8] = &[
     0x14, 0x00, 0x80, 0xd2, 0x14, 0x40, 0xa2, 0xf2, 0x95, 0x02, 0x40, 0xf9, 0x96, 0x06, 0x40, 0xf9,
@@ -612,7 +614,13 @@ fn run_elf_memsz_case() -> bool {
     let Ok(runs) = plan_elf_load(&[bss], window_start, window_start, window_end, page) else {
         return false;
     };
-    runs.len() == 1 && runs[0].len == (page as usize) * 8
+    let bss_in_window = smros_sectest_address_in_window_body!(
+        window_start + bss.vaddr,
+        bss.mem_size,
+        window_start,
+        window_end
+    );
+    bss_in_window && runs.len() == 1 && runs[0].len == (page as usize) * 8
 }
 
 fn run_one(serial: &mut Serial, case: Case) {
@@ -1379,7 +1387,11 @@ fn run_probe(case: Case) -> FinishedCase {
     let start = crate::kernel_lowlevel::timer::get_nanoseconds();
     while !DONE.load(Ordering::Acquire) || (require_peer && !PEER_DONE.load(Ordering::Acquire)) {
         yield_now();
-        if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS
+        if smros_sectest_case_timed_out_body!(
+            start,
+            crate::kernel_lowlevel::timer::get_nanoseconds(),
+            CASE_TIMEOUT_NS
+        )
         {
             PEER_STOP.store(true, Ordering::Release);
             ACTIVE.store(false, Ordering::Release);
@@ -1400,17 +1412,12 @@ fn judge(case: Case) -> FinishedCase {
     let exec_ok = EXEC_HITS.load(Ordering::Relaxed) == 0;
     let faulted = FAULTED.load(Ordering::Relaxed);
     match case.judge {
-        Judge::Trap => {
-            if faulted && magic_ok && exec_ok {
-                finished(Verdict::Pass, "trapped")
-            } else if !magic_ok {
-                finished(Verdict::Fail, "magic-changed")
-            } else if !exec_ok {
-                finished(Verdict::Fail, "kernel-executed")
-            } else {
-                finished(Verdict::Fail, "no-fault")
-            }
-        }
+        Judge::Trap => match smros_sectest_trap_verdict_body!(faulted, magic_ok, exec_ok) {
+            0 => finished(Verdict::Pass, "trapped"),
+            1 => finished(Verdict::Fail, "magic-changed"),
+            2 => finished(Verdict::Fail, "kernel-executed"),
+            _ => finished(Verdict::Fail, "no-fault"),
+        },
         Judge::Syscall(expected) => {
             let result = LAST_RESULT.load(Ordering::Relaxed);
             if faulted {
@@ -1665,7 +1672,11 @@ fn judge_el0_uaccess_body() -> FinishedCase {
     let start = crate::kernel_lowlevel::timer::get_nanoseconds();
     while !UACCESS_PEER_DONE.load(Ordering::Acquire) {
         yield_now();
-        if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS
+        if smros_sectest_case_timed_out_body!(
+            start,
+            crate::kernel_lowlevel::timer::get_nanoseconds(),
+            CASE_TIMEOUT_NS
+        )
         {
             return finished(Verdict::Fail, "peer-timeout");
         }
@@ -2121,7 +2132,11 @@ extern "C" fn security_peer_thread() -> ! {
     let start = crate::kernel_lowlevel::timer::get_nanoseconds();
     while !FAULT_SEEN.load(Ordering::Acquire) && !PEER_STOP.load(Ordering::Acquire) {
         yield_now();
-        if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS
+        if smros_sectest_case_timed_out_body!(
+            start,
+            crate::kernel_lowlevel::timer::get_nanoseconds(),
+            CASE_TIMEOUT_NS
+        )
         {
             break;
         }
@@ -2167,7 +2182,11 @@ fn run_no_linux_task() -> FinishedCase {
     let start = crate::kernel_lowlevel::timer::get_nanoseconds();
     while !DONE.load(Ordering::Acquire) || !PEER_DONE.load(Ordering::Acquire) {
         yield_now();
-        if crate::kernel_lowlevel::timer::get_nanoseconds().saturating_sub(start) > CASE_TIMEOUT_NS
+        if smros_sectest_case_timed_out_body!(
+            start,
+            crate::kernel_lowlevel::timer::get_nanoseconds(),
+            CASE_TIMEOUT_NS
+        )
         {
             PEER_STOP.store(true, Ordering::Release);
             ACTIVE.store(false, Ordering::Release);

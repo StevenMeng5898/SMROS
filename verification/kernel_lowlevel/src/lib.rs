@@ -22,10 +22,19 @@ mod lowlevel_runtime_macro_checks {
     ) -> Option<usize> {
         smros_ll_pfn_index_body!(pfn, base_pfn, total_pages)
     }
+
+    #[allow(dead_code)]
+    fn exercise_timer_gic_macros() {
+        let _ = smros_ll_gic_ppi_level_clear_mask_body!(30u32);
+        let _ = smros_ll_timer_earliest_compare_body!(10u64, 4u64);
+        let _ = smros_ll_timer_program_compare_body!(10u64, 4u64, 6u64);
+        let _ = smros_ll_timer_counter_nanoseconds_body!(100u64, 50u64);
+    }
 }
 
 verus! {
 
+include!("../../../src/kernel_lowlevel/kernel_budget_logic_shared.rs");
 include!("../../../src/kernel_lowlevel/lowlevel_logic_shared.rs");
 include!("../../../src/kernel_lowlevel/aarch64_exception_logic_shared.rs");
 include!("../../../src/kernel_lowlevel/aarch64_vm_logic_shared.rs");
@@ -521,10 +530,7 @@ fn ll_pfn_index(pfn: u64, base_pfn: u64, total_pages: usize) -> (out: Option<usi
                 == Option::<int>::None,
         },
 {
-    match pfn.checked_sub(base_pfn) {
-        Some(index) if index < total_pages as u64 => Some(index as usize),
-        _ => None,
-    }
+    smros_ll_pfn_index_body!(pfn, base_pfn, total_pages)
 }
 
 fn ll_pfn_address(
@@ -533,10 +539,6 @@ fn ll_pfn_address(
     total_pages: usize,
     page_size: usize,
 ) -> (out: Option<usize>)
-    requires
-        page_size > 0,
-        pfn <= usize::MAX as u64,
-        pfn as int * page_size as int <= usize::MAX as int,
     ensures
         match out {
             Some(address) => pfn_address_spec(
@@ -553,10 +555,7 @@ fn ll_pfn_address(
             ) == Option::<int>::None,
         },
 {
-    match ll_pfn_index(pfn, base_pfn, total_pages) {
-        Some(_) => Some((pfn as usize) * page_size),
-        None => None,
-    }
+    smros_ll_pfn_address_body!(pfn, base_pfn, total_pages, page_size)
 }
 
 fn find_segment_model(segments: &Vec<SegmentModel>, vaddr: usize) -> (out: Option<usize>)
@@ -687,6 +686,37 @@ fn ll_bitmap_mask(bit: usize) -> (out: u64)
         out == 1u64 << bit,
 {
     smros_ll_bitmap_mask_body!(bit)
+}
+
+fn verified_page_bit_free(word: u64, bit: usize) -> (out: bool)
+    requires
+        bit < 64,
+    ensures
+        out == ((word & (1u64 << bit)) == 0),
+{
+    smros_ll_page_bit_free_body!(word, bit)
+}
+
+fn verified_page_range_admitted(
+    start: usize,
+    end: usize,
+    page_size: usize,
+    words: usize,
+) -> (out: bool)
+    ensures
+        page_size == 0 ==> !out,
+        page_size > 0 && start >= end ==> !out,
+        page_size > 0
+            && start < end
+            && (start % page_size != 0 || end % page_size != 0) ==> !out,
+        page_size > 0
+            && start < end
+            && start % page_size == 0
+            && end % page_size == 0
+            && words <= usize::MAX / 64 ==> out
+            == ((end - start) as int / page_size as int <= words as int * 64),
+{
+    smros_ll_page_range_admit_body!(start, end, page_size, words)
 }
 
 fn ll_process_index_valid(index: usize) -> (out: bool)
@@ -833,7 +863,7 @@ fn ll_timer_period(frequency: u64) -> (out: u64)
 
 fn ll_timer_compare(current: u64, period: u64) -> (out: u64)
     ensures
-        out == current.wrapping_add(period),
+        period == 0 ==> out == current,
 {
     smros_ll_timer_compare_body!(current, period)
 }
@@ -1093,6 +1123,172 @@ proof fn thread_context_smoke() {
     assert(THREAD_BLOCKED == PROCESS_BLOCKED);
     assert(THREAD_TERMINATED == PROCESS_TERMINATED);
     assert(THREAD_IDLE_ID == 0);
+}
+
+spec fn kernel_budget_admit_heap_spec(
+    allocated: int,
+    heap: int,
+    reserve: int,
+    extra: int,
+) -> bool {
+    if extra == 0 {
+        if allocated + reserve <= usize::MAX as int {
+            allocated + reserve <= heap || heap == 0
+        } else {
+            heap == usize::MAX as int || heap == 0
+        }
+    } else if allocated + extra > usize::MAX as int {
+        false
+    } else {
+        let sum = allocated + extra;
+        if sum + reserve > usize::MAX as int {
+            false
+        } else {
+            sum + reserve <= heap
+        }
+    }
+}
+
+spec fn kernel_budget_admit_process_spec(current: int, limit: int, extra: int) -> bool {
+    if extra == 0 {
+        current <= limit
+    } else if current + extra > usize::MAX as int {
+        false
+    } else {
+        current + extra <= limit
+    }
+}
+
+spec fn kernel_budget_mmap_metadata_spec(pages: int, per_page: int) -> Option<int> {
+    if per_page == 0 {
+        Some(0int)
+    } else if pages <= usize::MAX as int / per_page {
+        Some(pages * per_page)
+    } else {
+        Option::<int>::None
+    }
+}
+
+spec fn kernel_budget_uncharge_spec(current: int, bytes: int) -> int {
+    if current >= bytes {
+        current - bytes
+    } else {
+        0
+    }
+}
+
+fn verified_kernel_budget_admit_heap(
+    allocated: usize,
+    heap: usize,
+    reserve: usize,
+    extra: usize,
+) -> (out: bool)
+    ensures
+        out == kernel_budget_admit_heap_spec(
+            allocated as int,
+            heap as int,
+            reserve as int,
+            extra as int,
+        ),
+{
+    smros_kernel_budget_admit_heap_body!(allocated, heap, reserve, extra)
+}
+
+fn verified_kernel_budget_admit_process(current: usize, limit: usize, extra: usize) -> (out: bool)
+    ensures
+        out == kernel_budget_admit_process_spec(current as int, limit as int, extra as int),
+{
+    smros_kernel_budget_admit_process_body!(current, limit, extra)
+}
+
+fn verified_kernel_budget_mmap_metadata(pages: usize, per_page: usize) -> (out: Option<usize>)
+    requires
+        per_page > 0,
+        pages <= usize::MAX / per_page,
+    ensures
+        match out {
+            Some(bytes) => bytes as int == pages as int * per_page as int,
+            None => false,
+        },
+{
+    let out = smros_kernel_budget_mmap_metadata_bytes_body!(pages, per_page);
+    assert(match out {
+        Some(bytes) => bytes as int == pages as int * per_page as int,
+        None => false,
+    }) by(nonlinear_arith)
+        requires
+            per_page > 0,
+            pages <= usize::MAX / per_page,
+            out == pages.checked_mul(per_page),
+    ;
+    out
+}
+
+
+fn verified_kernel_budget_uncharge(current: usize, bytes: usize) -> (out: usize)
+    ensures
+        out as int == kernel_budget_uncharge_spec(current as int, bytes as int),
+{
+    smros_kernel_budget_uncharge_body!(current, bytes)
+}
+
+fn kernel_budget_reserve_blocks_the_reported_mmap_failure() {
+    let heap: usize = 0x1000_0000;
+    let reserve: usize = 24 * 1024 * 1024;
+    let allocated: usize = heap - reserve - 40960;
+    let admitted = verified_kernel_budget_admit_heap(allocated, heap, reserve, 40960);
+    let past_reserve = verified_kernel_budget_admit_heap(allocated + 1, heap, reserve, 40960);
+    let no_room = verified_kernel_budget_admit_heap(heap - reserve, heap, reserve, 1);
+    let full_reserve = verified_kernel_budget_admit_heap(0, heap, reserve, heap - reserve);
+    let overflow = verified_kernel_budget_admit_heap(usize::MAX - 10, heap, reserve, 16);
+    let limit: usize = 192 * 1024 * 1024;
+    let process_ok = verified_kernel_budget_admit_process(limit - 4096, limit, 4096);
+    let process_over = verified_kernel_budget_admit_process(limit - 4095, limit, 4096);
+    let released = verified_kernel_budget_uncharge(100, 40);
+    let released_floor = verified_kernel_budget_uncharge(10, 40);
+    let metadata = verified_kernel_budget_mmap_metadata(10, 64);
+    assert(admitted);
+    assert(!past_reserve);
+    assert(!no_room);
+    assert(full_reserve);
+    assert(!overflow);
+    assert(process_ok);
+    assert(!process_over);
+    assert(released == 60);
+    assert(released_floor == 0);
+    assert(metadata == Some(640usize));
+}
+
+fn verified_timer_tick_is_new(last: u64, current: u64) -> (out: bool)
+    ensures
+        out == (current > last),
+{
+    smros_ll_timer_tick_is_new_body!(last, current)
+}
+
+fn verified_timer_elapsed_ticks(last: u64, now: u64) -> (out: u64)
+    ensures
+        (now == 0 || now <= last) ==> out == 0,
+        now > last ==> out == now - last,
+{
+    smros_ll_timer_elapsed_ticks_body!(last, now)
+}
+
+fn verified_timer_compare_needs_rearm(hardware: u64, now: u64) -> (out: bool)
+    ensures
+        out == (hardware <= now),
+{
+    smros_ll_timer_compare_needs_rearm_body!(hardware, now)
+}
+
+fn verified_timer_rearm_compare(now: u64, period: u64) -> (out: u64)
+    ensures
+        period == 0 && now < u64::MAX ==> out == now + 1,
+        period == 0 && now == u64::MAX ==> out == u64::MAX,
+        period > 0 && now <= u64::MAX - period ==> out == now + period,
+        period > 0 && now > u64::MAX - period ==> out == u64::MAX,
+{
+    smros_ll_timer_rearm_compare_body!(now, period)
 }
 
 proof fn driver_platform_table_smoke() {

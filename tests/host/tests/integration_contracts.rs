@@ -1166,9 +1166,6 @@ fn aarch64_memory_uses_one_vm_logic_module_without_broad_dead_code_suppression()
         "smros_ll_stack_alloc_body",
         "smros_ll_page_to_vaddr_body",
         "smros_ll_pfn_valid_body",
-        "smros_ll_bitmap_word_index_body",
-        "smros_ll_bitmap_bit_index_body",
-        "smros_ll_bitmap_mask_body",
     ] {
         assert!(
             shared.contains(&format!(
@@ -1177,6 +1174,25 @@ fn aarch64_memory_uses_one_vm_logic_module_without_broad_dead_code_suppression()
             "model-only macro {model_macro} must not enter the kernel build"
         );
     }
+    for kernel_macro in [
+        "smros_ll_bitmap_word_index_body",
+        "smros_ll_bitmap_bit_index_body",
+        "smros_ll_bitmap_mask_body",
+        "smros_ll_pfn_index_body",
+        "smros_ll_pfn_address_body",
+    ] {
+        assert!(
+            !shared.contains(&format!(
+                "#[cfg(not(target_os = \"none\"))]\nmacro_rules! {kernel_macro}"
+            )),
+            "{kernel_macro} is part of the kernel allocator and must be compiled for target_os=none"
+        );
+    }
+    assert!(shared.contains("smros_ll_pfn_index_body!(pfn, self.base_pfn, self.total_pages)"));
+    assert!(shared.contains(
+        "smros_ll_pfn_address_body!(pfn, self.base_pfn, self.total_pages, page_size)"
+    ));
+    assert!(shared.contains("smros_ll_bitmap_mask_body!(bit_index)"));
 }
 
 #[test]

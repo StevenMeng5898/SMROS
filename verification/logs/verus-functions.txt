@@ -1,0 +1,112 @@
+===== verus function evidence =====
+git_head=be0b69698560f33de381c9f4d33eee6b456a9df5
+git_dirty=false
+dirty_files<<END
+
+END
+source_sha256:
+45b913c10ed3d5a18bc6841ca5dd2d6e4ba909c6a1b5674f210fd63cdc46a889  src/kernel_lowlevel/kernel_budget_logic_shared.rs
+3eb18eddfbb52b012864a3a0147fcc26f9c6d613dd29737d54bc740d0ef008dc  src/kernel_objects/campaign_watch_logic_shared.rs
+2b4af300325417e7f7610cd7c314ef98227815824af369c3180135232bc92adb  src/kernel_objects/fifo_logic_shared.rs
+b9cce0d93f8590e9573d0d01b190c3d987cb7885d4a2e1c93cb1fa6ee56856bc  src/kernel_objects/futex_logic_shared.rs
+80cf0297af8f7a6f696ff706ad894c61e649d9a77282958dd3015ec6ac63422b  src/kernel_objects/hypervisor_logic_shared.rs
+3233cdca827024b31c2a4ac85902e7f5ece86213e2cb9b1a2ddd940645a22cd8  src/kernel_objects/log_logic_shared.rs
+ae3ad0cda6a14038bab431cb62da6172e22fc6fb87e187c38990cd6c03b184f9  src/kernel_objects/port_logic_shared.rs
+671dac9c068d0acc80c44bb86fdf70a1e961ac823d676b3a978d6db318a5932e  src/kernel_objects/socket_logic_shared.rs
+9c2c9343ea312e4ee7d24d1cd020f1d7234294828bf0e93e8fa303aaba99f60e  src/main_logic_shared.rs
+06644572937739b61db5684b0fa98e2a4695dde8ce412302ea1e72e326f331ae  src/syscall/linux_riscv_syscall_context_logic_shared.rs
+979e4fc5b09094a5a16403b1c8f72371a999c9f0caacfe36d50d23e6bd2aa0ed  src/syscall/uaccess_logic_shared.rs
+c087382ff717d959261cc1d78531a28bd71ba9103eec3f32d027ae97c653bef8  src/user_level/drivers/driver_logic_shared.rs
+13fda35133b588ba6e7bfd2e0848fdcfd00256f9c1fa9002dbaae35f10dc3c00  src/user_level/drivers/linux_logic_shared.rs
+129c8fbaf9e6cf85389ed7de6863d59538480891686ccad46169e0a5108213cd  src/user_level/services/security_case_logic_shared.rs
+harness_sha256:
+81b63a4059fd940cb56980edeafea5e011ad774d3a3c00124b6b606229905c73  verification/syscall/src/lib.rs
+bc905656807711a9a5ed149e463c5f8e58fd4d8e3652959255881c11d414c1cb  verification/kernel_objects/src/lib.rs
+4cf8574761adf412686d15be616c4137897620e21852e6dc5dbc556a1bfbd576  verification/kernel_lowlevel/src/lib.rs
+e46878989df6f430cf93f4e68430b414abc9768efe232691eea8f5a6301e6dd3  verification/user_level/src/lib.rs
+16618596d57f605edf1b3189502b833fde4d4146d7fb03d3655a32de0065c585  verification/services/src/lib.rs
+harness function mode success origin
+verus-kernel-lowlevel.log	lib::verified_kernel_budget_admit_heap	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_admit_heap_body
+verus-kernel-lowlevel.log	lib::verified_kernel_budget_admit_process	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_admit_process_body
+verus-kernel-lowlevel.log	lib::verified_kernel_budget_mmap_metadata	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_mmap_metadata_bytes_body
+verus-kernel-lowlevel.log	lib::verified_kernel_budget_uncharge	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_uncharge_body
+verus-kernel-objects.log	lib::verified_campaign_deadline_exceeded	exec	True	src/kernel_objects/campaign_watch_logic_shared.rs::smros_campaign_deadline_exceeded_body
+verus-kernel-objects.log	lib::fifo_options_valid	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_options_valid_body
+verus-kernel-objects.log	lib::fifo_transfer_bytes	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_transfer_bytes_body
+verus-kernel-objects.log	lib::fifo_ring_index	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_ring_index_body
+verus-kernel-objects.log	lib::fifo_remaining_capacity	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_remaining_capacity_body
+verus-kernel-objects.log	lib::fifo_min_count	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_min_count_body
+verus-kernel-objects.log	lib::fifo_capacity_valid	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_capacity_valid_body
+verus-kernel-objects.log	lib::fifo_refresh_read_signals	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_refresh_read_signals_body
+verus-kernel-objects.log	lib::fifo_refresh_write_signals	exec	True	src/kernel_objects/fifo_logic_shared.rs::smros_fifo_refresh_write_signals_body
+verus-kernel-objects.log	lib::futex_ptr_valid	exec	True	src/kernel_objects/futex_logic_shared.rs::smros_futex_ptr_valid_body
+verus-kernel-objects.log	lib::futex_value_matches	exec	True	src/kernel_objects/futex_logic_shared.rs::smros_futex_value_matches_body
+verus-kernel-objects.log	lib::futex_min_count	exec	True	src/kernel_objects/futex_logic_shared.rs::smros_futex_min_count_body
+verus-kernel-objects.log	lib::futex_saturating_add	exec	True	src/kernel_objects/futex_logic_shared.rs::smros_futex_saturating_add_body
+verus-kernel-objects.log	lib::hypervisor_name_len_valid	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_name_len_valid_body
+verus-kernel-objects.log	lib::hypervisor_name_byte_valid	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_name_byte_valid_body
+verus-kernel-objects.log	lib::hypervisor_uptime_ticks	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_uptime_ticks_body
+verus-kernel-objects.log	lib::hypervisor_cpu_usage_percent	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_cpu_usage_percent_body
+verus-kernel-objects.log	lib::hypervisor_state_count_delta	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_state_count_delta_body
+verus-kernel-objects.log	lib::hypervisor_crash_transition	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_crash_transition_body
+verus-kernel-objects.log	lib::hypervisor_kill_transition	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_kill_transition_body
+verus-kernel-objects.log	lib::hypervisor_saturating_inc_u32	exec	True	src/kernel_objects/hypervisor_logic_shared.rs::smros_hypervisor_saturating_inc_u32_body
+verus-kernel-objects.log	lib::log_level_from_raw	exec	True	src/kernel_objects/log_logic_shared.rs::smros_log_level_from_raw_body
+verus-kernel-objects.log	lib::log_should_log	exec	True	src/kernel_objects/log_logic_shared.rs::smros_log_should_log_body
+verus-kernel-objects.log	lib::log_level_from_match_flags	exec	True	src/kernel_objects/log_logic_shared.rs::smros_log_level_from_match_flags_body
+verus-kernel-objects.log	lib::port_options_valid	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_options_valid_body
+verus-kernel-objects.log	lib::port_packet_ptr_valid	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_packet_ptr_valid_body
+verus-kernel-objects.log	lib::port_queue_has_space	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_queue_has_space_body
+verus-kernel-objects.log	lib::port_signal_packet_allowed	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_signal_packet_allowed_body
+verus-kernel-objects.log	lib::port_wait_async_options_valid	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_wait_async_options_valid_body
+verus-kernel-objects.log	lib::port_observer_should_queue	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_observer_should_queue_body
+verus-kernel-objects.log	lib::socket_options_valid	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_options_valid_body
+verus-kernel-objects.log	lib::socket_mask_options	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_mask_options_body
+verus-kernel-objects.log	lib::socket_ring_index	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_ring_index_body
+verus-kernel-objects.log	lib::socket_remaining_capacity	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_remaining_capacity_body
+verus-kernel-objects.log	lib::socket_min_count	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_min_count_body
+verus-kernel-objects.log	lib::socket_threshold_met	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_threshold_met_body
+verus-kernel-objects.log	lib::socket_refresh_read_signals	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_refresh_read_signals_body
+verus-kernel-objects.log	lib::socket_refresh_write_signals	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_refresh_write_signals_body
+verus-user-level.log	lib::main_align_up	exec	True	src/main_logic_shared.rs::smros_main_align_up_body
+verus-user-level.log	lib::main_bump_alloc_next	exec	True	src/main_logic_shared.rs::smros_main_bump_alloc_next_body
+verus-syscall.log	lib::verified_riscv_frame_aligned	exec	True	src/syscall/linux_riscv_syscall_context_logic_shared.rs::smros_riscv_frame_aligned_body
+verus-syscall.log	lib::verified_riscv_syscall_return_pc	exec	True	src/syscall/linux_riscv_syscall_context_logic_shared.rs::smros_riscv_syscall_return_pc_body
+verus-syscall.log	lib::verified_riscv_sstatus_spp_set	exec	True	src/syscall/linux_riscv_syscall_context_logic_shared.rs::smros_riscv_sstatus_spp_set_body
+verus-syscall.log	lib::verified_el0_user_range	exec	True	src/syscall/uaccess_logic_shared.rs::smros_uaccess_el0_range_body
+verus-user-level.log	lib::driver_mmio_slot_base_direct	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_mmio_slot_base_body
+verus-user-level.log	lib::driver_virtio_identity_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_identity_valid_body
+verus-user-level.log	lib::driver_virtio_version_supported	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_version_supported_body
+verus-user-level.log	lib::driver_virtio_version_is_modern	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_version_is_modern_body
+verus-user-level.log	lib::driver_virtio_queue_size_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_queue_size_valid_body
+verus-user-level.log	lib::driver_virtio_feature_present	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_feature_present_body
+verus-user-level.log	lib::driver_virtio_block_accepted_features	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_block_accepted_features_body
+verus-user-level.log	lib::driver_virtio_driver_features	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_driver_features_body
+verus-user-level.log	lib::verified_virtio_completion_timed_out	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_completion_timed_out_body
+verus-user-level.log	lib::driver_virtio_net_accepted_features	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_net_accepted_features_body
+verus-user-level.log	lib::driver_block_capacity_bytes_direct	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_block_capacity_bytes_body
+verus-user-level.log	lib::driver_block_range_valid_direct	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_block_range_valid_body
+verus-user-level.log	lib::driver_block_len_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_block_len_valid_body
+verus-user-level.log	lib::driver_block_id_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_block_id_valid_body
+verus-user-level.log	lib::driver_net_tx_frame_len_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_net_tx_frame_len_valid_body
+verus-user-level.log	lib::driver_net_rx_packet_len_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_net_rx_packet_len_valid_body
+verus-user-level.log	lib::driver_net_rx_frame_len	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_net_rx_frame_len_body
+verus-user-level.log	lib::driver_net_rx_output_len_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_net_rx_output_len_valid_body
+verus-user-level.log	lib::linux_id_match	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_id_match_body
+verus-user-level.log	lib::linux_pci_id_match	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_pci_id_match_body
+verus-user-level.log	lib::linux_of_match	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_of_match_body
+verus-user-level.log	lib::linux_virtio_id_match	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_virtio_id_match_body
+verus-user-level.log	lib::linux_virtio_device_present	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_virtio_device_present_body
+verus-user-level.log	lib::linux_id_table_end	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_id_table_end_body
+verus-user-level.log	lib::linux_module_license_ok	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_module_license_ok_body
+verus-user-level.log	lib::linux_chrdev_minor_valid	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_chrdev_minor_valid_body
+verus-user-level.log	lib::linux_irq_number_valid	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_irq_number_valid_body
+verus-user-level.log	lib::linux_irq_shared	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_irq_shared_body
+verus-user-level.log	lib::linux_ioremap_len_valid	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_ioremap_len_valid_body
+verus-user-level.log	lib::linux_dma_size_valid	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_dma_size_valid_body
+verus-user-level.log	lib::linux_file_copy_len	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_file_copy_len_body
+verus-user-level.log	lib::linux_bus_kind_valid	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_bus_kind_valid_body
+verus-user-level.log	lib::linux_probe_status_ok	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_probe_status_ok_body
+verus-services.log	lib::verified_sectest_trap_verdict	exec	True	src/user_level/services/security_case_logic_shared.rs::smros_sectest_trap_verdict_body
+verus-services.log	lib::verified_sectest_case_timed_out	exec	True	src/user_level/services/security_case_logic_shared.rs::smros_sectest_case_timed_out_body
+verus-services.log	lib::verified_sectest_address_in_window	exec	True	src/user_level/services/security_case_logic_shared.rs::smros_sectest_address_in_window_body

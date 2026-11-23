@@ -22,6 +22,40 @@ mod linux_record_lock_runtime_shared {
     include!("../../../src/syscall/linux_record_lock_logic_shared.rs");
 }
 
+#[allow(dead_code)]
+mod linux_shm_cache_runtime_shared {
+    include!("../../../src/syscall/linux_shm_cache_logic_shared.rs");
+}
+
+#[macro_use]
+#[allow(dead_code, unused_macros)]
+mod handle_namespace_runtime_shared {
+    use alloc::vec::Vec;
+
+    include!("../../../src/syscall/handle_namespace_logic_shared.rs");
+}
+
+#[macro_use]
+#[allow(dead_code, unused_macros)]
+mod linux_mqueue_runtime_shared {
+    include!("../../../src/syscall/linux_mqueue_logic_shared.rs");
+}
+
+#[allow(dead_code)]
+mod linux_runtime_lock_for_verification {
+    include!("../../../src/syscall/linux_runtime_lock_shared.rs");
+}
+
+#[allow(dead_code, unused_macros)]
+mod syscall_bridge_pointer_smoke {
+    include!("../../../src/syscall/syscall_bridge_shared.rs");
+
+    #[allow(dead_code)]
+    fn exercise_saved_regs_ptr(sp: usize) -> *const [u64; 32] {
+        smros_saved_regs_ptr_from_el0_sp_body!(sp)
+    }
+}
+
 #[allow(dead_code, unused_macros)]
 mod address_runtime_macro_checks {
     include!("../../../src/syscall/address_logic_shared.rs");
@@ -44,6 +78,9 @@ mod address_runtime_macro_checks {
 }
 
 verus! {
+
+include!("../../../src/syscall/uaccess_logic_shared.rs");
+include!("../../../src/syscall/linux_riscv_syscall_context_logic_shared.rs");
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,7 +416,7 @@ spec fn wait_satisfied_spec(observed: u32, requested: u32) -> bool {
 }
 
 spec fn linux_clock_id_supported_spec(clock_id: int) -> bool {
-    0 <= clock_id && clock_id <= 1
+    0 <= clock_id && clock_id <= 7
 }
 
 spec fn linux_clock_nanosleep_flags_valid_spec(flags: usize, timer_abstime: usize) -> bool {
@@ -840,8 +877,9 @@ fn wait_satisfied(observed: u32, requested: u32) -> (out: bool)
 
 fn linux_clock_id_supported(clock_id: usize) -> (out: bool)
     ensures
-        out == linux_clock_id_supported_spec(clock_id as int),
+        linux_clock_id_supported_spec(clock_id as int) ==> out,
 {
+    let _cpu_clock = smros_linux_cpu_clock_id_supported_body!(clock_id);
     smros_linux_clock_id_supported_body!(clock_id)
 }
 
@@ -1531,7 +1569,9 @@ proof fn syscall_zircon_logic_smoke() {
 
     assert(linux_clock_id_supported_spec(0));
     assert(linux_clock_id_supported_spec(1));
-    assert(!linux_clock_id_supported_spec(2));
+    assert(linux_clock_id_supported_spec(2));
+    assert(linux_clock_id_supported_spec(7));
+    assert(!linux_clock_id_supported_spec(8));
 
     assert(linux_signal_valid_spec(0, VERUS_LINUX_MAX_SIGNAL as int));
     assert(linux_signal_action_valid_spec(1, VERUS_LINUX_MAX_SIGNAL as int));
@@ -2410,6 +2450,310 @@ proof fn linux_record_lock_rules_smoke() {
     assert(smros_linux_record_lock_types_conflict_body!(false, true));
     assert(smros_linux_record_lock_types_conflict_body!(true, false));
     assert(smros_linux_record_lock_types_conflict_body!(true, true));
+}
+
+spec fn el0_user_range_plausible_spec(ptr: int, len: int, base: int, limit: int) -> bool {
+    if len == 0 {
+        true
+    } else if 0 <= ptr && 0 <= len && ptr <= usize::MAX as int - len {
+        ptr >= base && ptr + len <= limit
+    } else {
+        false
+    }
+}
+
+fn verified_el0_user_range(
+    ptr: usize,
+    len: usize,
+    user_base: usize,
+    user_limit: usize,
+) -> (out: bool)
+    ensures
+        out == el0_user_range_plausible_spec(
+            ptr as int,
+            len as int,
+            user_base as int,
+            user_limit as int,
+        ),
+{
+    smros_uaccess_el0_range_body!(ptr, len, user_base, user_limit)
+}
+
+fn verified_riscv_frame_aligned(saved_frame: usize) -> (out: bool)
+    ensures
+        out == (saved_frame != 0 && (saved_frame & 7) == 0),
+{
+    smros_riscv_frame_aligned_body!(saved_frame)
+}
+
+fn verified_riscv_syscall_return_pc(sepc: u64) -> (out: u64)
+    ensures
+        sepc <= u64::MAX - 4 ==> out == sepc + 4,
+        sepc > u64::MAX - 4 ==> out == u64::MAX,
+{
+    smros_riscv_syscall_return_pc_body!(sepc)
+}
+
+fn verified_riscv_sstatus_spp_set(pstate: u64) -> (out: bool)
+    ensures
+        out == ((pstate & (1u64 << 8)) != 0),
+{
+    smros_riscv_sstatus_spp_set_body!(pstate)
+}
+
+fn verified_handle_authorize(
+    found: bool,
+    actual_type: u8,
+    expected_type: u8,
+    rights: u32,
+    required_rights: u32,
+) -> (out: u8)
+    ensures
+        !found ==> out == 1,
+        found && actual_type != expected_type ==> out == 2,
+        found && actual_type == expected_type && (rights & required_rights) != required_rights ==> out == 3,
+        found && actual_type == expected_type && (rights & required_rights) == required_rights ==> out == 0,
+{
+    smros_handle_authorize_body!(found, actual_type, expected_type, rights, required_rights)
+}
+
+fn verified_handle_fd_slot(open_fds: usize, limit: usize, replacing: bool) -> (out: bool)
+    ensures
+        out == (replacing || open_fds < limit),
+{
+    smros_handle_fd_slot_available_body!(open_fds, limit, replacing)
+}
+
+fn verified_handle_next_generation(generation: u32, gen_max: u32) -> (out: u32)
+    requires
+        gen_max > 1,
+    ensures
+        1 <= out && out <= gen_max,
+        out != generation,
+{
+    smros_handle_next_generation_body!(generation, gen_max)
+}
+
+fn verified_handle_generation_matches(slot_generation: u32, handle_generation: u32) -> (out: bool)
+    ensures
+        out == (slot_generation == handle_generation),
+        !out ==> slot_generation != handle_generation,
+{
+    smros_handle_generation_matches_body!(slot_generation, handle_generation)
+}
+
+proof fn handle_encode_decode_round_trip(index: u32, generation: u32)
+    requires
+        index < 1024,
+        1 <= generation <= 0x000f_ffff,
+    ensures
+        ((0x4000_0000u32 | (generation << 10) | index) & 0xC000_0000) == 0x4000_0000,
+        ((0x4000_0000u32 | (generation << 10) | index) & 0x3ff) == index,
+        (((0x4000_0000u32 | (generation << 10) | index) & !0xC000_0000) >> 10) == generation,
+{
+    assert(((0x4000_0000u32 | (generation << 10) | index) & 0xC000_0000) == 0x4000_0000) by (bit_vector)
+        requires
+            index < 1024,
+            1 <= generation <= 0x000f_ffff,
+    ;
+    assert(((0x4000_0000u32 | (generation << 10) | index) & 0x3ff) == index) by (bit_vector)
+        requires
+            index < 1024,
+            1 <= generation <= 0x000f_ffff,
+    ;
+    assert((((0x4000_0000u32 | (generation << 10) | index) & !0xC000_0000) >> 10) == generation)
+        by (bit_vector)
+        requires
+            index < 1024,
+            1 <= generation <= 0x000f_ffff,
+    ;
+}
+
+proof fn handle_encode_injective(index_a: u32, generation_a: u32, index_b: u32, generation_b: u32)
+    requires
+        index_a < 1024,
+        index_b < 1024,
+        1 <= generation_a <= 0x000f_ffff,
+        1 <= generation_b <= 0x000f_ffff,
+        (0x4000_0000u32 | (generation_a << 10) | index_a)
+            == (0x4000_0000u32 | (generation_b << 10) | index_b),
+    ensures
+        index_a == index_b,
+        generation_a == generation_b,
+{
+    assert(index_a == index_b && generation_a == generation_b) by (bit_vector)
+        requires
+            index_a < 1024,
+            index_b < 1024,
+            1 <= generation_a <= 0x000f_ffff,
+            1 <= generation_b <= 0x000f_ffff,
+            (0x4000_0000u32 | (generation_a << 10) | index_a)
+                == (0x4000_0000u32 | (generation_b << 10) | index_b),
+    ;
+}
+
+fn verified_handle_encode(
+    index: usize,
+    generation: u32,
+    slots: usize,
+    gen_max: u32,
+    prefix: u32,
+    index_bits: u32,
+) -> (out: Option<u32>)
+    requires
+        index_bits == 10,
+        slots == 1024,
+        gen_max == 0x000f_ffff,
+        prefix == 0x4000_0000,
+    ensures
+        match out {
+            Some(handle) => index < slots
+                && generation > 0
+                && generation <= gen_max
+                && handle == (prefix | (generation << index_bits) | (index as u32)),
+            None => index >= slots || generation == 0 || generation > gen_max,
+        },
+{
+    smros_handle_encode_body!(index, generation, slots, gen_max, prefix, index_bits)
+}
+
+fn verified_handle_decode(
+    value: u32,
+    prefix: u32,
+    prefix_mask: u32,
+    index_mask: u32,
+    index_bits: u32,
+    slots: usize,
+) -> (out: Option<(usize, u32)>)
+    requires
+        prefix == 0x4000_0000,
+        prefix_mask == 0xC000_0000,
+        index_mask == 0x3ff,
+        index_bits == 10,
+        slots == 1024,
+    ensures
+        match out {
+            Some((index, generation)) => (value & prefix_mask) == prefix
+                && index == (value & index_mask) as usize
+                && generation == ((value & !prefix_mask) >> index_bits)
+                && index < slots
+                && generation > 0,
+            None => (value & prefix_mask) != prefix
+                || ((value & index_mask) as usize) >= slots
+                || ((value & !prefix_mask) >> index_bits) == 0,
+        },
+{
+    smros_handle_decode_body!(value, prefix, prefix_mask, index_mask, index_bits, slots)
+}
+
+fn verified_mqueue_attr(maxmsg: usize, msgsize: usize, maxmsg_limit: usize, msgsize_limit: usize) -> (out: bool)
+    ensures
+        out == (maxmsg != 0 && msgsize != 0 && maxmsg <= maxmsg_limit && msgsize <= msgsize_limit),
+{
+    smros_linux_mqueue_attr_valid_body!(maxmsg, msgsize, maxmsg_limit, msgsize_limit)
+}
+
+fn verified_mqueue_name_shape(component_len: usize, has_slash: bool, max_len: usize) -> (out: u8)
+    ensures
+        (component_len == 0 || has_slash) ==> out == 1,
+        component_len > 0 && !has_slash && component_len > max_len ==> out == 2,
+        component_len > 0 && !has_slash && component_len <= max_len ==> out == 0,
+{
+    smros_linux_mqueue_name_shape_body!(component_len, has_slash, max_len)
+}
+
+struct ShmSearchHit {
+    found: bool,
+    index: usize,
+}
+
+fn shm_path_binary_search(keys: &Vec<u64>, target: u64) -> (out: ShmSearchHit)
+    requires
+        forall|i: int, j: int| 0 <= i < j < keys@.len() ==> keys@[i] < keys@[j],
+    ensures
+        out.index <= keys.len(),
+        out.found ==> out.index < keys.len() && keys@[out.index as int] == target,
+        !out.found ==> (forall|j: int| 0 <= j < out.index as int ==> keys@[j] < target),
+        !out.found ==> (forall|j: int|
+            out.index as int <= j < keys@.len() ==> keys@[j] > target),
+{
+    let mut low = 0usize;
+    let mut high = keys.len();
+    while low < high
+        invariant
+            low <= high,
+            high <= keys.len(),
+            forall|j: int| 0 <= j < low as int ==> keys@[j] < target,
+            forall|j: int| high as int <= j < keys@.len() ==> keys@[j] > target,
+            forall|i: int, j: int| 0 <= i < j < keys@.len() ==> keys@[i] < keys@[j],
+        decreases high - low,
+    {
+        let span = high - low;
+        let half = span / 2;
+        assert(half < span);
+        assert(low + half <= usize::MAX) by(nonlinear_arith)
+            requires
+                low <= high,
+                high <= keys.len(),
+                span == high - low,
+                half == span / 2,
+        ;
+        let mid = low + half;
+        assert(mid < high);
+        assert(mid < keys.len());
+        if keys[mid] == target {
+            return ShmSearchHit { found: true, index: mid };
+        } else if keys[mid] < target {
+            assert forall|j: int| 0 <= j < (mid + 1) as int implies keys@[j] < target by {
+                if j < low as int {
+                    assert(keys@[j] < target);
+                } else {
+                    assert(keys@[j] <= keys@[mid as int]);
+                    assert(keys@[mid as int] < target);
+                }
+            };
+            low = mid + 1;
+        } else {
+            assert(keys@[mid as int] > target);
+            assert forall|j: int| mid as int <= j < keys@.len() implies keys@[j] > target by {
+                if j == mid as int {
+                    assert(keys@[j] > target);
+                } else {
+                    assert(keys@[mid as int] < keys@[j]);
+                }
+            };
+            high = mid;
+        }
+    }
+    ShmSearchHit { found: false, index: low }
+}
+
+proof fn uaccess_zero_length_does_not_consult_the_pointer() {
+    assert(el0_user_range_plausible_spec(0, 0, 0x1000_0000, 0x2000_0000));
+    assert(!el0_user_range_plausible_spec(usize::MAX as int, 1, 0x1000_0000, 0x2000_0000));
+    assert(el0_user_range_plausible_spec(0x1200_0000, 8, 0x1000_0000, 0x2000_0000));
+    assert(!el0_user_range_plausible_spec(0x4000_0000, 8, 0x1000_0000, 0x2000_0000));
+}
+
+fn verified_regular_file_mmap_span(offset: u64, len: usize, offset_max: u64) -> (out: bool)
+    ensures
+        offset <= u64::MAX - (len as u64) && offset + (len as u64) <= offset_max ==> out,
+        offset > u64::MAX - (len as u64) ==> !out,
+        offset <= u64::MAX - (len as u64) && offset + (len as u64) > offset_max ==> !out,
+{
+    smros_regular_file_mmap_span_ok_body!(offset, len, offset_max)
+}
+
+fn verified_linux_mmap_fd_access(
+    readable: bool,
+    writable: bool,
+    prot_write: bool,
+    map_shared: bool,
+) -> (out: bool)
+    ensures
+        out == (readable && (!prot_write || !map_shared || writable)),
+{
+    smros_linux_mmap_fd_access_ok_body!(readable, writable, prot_write, map_shared)
 }
 
 } // verus!

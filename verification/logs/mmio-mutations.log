@@ -1,0 +1,15 @@
+mutation=drop base, Some(offset) instead of base.checked_add(offset)
+result=verus verification/user_level/src/lib.rs exit 1
+driver_mmio_slot_base_direct assertion failed: out == Some(base)
+driver_mmio_slot_base_direct assertion failed: out == base.checked_add(offset)
+verification results:: 205 verified, 1 errors
+
+mutation=overflow does not return None; both None arms return Some(0)
+result=verus verification/user_level/src/lib.rs exit 1
+driver_mmio_slot_base_direct assertion failed: out.is_none()
+driver_mmio_slot_base_direct assertion failed: out == base.checked_add(offset)
+verification results:: 205 verified, 1 errors
+
+The shipped macro is checked_mul then checked_add. This file is the mutation evidence.
+utc=2026-11-21T17:31:06Z
+git_head=c6d045dec24beaaa2c201a8179eb2bf458b997fd

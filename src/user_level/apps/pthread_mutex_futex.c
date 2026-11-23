@@ -18,6 +18,10 @@
 
 #define _GNU_SOURCE
 
+#ifdef CBMC
+#include <assert.h>
+#include <stdint.h>
+#else
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -28,6 +32,7 @@
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
+#endif
 
 #ifndef SYS_futex
 #ifdef __aarch64__
@@ -43,7 +48,80 @@
 #define FUTEX_WAIT_PRIVATE (FUTEX_WAIT | FUTEX_PRIVATE_FLAG)
 #define FUTEX_WAKE_PRIVATE (FUTEX_WAKE | FUTEX_PRIVATE_FLAG)
 
-/* 0 = free, 1 = locked, 2 = locked with waiters (glibc pthread_mutex). */
+/* 0 = free, 1 = locked, 2 = locked with waiters (glibc pthread_mutex).
+ * Pure word transitions. CBMC checks these; the runtime lock uses the same results. */
+static unsigned lock_transition(unsigned word, int *needs_wait)
+{
+    if (word == 0) {
+        *needs_wait = 0;
+        return 1;
+    }
+    *needs_wait = 1;
+    return 2;
+}
+
+static unsigned unlock_transition(unsigned word, int *needs_wake)
+{
+    *needs_wake = word == 2;
+    return 0;
+}
+
+static unsigned trylock_transition(unsigned word, int *acquired)
+{
+    if (word == 0) {
+        *acquired = 1;
+        return 1;
+    }
+    *acquired = 0;
+    return word;
+}
+
+/* After the fast path fails, every later store is 2 so unlock still wakes. */
+static unsigned contended_lock_word(void)
+{
+    return 2;
+}
+
+#ifdef CBMC
+unsigned nondet_uint(void);
+
+void cbmc_futex_word(void)
+{
+    unsigned word = nondet_uint();
+    int needs_wait = 0;
+    int needs_wake = 0;
+    int acquired = 0;
+    unsigned locked;
+    unsigned unlocked;
+    unsigned tried;
+
+    __CPROVER_assume(word <= 2);
+
+    locked = lock_transition(word, &needs_wait);
+    __CPROVER_assert(locked == 1 || locked == 2, "lock result is 1 or 2");
+    __CPROVER_assert(locked <= 2, "lock does not overflow the futex word");
+    __CPROVER_assert(word == 0 ? locked == 1 && needs_wait == 0 : locked == 2 && needs_wait == 1,
+                     "free locks without waiting; held locks record a waiter");
+
+    unlocked = unlock_transition(locked, &needs_wake);
+    __CPROVER_assert(unlocked == 0, "unlock frees the word");
+    __CPROVER_assert(needs_wake == (locked == 2), "wake exactly one waiter only when word was 2");
+
+    tried = trylock_transition(word, &acquired);
+    __CPROVER_assert(acquired == (word == 0), "trylock acquires only a free word");
+    __CPROVER_assert(acquired ? tried == 1 : tried == word, "failed trylock leaves the word unchanged");
+    __CPROVER_assert(tried <= 2, "trylock does not overflow the futex word");
+    if (word == 0) {
+        __CPROVER_cover(1);
+    }
+    if (word == 1) {
+        __CPROVER_cover(1);
+    }
+    if (word == 2) {
+        __CPROVER_cover(1);
+    }
+}
+#else
 static atomic_uint mutex_word;
 static unsigned long counter;
 static atomic_uint wait_calls;
@@ -92,21 +170,47 @@ static long futex_wake(atomic_uint *word, unsigned count)
 static void mutex_lock(void)
 {
     unsigned expected = 0;
-    if (atomic_compare_exchange_strong_explicit(
-            &mutex_word, &expected, 1, memory_order_acquire, memory_order_relaxed)) {
+    int needs_wait = 0;
+    unsigned next = lock_transition(expected, &needs_wait);
+    if (!needs_wait
+        && atomic_compare_exchange_strong_explicit(
+            &mutex_word, &expected, next, memory_order_acquire, memory_order_relaxed)) {
         return;
     }
-    while (atomic_exchange_explicit(&mutex_word, 2, memory_order_acquire) != 0) {
-        if (futex_wait(&mutex_word, 2) < 0 && errno != EAGAIN && errno != EINTR) {
+    for (;;) {
+        unsigned stored = contended_lock_word();
+        unsigned previous = atomic_exchange_explicit(&mutex_word, stored, memory_order_acquire);
+        if (previous == 0) {
+            return;
+        }
+        if (futex_wait(&mutex_word, stored) < 0 && errno != EAGAIN && errno != EINTR) {
             die("futex wait");
         }
     }
 }
 
+__attribute__((used))
+static int mutex_trylock(void)
+{
+    unsigned expected = 0;
+    int acquired = 0;
+    unsigned next = trylock_transition(expected, &acquired);
+    if (!acquired) {
+        return 0;
+    }
+    if (atomic_compare_exchange_strong_explicit(
+            &mutex_word, &expected, next, memory_order_acquire, memory_order_relaxed)) {
+        return 1;
+    }
+    return 0;
+}
+
 static void mutex_unlock(void)
 {
     unsigned prev = atomic_exchange_explicit(&mutex_word, 0, memory_order_release);
-    if (prev == 2) {
+    int needs_wake = 0;
+    (void)unlock_transition(prev, &needs_wake);
+    if (needs_wake) {
         if (futex_wake(&mutex_word, 1) < 0) {
             die("futex wake");
         }
@@ -254,3 +358,4 @@ int main(int argc, char **argv)
     usage(argv[0]);
     return 2;
 }
+#endif

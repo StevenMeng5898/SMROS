@@ -880,14 +880,57 @@ fn driver_mmio_slot_base(base: usize, slot: usize, stride: usize) -> (out: Optio
 }
 
 fn driver_mmio_slot_base_direct(base: usize, slot: usize, stride: usize) -> (out: Option<usize>)
-    requires
-        stride > 0,
-        slot <= usize::MAX / stride,
-        base <= usize::MAX - (slot * stride),
     ensures
-        out.is_some(),
+        match out {
+            Some(slot_base) => driver_mmio_slot_base_spec(base as int, slot as int, stride as int)
+                == Some(slot_base as int),
+            None => driver_mmio_slot_base_spec(base as int, slot as int, stride as int)
+                == Option::<int>::None,
+        },
 {
-    smros_driver_mmio_slot_base_body!(base, slot, stride)
+    let out = smros_driver_mmio_slot_base_body!(base, slot, stride);
+    if stride == 0 {
+        assert(out == Some(base));
+        assert(driver_mmio_slot_base_spec(base as int, slot as int, stride as int) == Some(base as int));
+    } else if slot > usize::MAX / stride {
+        assert((slot as int) * (stride as int) > usize::MAX as int) by (nonlinear_arith)
+            requires
+                stride as int > 0,
+                slot as int > usize::MAX as int / stride as int,
+        ;
+        assert(out.is_none());
+        assert(driver_mmio_slot_base_spec(base as int, slot as int, stride as int) == Option::<int>::None);
+    } else {
+        assert((slot as int) * (stride as int) <= usize::MAX as int) by (nonlinear_arith)
+            requires
+                stride as int > 0,
+                slot as int <= usize::MAX as int / stride as int,
+        ;
+        let offset = slot * stride;
+        assert(offset as int == (slot as int) * (stride as int)) by (nonlinear_arith)
+            requires
+                stride as int > 0,
+                slot as int <= usize::MAX as int / stride as int,
+                offset == slot * stride,
+        ;
+        assert(out == base.checked_add(offset));
+        if base > usize::MAX - offset {
+            assert(out.is_none());
+            assert(driver_mmio_slot_base_spec(base as int, slot as int, stride as int) == Option::<int>::None);
+        } else {
+            let slot_base = base + offset;
+            assert(out == Some(slot_base));
+            assert(slot_base as int == base as int + offset as int) by (nonlinear_arith)
+                requires
+                    offset as int == (slot as int) * (stride as int),
+                    base <= usize::MAX - offset,
+                    slot_base == base + offset,
+            ;
+            assert(driver_mmio_slot_base_spec(base as int, slot as int, stride as int)
+                == Some(slot_base as int));
+        }
+    }
+    out
 }
 
 fn driver_virtio_identity_valid(
@@ -992,6 +1035,11 @@ fn driver_block_capacity_bytes_direct(blocks: usize, block_size: usize) -> (out:
     requires
         block_size > 0,
         blocks <= usize::MAX / block_size,
+    ensures
+        out == match blocks.checked_mul(block_size) {
+            Some(bytes) => bytes,
+            None => usize::MAX,
+        },
 {
     smros_driver_block_capacity_bytes_body!(blocks, block_size)
 }
@@ -1029,6 +1077,14 @@ fn driver_block_range_valid_direct(
         block_size > 0,
         blocks <= usize::MAX / block_size,
         offset <= usize::MAX - len,
+    ensures
+        out == match blocks.checked_mul(block_size) {
+            Some(capacity) => match offset.checked_add(len) {
+                Some(end) => end <= capacity,
+                None => false,
+            },
+            None => false,
+        },
 {
     smros_driver_block_range_valid_body!(offset, len, blocks, block_size)
 }
@@ -2485,6 +2541,13 @@ proof fn user_test_syscall_smoke() {
     ));
     assert(0x3C5u64 == smros_user_el1h_spsr_masked_body!());
     assert(0u64 == smros_user_syscall_should_advance_elr_body!());
+}
+
+fn verified_virtio_completion_timed_out(now: u64, deadline: u64) -> (out: bool)
+    ensures
+        out == (now >= deadline),
+{
+    smros_driver_virtio_completion_timed_out_body!(now, deadline)
 }
 
 } // verus!

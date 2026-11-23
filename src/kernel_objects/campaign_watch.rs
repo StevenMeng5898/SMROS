@@ -7,6 +7,8 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+include!("campaign_watch_logic_shared.rs");
+
 /// Guest-op budget. Nested Linux boot is allowed 60s; this stays above that
 /// and still fails a wedged iteration instead of hanging the campaign.
 pub const OP_DEADLINE_NANOS: u64 = 120_000_000_000;
@@ -41,7 +43,7 @@ pub fn exceeded(now_ns: u64) -> bool {
         return false;
     }
     let deadline = DEADLINE_NS.load(Ordering::Acquire);
-    deadline != 0 && now_ns >= deadline
+    smros_campaign_deadline_exceeded_body!(true, deadline, now_ns)
 }
 
 pub fn iteration() -> usize {

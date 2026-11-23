@@ -81,6 +81,17 @@ input_fifo="${SMROS_ST_LOG}.stdin"
 rm -f "$SMROS_ST_LOG" "$input_fifo"
 mkfifo "$input_fifo"
 exec 3<>"$input_fifo"
+echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "git_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+dirty_files="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' 2>/dev/null || true)"
+if [ -n "$dirty_files" ]; then
+    echo "git_dirty=true"
+    echo "dirty_files<<END"
+    printf '%s\n' "$dirty_files"
+    echo "END"
+else
+    echo "git_dirty=false"
+fi
 echo "Booting SMROS smoke test for up to ${SMROS_ST_TIMEOUT}s..."
 
 qemu_pid=""
@@ -95,24 +106,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-required_patterns_present() {
-    local missing=0
+# missing_patterns is filled by the latest check. Intermediate polls stay quiet:
+# a pattern that has not been printed yet is not a failure until the deadline.
+missing_patterns=()
+
+required_patterns_missing() {
     local pattern
     local required_patterns=()
-
+    missing_patterns=()
     IFS='|' read -r -a required_patterns <<< "$SMROS_ST_REQUIRED_PATTERNS"
     for pattern in "${required_patterns[@]}"; do
         if [ -z "$pattern" ]; then
             continue
         fi
-
         if ! grep -Fq "$pattern" "$SMROS_ST_LOG"; then
-            echo "missing required serial pattern: $pattern" >&2
-            missing=1
+            missing_patterns+=("$pattern")
         fi
     done
+    [ "${#missing_patterns[@]}" -gt 0 ]
+}
 
-    return "$missing"
+report_missing_patterns() {
+    local pattern
+    required_patterns_missing || return 0
+    echo "SMROS QEMU smoke test failed: required serial patterns are missing." >&2
+    for pattern in "${missing_patterns[@]}"; do
+        echo "missing required serial pattern: $pattern" >&2
+    done
+    return 1
 }
 
 pass_if_smoke_complete() {
@@ -126,8 +147,8 @@ pass_if_smoke_complete() {
         return
     fi
 
-    if required_patterns_present; then
-        echo "SMROS QEMU smoke test passed: found '$SMROS_ST_PROMPT' and required boot milestones."
+    if ! required_patterns_missing; then
+        echo "SMROS QEMU smoke test passed: found '$SMROS_ST_PROMPT' and every required serial pattern."
         echo "Log: $SMROS_ST_LOG"
         exit 0
     fi
@@ -163,9 +184,14 @@ done
 
 pass_if_smoke_complete
 
-echo "SMROS QEMU smoke test failed: did not find '$SMROS_ST_PROMPT'." >&2
+if grep -Fq "$SMROS_ST_PROMPT" "$SMROS_ST_LOG"; then
+    echo "SMROS QEMU smoke test failed: prompt '$SMROS_ST_PROMPT' was found, but required serial patterns were still missing." >&2
+    report_missing_patterns || true
+else
+    echo "SMROS QEMU smoke test failed: did not find '$SMROS_ST_PROMPT'." >&2
+    report_missing_patterns || true
+fi
 echo "QEMU exit status: $status" >&2
-required_patterns_present || true
 echo "Log tail:" >&2
 tail -n 80 "$SMROS_ST_LOG" >&2 || true
 exit 1

@@ -69,6 +69,8 @@ pub enum HermesHostTestJob {
     PosixBaseline,
     Launcher,
     Verus,
+    CbmcFutex,
+    FutexStress,
 }
 
 impl HermesHostTestJob {
@@ -87,6 +89,8 @@ impl HermesHostTestJob {
             Self::PosixBaseline => "posix-baseline",
             Self::Launcher => "launcher-test",
             Self::Verus => "verus",
+            Self::CbmcFutex => "cbmc-futex",
+            Self::FutexStress => "futex-stress",
         }
     }
 
@@ -105,6 +109,8 @@ impl HermesHostTestJob {
             "posix-baseline" => Self::PosixBaseline,
             "launcher-test" => Self::Launcher,
             "verus" => Self::Verus,
+            "cbmc-futex" => Self::CbmcFutex,
+            "futex-stress" => Self::FutexStress,
             _ => return None,
         })
     }

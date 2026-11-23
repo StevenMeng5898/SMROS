@@ -8,6 +8,36 @@ cd "$ROOT_DIR"
 
 status=0
 
+if [ -f verification/logs/verus-syscall.log ]; then
+    python3 - <<'PY'
+import json, pathlib, re
+root = pathlib.Path("verification/logs")
+names = [
+    "verus-syscall",
+    "verus-kernel-objects",
+    "verus-kernel-lowlevel",
+    "verus-user-level",
+    "verus-services",
+]
+first = (root / "verus-syscall.log").read_text()
+header = first.split("\n{", 1)[0]
+lines = ["===== make verus summary ====="]
+for key in ("utc", "git_head", "git_dirty"):
+    match = re.search(rf"^{key}=(.*)$", header, re.M)
+    if match:
+        lines.append(f"{key}={match.group(1)}")
+lines.append("Per-harness totals from Verus --output-json. Full JSON stays local and is not committed.")
+for name in names:
+    text = (root / f"{name}.log").read_text()
+    data, _ = json.JSONDecoder().raw_decode(text[text.find("{") :])
+    result = data.get("verification-results", {})
+    lines.append(
+        f"{name}: verified={result.get('verified')} errors={result.get('errors')} success={result.get('success')}"
+    )
+(root / "make-verus-summary.txt").write_text("\n".join(lines) + "\n")
+PY
+fi
+
 contains_fixed() {
     local needle="$1"
     local path="$2"
@@ -25,7 +55,13 @@ macro_lines() {
     grep -E -o '^macro_rules! [A-Za-z0-9_]+ ' "$path" || true
 }
 
-shared_files="$(find src -type f -name '*_logic_shared.rs' | sort)"
+shared_files="$(
+    find src -type f -name '*_logic_shared.rs'
+    printf '%s\n' \
+        src/syscall/syscall_bridge_shared.rs \
+        src/syscall/linux_runtime_lock_shared.rs
+)"
+shared_files="$(printf '%s\n' "$shared_files" | sort -u)"
 
 for src_file in $shared_files; do
     include_path="../../../$src_file"
@@ -67,6 +103,38 @@ find src -type f \( -name '*.rs' -o -name '*.S' \) | sort >"$generated_file"
 
 if ! diff -u "$generated_file" "$classified_file"; then
     echo "docs/VERUS_COVERAGE.md must classify every src/*.rs and src/*.S file" >&2
+    status=1
+fi
+
+# Each inventory line must carry exactly one of the six coverage labels.
+# This check is in addition to the path-set diff above.
+if ! python3 - <<'PY'
+import pathlib, re, sys
+text = pathlib.Path("docs/VERUS_COVERAGE.md").read_text()
+lines = text.splitlines()
+path_re = re.compile(r"^- `(src/.*\.(?:rs|S))`$")
+label_re = re.compile(r"^  - (已证明|待证明|公理或可信计算基|规范假设|超出范围|未覆盖)$")
+missing = []
+for index, line in enumerate(lines):
+    if not path_re.match(line):
+        continue
+    if index + 1 >= len(lines) or not label_re.match(lines[index + 1]):
+        missing.append(line)
+if missing:
+    print("docs/VERUS_COVERAGE.md entry is missing exactly one coverage label:", file=sys.stderr)
+    for line in missing:
+        print(line, file=sys.stderr)
+    sys.exit(1)
+PY
+then
+    status=1
+fi
+
+if ! python3 scripts/audit-verus-proofs.py --self-test; then
+    status=1
+fi
+
+if ! python3 scripts/audit-verus-proofs.py; then
     status=1
 fi
 
