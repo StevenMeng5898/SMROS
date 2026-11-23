@@ -1,11 +1,18 @@
 ===== posix-baseline cases =====
-utc=2026-11-23T13:53:37Z
-git_head=61d48f89614b255b4791298f92c45961c70ffd87
-git_describe=61d48f8
-run_id=2648649119f6af4d32aee104c5640673
-results_sha256=9dab9e9264bd8572072af0028025761086b5e7aff26b7af69b55774663a254ef
-smros_commit=61d48f89614b255b4791298f92c45961c70ffd87
-hermes_line=posix-baseline=1365/235/0
-status_counts={"crash": 25, "fail": 67, "pass": 1365, "timeout": 5, "unresolved": 122, "unsupported": 5, "untested": 11}
-changed_from_3bd7e41=37
-The host stage line in the campaign serial carries this run_id and results_sha256.
+campaign_utc=2026-11-23T15:56:39Z
+git_head=479b0b5f
+git_describe=479b0b5
+run_id=63ee1e62ce89ed0bd4f8f01ab66a8562
+results_sha256=aa08838af973b53e30824a313c0d4b2058a13a71d45aeacb810e32bce2ae9536
+smros_commit=0d201b3dedfd47f48946b3ba2363b9731474f452
+hermes_line=posix-baseline=1357/243/0
+emfile=0
+qemu_user=/usr/bin/qemu-aarch64-static
+rlimit_nofile=524288
+mqueue_queues_max=256
+mqueue_msg_max=10
+mqueue_msgsize_max=8192
+Three isolated message-queues runs (127 tests) had emfile=0 and 0 status differences.
+The agreed bound for those isolated runs is 0 differing cases.
+status_counts={"crash": 27, "fail": 61, "pass": 1357, "timeout": 6, "unresolved": 128, "unsupported": 5, "untested": 16}
+changed_from_61d48f8_full_suite=31

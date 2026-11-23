@@ -1,0 +1,16 @@
+===== isolated message-queues baselines =====
+git_describe=0d201b3dedfd47f48946b3ba2363b9731474f452
+The ELF-only follow-up 479b0b5 does not change this path. Real qemu-user is ELF, so these three runs used the private mqueue namespace.
+runs=3
+selected=127
+passed=40
+emfile=0
+status_differences=0
+bound=0
+qemu_user=/usr/bin/qemu-aarch64-static
+rlimit_nofile=524288
+mqueue_queues_max=256
+mqueue_msg_max=10
+mqueue_msgsize_max=8192
+Each test ran under unshare --user --mount --map-root-user with a private tmpfs on /dev/mqueue.
+The CLI exits 1 because 87 of 127 reference cases do not pass. That is the published reference, not an EMFILE failure.
