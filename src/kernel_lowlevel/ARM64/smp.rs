@@ -249,6 +249,18 @@ fn psci_system_reset_smc() -> i64 {
     x0 as i64
 }
 
+/// Pending-signal wake and `block_thread` are ordinary stores. They are a
+/// specification assumption for one hardware CPU with IRQs masked, not an SMP
+/// proof. Flipping this without a new proof is a build failure, and it does
+/// not by itself boot secondary CPUs.
+pub const SIGNAL_WAKE_SMP_UNPROVEN: bool = true;
+
+const _: () = {
+    if !SIGNAL_WAKE_SMP_UNPROVEN {
+        panic!("signal-wake SMP proof is not in this tree; keep the SEC-2 single-core gate");
+    }
+};
+
 /// Boot a secondary CPU.
 ///
 /// SEC-2 keeps the machine single-core. This returns an error and does not
@@ -315,6 +327,11 @@ pub fn boot_all_cpus() {
         per_cpu.cpu_info[i].stack_ptr = 0;
     }
     per_cpu.online_count.store(1, Ordering::Relaxed);
+    // The signal-wait protocol is bound to this single online CPU.
+    assert!(
+        SIGNAL_WAKE_SMP_UNPROVEN && per_cpu.online_count.load(Ordering::Relaxed) == 1,
+        "SEC-2 single-core gate"
+    );
 
     serial.write_str("[SMP] Hardware-online CPUs: 1 (boot CPU only)\n");
 }

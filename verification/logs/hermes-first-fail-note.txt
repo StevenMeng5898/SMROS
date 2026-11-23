@@ -1,0 +1,17 @@
+===== first Hermes overall=FAIL =====
+This serial log is the campaign that failed before the leftover QEMU processes were killed.
+The summary line below is copied from that log.
+
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=90/1/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=8/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1397/203/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=FAIL
+Hermes test-all result: FAIL
+
+Leftover QEMU processes observed on the host while that campaign's sectest and baseline were running
+(ps -eo pid,etime,cmd). Both were still attached to target/g2b.img from earlier g2 runs and were not
+the Hermes guest:
+
+  767493  02:02:10  qemu-system-aarch64 ... -drive file=target/g2b.img ...
+  771034  01:34:30  qemu-system-aarch64 ... -drive file=target/g2b.img ...
+
+The Hermes guest at that moment was a different pid on target/hermes.img.
+sectest's first case was: CASE el0-read-kernel-ram RESULT FAIL timeout
+After those two processes were killed, a later campaign on the same kernel passed sectest 91/0/0/0.

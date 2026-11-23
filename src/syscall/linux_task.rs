@@ -464,6 +464,7 @@ pub(crate) fn security_plant_blocked_task(
 ) -> Option<(usize, usize)> {
     with_runtime(|runtime| {
         let reservation = runtime.tasks.reserve_child(0, scheduler_thread)?;
+        clear_group_continue(scheduler_thread);
         runtime.tasks.tasks[reservation.slot].tgid = reservation.tid;
         if !runtime.tasks.publish(reservation) {
             let _ = runtime.tasks.rollback(reservation);
@@ -759,6 +760,7 @@ pub(crate) fn reserve_fork_task(scheduler_id: ThreadId) -> Result<LinuxTaskReser
             .tasks
             .reserve_child(0, scheduler_id.0)
             .ok_or(SysError::EAGAIN)?;
+        clear_group_continue(scheduler_id.0);
         let task = &mut runtime.tasks.tasks[reservation.slot];
         task.tgid = reservation.tid;
         super::linux_process::prepare_linux_fork_task_signal_state(
@@ -891,6 +893,13 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
                 .tasks
                 .by_scheduler(scheduler_thread.0)
                 .ok_or(SysError::ESRCH)?;
+            // A continue bit left on a running thread must not survive this
+            // new stop. Clear it in the same task-lock section as the block.
+            if reason == LinuxBlockReason::Stopped
+                && task.state == LinuxTaskState::Runnable
+            {
+                clear_group_continue(scheduler_thread.0);
+            }
             if !runtime.tasks.block(task.tid, scheduler_thread.0, reason) {
                 return Err(SysError::EAGAIN);
             }
@@ -910,10 +919,11 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
                         scheduler_thread.0
                     );
                 }
-                // The timer may have completed this wait after the task table
-                // said Blocked and before the scheduler thread did. The bit is
-                // set under the task lock before that observation, and this
-                // recheck runs under the same lock.
+                // Single-core only: block_current masks IRQs, so the timer
+                // cannot run between the task-table block and this call.
+                // The pending bit itself is an atomic read, not a task-lock
+                // critical section, and block_thread is an ordinary store.
+                // SMP store-to-load reordering of that pair is not proved.
                 honor_pending_signal_wake(scheduler_thread.0);
             }
             if reason == LinuxBlockReason::Stopped {
@@ -1223,11 +1233,15 @@ pub(crate) fn park_runnable_group_for_stop(tgid: usize) -> Result<bool, SysError
 }
 
 pub(crate) fn wake_stopped_group(tgid: usize) -> usize {
-    // Cover threads that are not Stopped yet. A continue that only wakes the
-    // threads already in the task table loses the race with block_thread.
+    // Only a thread that is already Stopped may carry the continue bit.
+    // Marking a running thread lets that bit undo a later SIGTSTP.
     with_runtime(|runtime| {
         for task in runtime.tasks.tasks.iter().copied() {
-            if task.tgid == tgid && task.scheduler_thread != 0 {
+            if task.tgid == tgid
+                && task.scheduler_thread != 0
+                && task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::Stopped
+            {
                 note_pending_group_continue(task.scheduler_thread);
             }
         }
@@ -1311,6 +1325,7 @@ fn retire_tasks(scope: LinuxTaskRetirementScope) -> (Vec<LinuxChildExitTransitio
             else {
                 return false;
             };
+            clear_group_continue(task.scheduler_thread);
             if !runtime.tasks.retire(task.tid, task.scheduler_thread) {
                 return false;
             }
@@ -1733,6 +1748,7 @@ mod aarch64_clone {
                 .tasks
                 .reserve_child(parent.tgid, scheduler_id.0)
                 .ok_or(SysError::EAGAIN)?;
+            clear_group_continue(scheduler_id.0);
             if !runtime.tasks.inherit_signal_mask(reservation, current.0) {
                 let _ = runtime.tasks.rollback(reservation);
                 return Err(SysError::EAGAIN);
@@ -2089,6 +2105,7 @@ mod riscv64_clone {
                 .tasks
                 .reserve_child(parent.tgid, scheduler_id.0)
                 .ok_or(SysError::EAGAIN)?;
+            clear_group_continue(scheduler_id.0);
             if !runtime.tasks.inherit_signal_mask(reservation, current.0) {
                 let _ = runtime.tasks.rollback(reservation);
                 return Err(SysError::EAGAIN);

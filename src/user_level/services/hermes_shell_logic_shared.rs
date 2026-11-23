@@ -157,9 +157,10 @@ pub enum HermesExtraStage {
     Fuzzsc = 13,
     CbmcFutex = 14,
     FutexStress = 15,
+    SignalInterleave = 16,
 }
 
-pub const HERMES_EXTRA_STAGE_COUNT: usize = 16;
+pub const HERMES_EXTRA_STAGE_COUNT: usize = 17;
 pub const HERMES_GUEST_CASE_COUNT: usize = 8;
 /// `sectest all` listed probes plus the heap-fork and elf-memsz kernel cases.
 pub const HERMES_SECTEST_ALL_CASES: usize = 91;
@@ -181,7 +182,7 @@ pub const HERMES_SECTEST_ONE_ID: &str = "el0-read-kernel-ram";
 /// `make posix-run` and `make posix-report` stay out of this list: they boot a
 /// second SMROS for the same 1600-test manifest the opening `posixtest all`
 /// already executed, and that runner's guest-start check cannot share this VM.
-pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 14] = [
+pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 15] = [
     HermesExtraStage::El0,
     HermesExtraStage::Skt,
     HermesExtraStage::St,
@@ -195,6 +196,7 @@ pub const HERMES_CLOSING_STAGE_ORDER: [HermesExtraStage; 14] = [
     HermesExtraStage::Verus,
     HermesExtraStage::CbmcFutex,
     HermesExtraStage::FutexStress,
+    HermesExtraStage::SignalInterleave,
     HermesExtraStage::Fuzzsc,
 ];
 
@@ -221,6 +223,7 @@ impl HermesExtraStage {
             13 => Self::Fuzzsc,
             14 => Self::CbmcFutex,
             15 => Self::FutexStress,
+            16 => Self::SignalInterleave,
             _ => return None,
         })
     }
@@ -244,6 +247,7 @@ pub fn extra_stage_name(stage: HermesExtraStage) -> &'static str {
         HermesExtraStage::Fuzzsc => "fuzzsc",
         HermesExtraStage::CbmcFutex => "cbmc-futex",
         HermesExtraStage::FutexStress => "futex-stress",
+        HermesExtraStage::SignalInterleave => "signal-interleave",
     }
 }
 
@@ -294,6 +298,7 @@ const HOST_STAGE_NAMES: &[&str] = &[
     "verus",
     "cbmc-futex",
     "futex-stress",
+    "signal-interleave",
 ];
 
 pub fn host_stage_name(name: &str) -> Option<&'static str> {

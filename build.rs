@@ -1398,10 +1398,61 @@ fn emit_host_share(
     link_host_share_archive(out_dir);
 }
 
+fn git_stdout(manifest_dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(manifest_dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()
+}
+
+fn git_worktree_path(manifest_dir: &Path, name: &str) -> Option<PathBuf> {
+    let text = git_stdout(manifest_dir, &["rev-parse", "--git-path", name])?;
+    let relative = text.trim();
+    if relative.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(relative);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(manifest_dir.join(path))
+    }
+}
+
+fn emit_compiled_commit(manifest_dir: &Path) {
+    if let Some(head) = git_worktree_path(manifest_dir, "HEAD") {
+        println!("cargo:rerun-if-changed={}", head.display());
+        if let Ok(text) = fs::read_to_string(&head) {
+            if let Some(rest) = text.strip_prefix("ref: ") {
+                if let Some(target) = git_worktree_path(manifest_dir, rest.trim()) {
+                    println!("cargo:rerun-if-changed={}", target.display());
+                }
+            }
+        }
+    }
+    let commit = git_stdout(manifest_dir, &["rev-parse", "HEAD"])
+        .map(|text| text.trim().to_string())
+        .filter(|text| text.len() == 40 && text.chars().all(|character| character.is_ascii_hexdigit()))
+        .unwrap_or_else(|| "unknown".to_string());
+    let describe = git_stdout(manifest_dir, &["describe", "--always", "--dirty"])
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| commit.clone());
+    println!("cargo:rustc-env=SMROS_GIT_COMMIT={commit}");
+    println!("cargo:rustc-env=SMROS_GIT_DESCRIBE={describe}");
+}
+
 fn main() {
     configure_linker();
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    emit_compiled_commit(&manifest_dir);
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target = env::var("TARGET").unwrap();
     let host_share_root = manifest_dir.join(HOST_SHARE_DIR);

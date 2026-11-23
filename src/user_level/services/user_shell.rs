@@ -399,6 +399,12 @@ impl UserShell {
         self.print("╚═══════════════════════════════════════════════════════════╝\n");
         self.print("\n");
         self.print("Welcome to SMROS shell!\n");
+        self.print("smros_commit=");
+        self.print(env!("SMROS_GIT_COMMIT"));
+        self.print("\n");
+        self.print("smros_describe=");
+        self.print(env!("SMROS_GIT_DESCRIBE"));
+        self.print("\n");
         self.print("Type 'help' for available commands.\n\n");
     }
 
@@ -5499,7 +5505,7 @@ fn print_hermes_usage(ctx: &mut ShellContext) {
         "       default test-all includes lvgl/qml/testsc/posixtest and runs posixtest all plus sectest all once\n",
     );
     ctx.serial.write_str(
-        "       stage skip switches: guest el0 skt st posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline launcher-test verus cbmc-futex futex-stress testsc fuzzsc\n",
+        "       stage skip switches: guest el0 skt st posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline launcher-test verus cbmc-futex futex-stress signal-interleave testsc fuzzsc\n",
     );
     ctx.serial
         .write_str("       mode=syscall selects testsc/fuzzsc/hermes test/posixtest\n");
@@ -5744,9 +5750,10 @@ fn run_hermes_guest_case(path: &str) -> HermesGuestCaseResult {
         return HermesGuestCaseResult::Fail;
     }
     let start = scheduler::scheduler().get_tick_count();
-    // g2_stop_group's 1000-round multithreaded STOP/CONT hammer needs more
-    // than a minute on the single boot CPU. 180s still fails a hang.
-    let deadline_ticks = 100u64.saturating_mul(180);
+    // g2's 1000-round stop/cont hammer needs more than a minute. The other
+    // guest cases stay on the original 60s budget.
+    let deadline_seconds = if path.contains("g2_stop_group") { 180 } else { 60 };
+    let deadline_ticks = 100u64.saturating_mul(deadline_seconds);
     loop {
         if let Some(result) = run_elf::take_captured_exit() {
             run_elf::end_capture();
@@ -6150,6 +6157,42 @@ fn append_hermes_suite_report(
     }
 }
 
+fn hermes_image_matches_host(ctx: &mut ShellContext) -> bool {
+    let image = env!("SMROS_GIT_COMMIT");
+    let describe = env!("SMROS_GIT_DESCRIBE");
+    ctx.serial.write_str("smros_commit=");
+    ctx.serial.write_str(image);
+    ctx.serial.write_str(" describe=");
+    ctx.serial.write_str(describe);
+    ctx.serial.write_str("\n");
+    if describe.contains("-dirty") {
+        ctx.serial
+            .write_str("Hermes commit check FAIL image-dirty\n");
+        return false;
+    }
+    match crate::user_level::services::vm_host::host_git_identity() {
+        Ok((head, dirty)) => {
+            if dirty {
+                ctx.serial
+                    .write_str("Hermes commit check FAIL host-dirty\n");
+                return false;
+            }
+            if head != image {
+                ctx.serial
+                    .write_str("Hermes commit check FAIL smros_commit!=git_head\n");
+                return false;
+            }
+            ctx.serial.write_str("Hermes commit check PASS\n");
+            true
+        }
+        Err(_) => {
+            ctx.serial
+                .write_str("Hermes commit check FAIL host-identity\n");
+            false
+        }
+    }
+}
+
 fn run_hermes_test_all(ctx: &mut ShellContext, args: &[&str]) {
     let Some(options) =
         crate::user_level::services::hermes_shell_logic_shared::parse_campaign_options(args)
@@ -6179,6 +6222,10 @@ fn run_hermes_test_all_inner(
     } else {
         "\n=== Hermes Full Test Orchestration ===\n"
     });
+    if !hermes_image_matches_host(ctx) {
+        ctx.serial.write_str("Hermes test-all result: FAIL\n");
+        return;
+    }
     if resumed {
         ctx.serial.write_str("Hermes resume test-all seed=");
         print_u64(&mut ctx.serial, seed);

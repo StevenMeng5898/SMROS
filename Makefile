@@ -244,7 +244,32 @@ guest-cases:
 		if [ "$$base" = "g2_stop_group" ]; then extra="-pthread"; fi; \
 		echo "guest-cases: $$base.elf"; \
 		$(GUEST_CC) $(GUEST_CFLAGS) $$extra -I tests/guest $(GUEST_LDFLAGS) $$extra -o "host_shared/$$base.elf" "$$src"; \
+		if [ "$$base" = "g2_stop_group" ]; then \
+			sha=$$(sha256sum "host_shared/$$base.elf" | awk '{print $$1}'); \
+			{ \
+				echo "command=$(GUEST_CC) $(GUEST_CFLAGS) -pthread -I tests/guest $(GUEST_LDFLAGS) -pthread -o host_shared/$$base.elf $$src"; \
+				echo "sha256=$$sha"; \
+			} > "host_shared/$$base.build.txt"; \
+		fi; \
 	done
+
+# Explicit-state signal models. Fixed builds must report bad/lost=0.
+# Broken builds must fail, which is how the reviewed windows stay visible.
+signal-interleave:
+	@set -e; \
+	cc -O2 -o /tmp/smros-stop-fixed verification/signal/stop_cont_interleave.c; \
+	cc -O2 -DBROKEN_STOP_CONT -o /tmp/smros-stop-broken verification/signal/stop_cont_interleave.c; \
+	cc -O2 -o /tmp/smros-wake-fixed verification/signal/signal_wake_interleave.c; \
+	cc -O2 -DBROKEN_SIGNAL_WAKE -o /tmp/smros-wake-broken verification/signal/signal_wake_interleave.c; \
+	cc -O2 -o /tmp/smros-stale-fixed verification/signal/stale_continue_interleave.c; \
+	cc -O2 -DBROKEN_STALE_CONTINUE -o /tmp/smros-stale-broken verification/signal/stale_continue_interleave.c; \
+	echo -n "stop_fixed "; /tmp/smros-stop-fixed; \
+	echo -n "wake_fixed "; /tmp/smros-wake-fixed; \
+	echo -n "stale_fixed "; /tmp/smros-stale-fixed; \
+	if /tmp/smros-stop-broken; then echo "stop broken model lost=0"; exit 1; fi; \
+	if /tmp/smros-wake-broken; then echo "wake broken model lost=0"; exit 1; fi; \
+	if /tmp/smros-stale-broken; then echo "stale broken model bad=0"; exit 1; fi; \
+	echo "signal-interleave: fixed bad/lost=0, broken bad/lost>0"
 
 # Run with QEMU (simple mode)
 run: build $(FXFS_DISK) qemu-icmp vm-launcher

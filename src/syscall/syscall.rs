@@ -5691,28 +5691,35 @@ fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) -> Res
     Ok(())
 }
 
+pub(crate) fn forget_signal_trampoline_slot(slot: usize) {
+    if slot < LINUX_SIGNAL_TRAMPOLINE.len() {
+        LINUX_SIGNAL_TRAMPOLINE[slot].store(0, Ordering::SeqCst);
+    }
+}
+
+fn linux_signal_trampoline_bytes() -> [u8; 16] {
+    #[cfg(target_arch = "aarch64")]
+    let instructions = [0xd63f_0200u32, 0xd280_1168, 0xd400_0001, 0xd420_0000];
+    #[cfg(target_arch = "riscv64")]
+    let instructions = [0x08b0_0893u32, 0x0000_0073, 0x0010_0073, 0x0000_0013];
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    let instructions = [0u32; 4];
+    let mut bytes = [0u8; 16];
+    for (index, instruction) in instructions.iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&instruction.to_ne_bytes());
+    }
+    bytes
+}
+
 fn linux_signal_trampoline_matches(address: usize) -> bool {
-    if !linux_user_buffer_readable(address, 4) {
+    if !linux_process_memory::user_range_rx_only(address, 16) {
         return false;
     }
-    let mut bytes = [0u8; 4];
+    let mut bytes = [0u8; 16];
     if linux_copy_from_user(address, &mut bytes).is_err() {
         return false;
     }
-    let word = u32::from_ne_bytes(bytes);
-    #[cfg(target_arch = "aarch64")]
-    {
-        word == 0xd63f_0200
-    }
-    #[cfg(target_arch = "riscv64")]
-    {
-        word == 0x08b0_0893
-    }
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    {
-        let _ = word;
-        false
-    }
+    bytes == linux_signal_trampoline_bytes()
 }
 
 fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
@@ -5732,16 +5739,7 @@ fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
         0,
         0,
     )?;
-    #[cfg(target_arch = "aarch64")]
-    let instructions = [0xd63f_0200u32, 0xd280_1168, 0xd400_0001, 0xd420_0000];
-    #[cfg(target_arch = "riscv64")]
-    let instructions = [0x08b0_0893u32, 0x0000_0073, 0x0010_0073, 0x0000_0013];
-    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-    let instructions = [0u32; 4];
-    let mut instruction_bytes = [0u8; 16];
-    for (index, instruction) in instructions.iter().enumerate() {
-        instruction_bytes[index * 4..index * 4 + 4].copy_from_slice(&instruction.to_ne_bytes());
-    }
+    let instruction_bytes = linux_signal_trampoline_bytes();
     linux_copy_to_user(mapped, &instruction_bytes)?;
     crate::kernel_lowlevel::cpu::sync_instruction_cache();
     sys_mprotect(
@@ -13688,6 +13686,9 @@ pub fn sys_execve(path: usize, argv: usize, _envp: usize) -> SysResult {
     info!("execve: path={:#x}", path);
 
     let path = linux_user_cstr(path, LINUX_PATH_MAX_BYTES)?;
+    if let Ok(slot) = linux_process::current_running_slot() {
+        forget_signal_trampoline_slot(slot);
+    }
     let arg1 = linux_user_argv_string(argv, 1, LINUX_PATH_MAX_BYTES)?;
     if let Some(exit_code) = syscall_logic::linux_exec_builtin_exit_code(path.as_str()) {
         let pid = linux_process::current_pid()?;

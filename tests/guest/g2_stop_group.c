@@ -986,6 +986,9 @@ static int test_stop_cont_hammer(void)
 			printf("FAIL hammer round %d did not stop\n", round);
 			return 1;
 		}
+		for (i = 0; i < 4; i++)
+			sample[i] = state->spin[i];
+		usleep(50000);
 		if (!counters_held(state, sample)) {
 			printf("FAIL hammer round %d ran while stopped\n", round);
 			return 1;
@@ -1006,6 +1009,142 @@ static int test_stop_cont_hammer(void)
 	kill(child, SIGKILL);
 	waitpid(child, NULL, 0);
 	printf("PASS stop/cont hammer x1000\n");
+	return 0;
+}
+
+static void *stale_sleeper(void *arg)
+{
+	volatile unsigned *started = arg;
+	struct timespec delay = { .tv_sec = 2, .tv_nsec = 0 };
+
+	*started = 1;
+	nanosleep(&delay, NULL);
+	return NULL;
+}
+
+static int test_queued_sigtstp_stays_stopped(void)
+{
+	struct hammer_state *state = (struct hammer_state *)group_state_map();
+	pthread_t sleeper;
+	pthread_t spinner;
+	pid_t child;
+	unsigned frozen;
+	int status = 0;
+
+	child = fork();
+	if (child < 0) {
+		perror("fork queued SIGTSTP");
+		return 1;
+	}
+	if (child == 0) {
+		if (pthread_create(&sleeper, NULL, stale_sleeper,
+				   (void *)&state->spin[1]) != 0)
+			_exit(1);
+		if (pthread_create(&spinner, NULL, hammer_spin,
+				   (void *)&state->spin[0]) != 0)
+			_exit(1);
+		for (;;)
+			pause();
+	}
+	if (wait_until(&state->spin[0], "queued spinner") != 0)
+		return 1;
+	if (wait_until(&state->spin[1], "queued sleeper") != 0)
+		return 1;
+	if (kill(child, SIGCONT) != 0) {
+		perror("queued SIGCONT");
+		return 1;
+	}
+	if (kill(child, SIGTSTP) != 0) {
+		perror("queued SIGTSTP");
+		return 1;
+	}
+	if (poc_expect_status(child, WUNTRACED, 0x147f, "queued SIGTSTP") != 0)
+		return 1;
+	frozen = state->spin[0];
+	usleep(100000);
+	if (state->spin[0] != frozen) {
+		printf("FAIL queued SIGTSTP moved while stopped (%u -> %u)\n",
+		       frozen, state->spin[0]);
+		return 1;
+	}
+	if (kill(child, SIGCONT) != 0) {
+		perror("queued SIGCONT resume");
+		return 1;
+	}
+	if (poc_expect_status(child, WCONTINUED, 0xffff, "queued SIGCONT") != 0)
+		return 1;
+	kill(child, SIGKILL);
+	waitpid(child, &status, 0);
+	printf("PASS queued SIGTSTP stayed stopped\n");
+	return 0;
+}
+
+static int test_signal_after_fork(void)
+{
+	volatile unsigned *page = poc_shared_progress();
+	pid_t child;
+	int status = 0;
+
+	memset((void *)page, 0, 4096);
+	handled_signum = 0;
+	handler_slot = &page[0];
+	child = fork();
+	if (child < 0) {
+		perror("fork signal return");
+		return 1;
+	}
+	if (child == 0) {
+		if (raw_sigaction(SIGUSR2, catch_stop) != 0)
+			_exit(2);
+		if (raise(SIGUSR2) != 0)
+			_exit(3);
+		_exit(handled_signum == SIGUSR2 ? 0 : 4);
+	}
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != 0 || page[0] != 2) {
+		printf("FAIL signal after fork status=0x%x slot=%u\n", status,
+		       page[0]);
+		return 1;
+	}
+	printf("PASS signal after fork\n");
+	return 0;
+}
+
+static int test_signal_after_exec(void)
+{
+	pid_t child;
+	int status = 0;
+
+	child = fork();
+	if (child < 0) {
+		perror("fork signal after exec");
+		return 1;
+	}
+	if (child == 0) {
+		char *argv[] = { "g2_stop_group.elf", "after-exec", NULL };
+
+		if (raw_sigaction(SIGUSR2, catch_stop) != 0)
+			_exit(2);
+		if (raise(SIGUSR2) != 0 || handled_signum != SIGUSR2)
+			_exit(3);
+		handled_signum = 0;
+		execve("/shared/g2_stop_group.elf", argv, NULL);
+		if (errno != ENOSYS)
+			_exit(4);
+		/* execve did not replace the image. The kernel still drops the
+		 * trampoline slot, and the next signal return must install one. */
+		if (raw_sigaction(SIGUSR2, catch_stop) != 0)
+			_exit(5);
+		if (raise(SIGUSR2) != 0 || handled_signum != SIGUSR2)
+			_exit(6);
+		_exit(0);
+	}
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != 0) {
+		printf("FAIL signal after exec status=0x%x\n", status);
+		return 1;
+	}
+	printf("PASS signal after exec\n");
 	return 0;
 }
 
@@ -1034,6 +1173,13 @@ static int test_one_nanosecond_sigtimedwait(int count)
 
 int main(int argc, char **argv)
 {
+	if (argc > 1 && strcmp(argv[1], "after-exec") == 0) {
+		if (raw_sigaction(SIGUSR2, catch_stop) != 0)
+			return 2;
+		if (raise(SIGUSR2) != 0)
+			return 3;
+		return handled_signum == SIGUSR2 ? 0 : 4;
+	}
 	if (argc > 1 && strcmp(argv[1], "handler") == 0)
 		return test_caught_sigtstp();
 	if (argc > 1 && strcmp(argv[1], "hammer") == 0)
@@ -1080,6 +1226,12 @@ int main(int argc, char **argv)
 	if (test_default_stop(SIGTTOU, "default SIGTTOU") != 0)
 		return 1;
 	if (test_exit_sigstop_reaps() != 0)
+		return 1;
+	if (test_queued_sigtstp_stays_stopped() != 0)
+		return 1;
+	if (test_signal_after_fork() != 0)
+		return 1;
+	if (test_signal_after_exec() != 0)
 		return 1;
 	if (test_stop_cont_hammer() != 0)
 		return 1;

@@ -1,0 +1,2 @@
+command=aarch64-linux-gnu-gcc -O2 -Wall -Wextra -fPIE -pthread -I tests/guest -pie -Wl,-dynamic-linker,/lib/ld-linux-aarch64.so.1 -Wl,-z,now -pthread -o host_shared/g2_stop_group.elf tests/guest/g2_stop_group.c
+sha256=e4fa1dab7fa6080a1d328b24c08229af0421a78f40ef63198d9ddcefdef7b27a

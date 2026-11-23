@@ -224,6 +224,27 @@ def stop_qemu(values: dict[str, str]) -> str:
     return "OK stopped=none\n"
 
 
+def git_commit_full() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    commit = result.stdout.strip()
+    if (
+        result.returncode == 0
+        and len(commit) == 40
+        and all(character in "0123456789abcdef" for character in commit)
+    ):
+        return commit
+    return "unknown"
+
+
 def git_commit() -> str:
     try:
         result = subprocess.run(
@@ -294,12 +315,15 @@ def argv_token(job: str) -> str:
 
 
 COMMIT = git_commit()
+GIT_HEAD = git_commit_full()
+GIT_DIRTY = git_dirty()
 FINGERPRINT = code_fingerprint()
 
 
 def launcher_status() -> str:
     return (
         f"OK version={LAUNCHER_VERSION} commit={wire_token(COMMIT)} "
+        f"git_head={GIT_HEAD} dirty={1 if GIT_DIRTY else 0} "
         f"fingerprint={FINGERPRINT} "
         f"root={wire_token(str(ROOT))} argv_ut={argv_token('ut')} "
         f"host_jobs_inflight={host_jobs_inflight()} "
@@ -369,6 +393,7 @@ def fixed_test_jobs() -> set[str]:
         "verus",
         "cbmc-futex",
         "futex-stress",
+        "signal-interleave",
     }
 
 

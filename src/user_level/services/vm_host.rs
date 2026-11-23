@@ -71,6 +71,7 @@ pub enum HermesHostTestJob {
     Verus,
     CbmcFutex,
     FutexStress,
+    SignalInterleave,
 }
 
 impl HermesHostTestJob {
@@ -91,6 +92,7 @@ impl HermesHostTestJob {
             Self::Verus => "verus",
             Self::CbmcFutex => "cbmc-futex",
             Self::FutexStress => "futex-stress",
+            Self::SignalInterleave => "signal-interleave",
         }
     }
 
@@ -111,6 +113,7 @@ impl HermesHostTestJob {
             "verus" => Self::Verus,
             "cbmc-futex" => Self::CbmcFutex,
             "futex-stress" => Self::FutexStress,
+            "signal-interleave" => Self::SignalInterleave,
             _ => return None,
         })
     }
@@ -263,6 +266,28 @@ fn transact_launcher(request: &[u8]) -> Result<[u8; MAX_RESPONSE_BYTES], VmHostE
             Err(err)
         }
     }
+}
+
+pub fn host_git_identity() -> Result<(String, bool), VmHostError> {
+    let response = transact_launcher(b"SMROS_VM_PING 1\nname=__smros_git__\nend\n")?;
+    let text = core::str::from_utf8(&response).map_err(|_| VmHostError::ResponseInvalid)?;
+    let text = text.trim_end_matches('\0');
+    if !text.starts_with("OK ") {
+        return Err(VmHostError::HostUnavailable);
+    }
+    let mut head = "";
+    let mut dirty = None;
+    for field in text.split_whitespace() {
+        if let Some(value) = field.strip_prefix("git_head=") {
+            head = value;
+        } else if let Some(value) = field.strip_prefix("dirty=") {
+            dirty = Some(value == "1");
+        }
+    }
+    if head.len() != 40 || dirty.is_none() {
+        return Err(VmHostError::ResponseInvalid);
+    }
+    Ok((String::from(head), dirty.unwrap_or(true)))
 }
 
 fn wait_poll_interval(deadline_ns: u64) {

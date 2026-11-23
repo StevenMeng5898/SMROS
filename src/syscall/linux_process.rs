@@ -296,6 +296,9 @@ pub(crate) fn with_signal_state<R>(
 
 pub(crate) fn reset_current_signal_state() -> Result<(), SysError> {
     let pid = current_pid()?;
+    if let Ok(slot) = current_running_slot() {
+        super::forget_signal_trampoline_slot(slot);
+    }
     with_signal_state(pid, |signal_actions, process_pending| {
         signal_actions.fill(LinuxKernelSigaction::DEFAULT);
         process_pending.reset_in_place();
@@ -658,6 +661,7 @@ fn finish_terminal_process(
                     return Err(SysError::ESRCH);
                 }
                 runtime.signal_states[child_slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+                super::forget_signal_trampoline_slot(child_slot);
                 let _ = runtime.processes.reparent_children_to_launch_reaper(pid);
                 return Ok(None);
             }
@@ -684,6 +688,7 @@ fn finish_terminal_process(
                 .terminate_child(pid, wait_status, policy)
                 .ok_or(SysError::ESRCH)?;
             runtime.signal_states[child_slot] = LINUX_PROCESS_SIGNAL_STATE_EMPTY;
+            super::forget_signal_trampoline_slot(child_slot);
             let _ = runtime.processes.reparent_children_to_launch_reaper(pid);
             Ok(Some(transition))
         })?;

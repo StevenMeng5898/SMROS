@@ -3154,6 +3154,29 @@ pub(crate) fn user_range_writable(address: usize, len: usize) -> bool {
     with_current(|memory| Ok(memory.range_accessible(address, len, true))).unwrap_or(false)
 }
 
+/// The range sits in one mapping that is readable and executable, and not writable.
+pub(crate) fn user_range_rx_only(address: usize, len: usize) -> bool {
+    let Some(end) = address.checked_add(len) else {
+        return false;
+    };
+    if len == 0 || end < address {
+        return false;
+    }
+    with_current(|memory| {
+        Ok(memory.mappings.iter().any(|mapping| {
+            let Some(mapping_end) = mapping.addr.checked_add(mapping.len) else {
+                return false;
+            };
+            address >= mapping.addr
+                && end <= mapping_end
+                && mapping.prot & LINUX_PROT_READ != 0
+                && mapping.prot & LINUX_PROT_EXEC != 0
+                && mapping.prot & LINUX_PROT_WRITE == 0
+        }))
+    })
+    .unwrap_or(false)
+}
+
 pub(crate) fn classify_current_memory_fault(
     address: usize,
     access: LinuxMemoryFaultAccess,
