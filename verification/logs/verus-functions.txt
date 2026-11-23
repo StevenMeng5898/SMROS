@@ -1,5 +1,5 @@
 ===== verus function evidence =====
-git_head=be0b69698560f33de381c9f4d33eee6b456a9df5
+git_head=d96d9602355ee59e0ca1d20534a09797ce01b833
 git_dirty=false
 dirty_files<<END
 
@@ -12,16 +12,19 @@ b9cce0d93f8590e9573d0d01b190c3d987cb7885d4a2e1c93cb1fa6ee56856bc  src/kernel_obj
 80cf0297af8f7a6f696ff706ad894c61e649d9a77282958dd3015ec6ac63422b  src/kernel_objects/hypervisor_logic_shared.rs
 3233cdca827024b31c2a4ac85902e7f5ece86213e2cb9b1a2ddd940645a22cd8  src/kernel_objects/log_logic_shared.rs
 ae3ad0cda6a14038bab431cb62da6172e22fc6fb87e187c38990cd6c03b184f9  src/kernel_objects/port_logic_shared.rs
+0e19253fd1733e65eebb708987d8f7c6120813e998a0aa8a1e9880e88a004c62  src/kernel_objects/scheduler_queue_logic_shared.rs
 671dac9c068d0acc80c44bb86fdf70a1e961ac823d676b3a978d6db318a5932e  src/kernel_objects/socket_logic_shared.rs
 9c2c9343ea312e4ee7d24d1cd020f1d7234294828bf0e93e8fa303aaba99f60e  src/main_logic_shared.rs
 06644572937739b61db5684b0fa98e2a4695dde8ce412302ea1e72e326f331ae  src/syscall/linux_riscv_syscall_context_logic_shared.rs
+6897cbee588d8260e39442043f240d4caf32a9d4594f80595548cd45c93295bc  src/syscall/process_lifecycle_logic_shared.rs
+1688a01d116f7c944b95aaddfc78eb5177134dc7a5cfccf0d49fc9680f9a8f6c  src/syscall/syscall_dispatch_logic_shared.rs
 979e4fc5b09094a5a16403b1c8f72371a999c9f0caacfe36d50d23e6bd2aa0ed  src/syscall/uaccess_logic_shared.rs
 c087382ff717d959261cc1d78531a28bd71ba9103eec3f32d027ae97c653bef8  src/user_level/drivers/driver_logic_shared.rs
 13fda35133b588ba6e7bfd2e0848fdcfd00256f9c1fa9002dbaae35f10dc3c00  src/user_level/drivers/linux_logic_shared.rs
 129c8fbaf9e6cf85389ed7de6863d59538480891686ccad46169e0a5108213cd  src/user_level/services/security_case_logic_shared.rs
 harness_sha256:
-81b63a4059fd940cb56980edeafea5e011ad774d3a3c00124b6b606229905c73  verification/syscall/src/lib.rs
-bc905656807711a9a5ed149e463c5f8e58fd4d8e3652959255881c11d414c1cb  verification/kernel_objects/src/lib.rs
+3a16313e304332f938d90691d8156504e029e69da60c92999861be084806d9aa  verification/syscall/src/lib.rs
+f16a66c6029f1132311cfe2a7ee48262fd93968ffd969b64fc194deae8f7ba5d  verification/kernel_objects/src/lib.rs
 4cf8574761adf412686d15be616c4137897620e21852e6dc5dbc556a1bfbd576  verification/kernel_lowlevel/src/lib.rs
 e46878989df6f430cf93f4e68430b414abc9768efe232691eea8f5a6301e6dd3  verification/user_level/src/lib.rs
 16618596d57f605edf1b3189502b833fde4d4146d7fb03d3655a32de0065c585  verification/services/src/lib.rs
@@ -60,6 +63,18 @@ verus-kernel-objects.log	lib::port_queue_has_space	exec	True	src/kernel_objects/
 verus-kernel-objects.log	lib::port_signal_packet_allowed	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_signal_packet_allowed_body
 verus-kernel-objects.log	lib::port_wait_async_options_valid	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_wait_async_options_valid_body
 verus-kernel-objects.log	lib::port_observer_should_queue	exec	True	src/kernel_objects/port_logic_shared.rs::smros_port_observer_should_queue_body
+verus-kernel-objects.log	lib::sched_ready_word_index	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_ready_word_index_body
+verus-kernel-objects.log	lib::sched_ready_bit_mask	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_ready_bit_mask_body
+verus-kernel-objects.log	lib::sched_ready_bit_is_set	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_ready_bit_is_set_body
+verus-kernel-objects.log	lib::sched_ready_word_after	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_ready_word_after_body
+verus-kernel-objects.log	lib::sched_ready_count_after	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_ready_count_after_body
+verus-kernel-objects.log	lib::sched_priority_count_ready	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_priority_count_ready_body
+verus-kernel-objects.log	lib::sched_best_priority_candidate	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_best_priority_candidate_body
+verus-kernel-objects.log	lib::sched_tick_charge	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_tick_charge_body
+verus-kernel-objects.log	lib::sched_retire_record_accepted	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_retire_record_accepted_body
+verus-kernel-objects.log	lib::sched_retire_confirm_accepted	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_retire_confirm_accepted_body
+verus-kernel-objects.log	lib::sched_retire_take_thread	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_retire_take_thread_body
+verus-kernel-objects.log	lib::sched_retired_slot_reuse	exec	True	src/kernel_objects/scheduler_queue_logic_shared.rs::smros_sched_retired_slot_reuse_body
 verus-kernel-objects.log	lib::socket_options_valid	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_options_valid_body
 verus-kernel-objects.log	lib::socket_mask_options	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_mask_options_body
 verus-kernel-objects.log	lib::socket_ring_index	exec	True	src/kernel_objects/socket_logic_shared.rs::smros_socket_ring_index_body
@@ -73,6 +88,28 @@ verus-user-level.log	lib::main_bump_alloc_next	exec	True	src/main_logic_shared.r
 verus-syscall.log	lib::verified_riscv_frame_aligned	exec	True	src/syscall/linux_riscv_syscall_context_logic_shared.rs::smros_riscv_frame_aligned_body
 verus-syscall.log	lib::verified_riscv_syscall_return_pc	exec	True	src/syscall/linux_riscv_syscall_context_logic_shared.rs::smros_riscv_syscall_return_pc_body
 verus-syscall.log	lib::verified_riscv_sstatus_spp_set	exec	True	src/syscall/linux_riscv_syscall_context_logic_shared.rs::smros_riscv_sstatus_spp_set_body
+verus-syscall.log	lib::process_reserve	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_reserve_body
+verus-syscall.log	lib::process_publish	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_publish_body
+verus-syscall.log	lib::process_publish_fork	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_publish_fork_body
+verus-syscall.log	lib::process_complete_fork	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_complete_fork_body
+verus-syscall.log	lib::process_rollback	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_rollback_body
+verus-syscall.log	lib::process_rollback_fork	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_rollback_fork_body
+verus-syscall.log	lib::process_begin_exit	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_begin_exit_body
+verus-syscall.log	lib::process_abort_exit	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_abort_exit_body
+verus-syscall.log	lib::process_exit	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_exit_body
+verus-syscall.log	lib::process_reap	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_process_reap_body
+verus-syscall.log	lib::task_reserve	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_task_reserve_body
+verus-syscall.log	lib::task_publish	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_task_publish_body
+verus-syscall.log	lib::task_block	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_task_block_body
+verus-syscall.log	lib::task_wake	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_task_wake_body
+verus-syscall.log	lib::task_exit	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_task_exit_body
+verus-syscall.log	lib::task_retire	exec	True	src/syscall/process_lifecycle_logic_shared.rs::smros_task_retire_body
+verus-syscall.log	lib::linux_audited_stub_class	exec	True	src/syscall/syscall_dispatch_logic_shared.rs::smros_linux_audited_stub_class_body
+verus-syscall.log	lib::linux_stub_errno	exec	True	src/syscall/syscall_dispatch_logic_shared.rs::smros_linux_stub_errno_body
+verus-syscall.log	lib::linux_critical_handler	exec	True	src/syscall/syscall_dispatch_logic_shared.rs::smros_linux_critical_handler_body
+verus-syscall.log	lib::linux_handler_class	exec	True	src/syscall/syscall_dispatch_logic_shared.rs::smros_linux_handler_class_body
+verus-syscall.log	lib::verified_linux_unhandled_errno	exec	True	src/syscall/syscall_dispatch_logic_shared.rs::smros_linux_unhandled_syscall_errno_body
+verus-syscall.log	lib::verified_zircon_unhandled_rejected	exec	True	src/syscall/syscall_dispatch_logic_shared.rs::smros_zircon_unhandled_rejected_body
 verus-syscall.log	lib::verified_el0_user_range	exec	True	src/syscall/uaccess_logic_shared.rs::smros_uaccess_el0_range_body
 verus-user-level.log	lib::driver_mmio_slot_base_direct	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_mmio_slot_base_body
 verus-user-level.log	lib::driver_virtio_identity_valid	exec	True	src/user_level/drivers/driver_logic_shared.rs::smros_driver_virtio_identity_valid_body
