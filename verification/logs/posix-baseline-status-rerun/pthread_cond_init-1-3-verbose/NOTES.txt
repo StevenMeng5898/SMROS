@@ -17,12 +17,11 @@ aarch64-linux-gnu-gcc -std=gnu99 -O2 -D_POSIX_C_SOURCE=200112L \
   target/posix/src/85555325079ea362fa680bd2209c843cfe47e670/conformance/interfaces/pthread_cond_init/1-3.c \
   -o /tmp/pc13-verbose -lrt -lm
 
-Launch matches the baseline runner: private /dev/mqueue via the runner's
-unshare wrapper, qemu-aarch64-static -L a sysroot containing the stage's
-ld-linux, libc.so.6, libgcc_s.so.1, and libsmros-posix-compat.so.
-LD_PRELOAD was not set. LD_DEBUG=bindings on the staged binary resolves
-pthread_cond_init, pthread_cond_wait, pthread_cond_signal, and
-pthread_cond_broadcast to libc.so.6.
+This file is a counting probe. The binary above is not the campaign binary,
+so these runs are not a timing reproduction of the campaign failure.
+
+The raw LD_DEBUG=bindings log for the campaign binary is
+../pthread_cond_init-1-3-ld-debug/ld-debug.stderr.
 
 Printed order is reference, null attribute, default attribute. The numbers
 are the test's "times" (counter >> 1). Expected value is 200.
@@ -48,6 +47,6 @@ are the test's "times" (counter >> 1). Expected value is 200.
 19 pass 200 200 200
 20 pass 200 200 200
 
-Seven failures. The side that does not equal the reference is short by 1 to
-7. No side is 0. Run 04 passes with default=169 because neither side equals
-the reference. See docs/KNOWN_ISSUES.md.
+No side is 0. Run 04 is 200/199/169 and passes. Run 15 is 200/199/197 and
+passes. Failures are short by 1 to 7. The pass/fail rule is exact equality
+with the reference. See docs/KNOWN_ISSUES.md.
