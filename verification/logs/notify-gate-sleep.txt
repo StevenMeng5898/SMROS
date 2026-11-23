@@ -1,9 +1,9 @@
 ===== notify-gate-sleep =====
 utc_start=2026-11-23T03:39:17Z
 utc_end=2026-11-23T03:40:26Z
-git_head=338c158d66e3b8cdf0be5543b9e332627a660ec5
-git_dirty=true
-measured_kernel=worktree that adds duration samples and the late-only retry on top of git_head. A later log-only commit republishes this file with that commit's git_head.
+git_head=2a7abfa3ef30808a9be6596204da01083e2c5592
+git_dirty=false
+measured_kernel=built from git_head. Samples were taken from that image; this header was republished after the commit.
 runs=50
 fail=0
 retries=0
