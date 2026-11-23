@@ -1,6 +1,6 @@
 ===== verus mutation summary =====
-utc=2026-11-23T15:53:23Z
-git_head=3b3af8b006616fd4822af392c84a5d54164df8b0
+utc=2026-11-23T17:20:50Z
+git_head=9f5b517d405fd1bf1ad3a742ca82f6c6815c6cc6
 script_commit=cf68ddc743794c311a6d9c14f4a1386eb290d6d4
 script_sha256=89602eb3565bd9c0c95ab2800ea36903aee473dac20ef43b9a281b55c012b54e
 git_dirty=false

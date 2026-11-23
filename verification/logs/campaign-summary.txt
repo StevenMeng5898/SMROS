@@ -1,12 +1,12 @@
 ===== campaign summary =====
-utc=2026-11-23T13:32:07Z
-git_head=d9aa067ac6d8a3be5c04d9787b27dced349d91f8
+utc=2026-11-23T17:27:30Z
+git_head=9f5b517d405fd1bf1ad3a742ca82f6c6815c6cc6
 git_dirty=false
-The guest serial log is verification/logs/campaign-serial.log.
-sha256=60fce92870a4ac2347dca2fd41049481bda14df06fb3ab4a9e3eb71dd5888a50
-Commands were typed at smros:/> on the kernel built from this proof tree.
+serial=verification/logs/campaign-serial.log
+sha256=64763dac439553c768d7ead9e614d164e9616d2edd597fa02617177ea22a415f
+Boot line smros_commit=9f5b517. POSIX event smros_commit is the full hash of that same commit. Neither has -dirty.
 posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
 posixtest: completed
 SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
-Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1358/242/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1365/235/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
 Hermes test-all result: PASS
