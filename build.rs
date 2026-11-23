@@ -1442,6 +1442,18 @@ fn emit_compiled_commit(manifest_dir: &Path) {
         .filter(|text| !text.contains([' ', '\n', '\r']))
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=SMROS_GIT_COMMIT={commit}");
+    // A tracked edit does not move the branch ref, so the watches above stay
+    // quiet. Rewriting this stamp makes the next build run this script again
+    // and recompute --dirty.
+    if let Ok(out_dir) = env::var("OUT_DIR") {
+        let stamp = PathBuf::from(out_dir).join("git-dirty-stamp");
+        println!("cargo:rerun-if-changed={}", stamp.display());
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let _ = std::fs::write(&stamp, format!("{nanos}\n"));
+    }
 }
 
 fn main() {
