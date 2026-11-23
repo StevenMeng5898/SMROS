@@ -31,7 +31,7 @@ with a non-empty spec in `verification/logs/verus-*.log`.
 
 ## 签署（待证明）
 
-签署不是已证明。`verification/verus-mutation-signoff.txt` 里的每个 `lib::` 函数都要在下面逐条写出。mutation 摘要把它们记为 signed-off，不记为 killed。
+签署不是已证明。`verification/verus-mutation-signoff.txt` 里的每个 `lib::` 函数都要在下面逐条写出。mutation 摘要把它们记为 signed-off，不计入 `functions` 和 `killed`。只要还有签署，`make verus-mutation` 的退出码就是 1。
 
 当前没有签署函数。
 

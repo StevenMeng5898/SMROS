@@ -1,0 +1,9 @@
+Ring-index mutants against out == *_ring_index_spec. Each must die by postcondition.
+
+R1 fifo_ring_index: return 0; classify=killed; postcondition=yes
+R2 fifo_ring_index: wrap branch returns 0; classify=killed; postcondition=yes
+R3 fifo_ring_index: return usize::MAX; classify=killed; postcondition=yes
+R4 fifo_ring_index: correct only when read_pos == 0; classify=killed; postcondition=yes
+R5 fifo_ring_index: ignores read_pos; classify=killed; postcondition=yes
+R6 fifo_ring_index: correct only when capacity == 2; classify=killed; postcondition=yes
+R7 socket_ring_index: socket returns capacity - 1 except the old witness point; classify=killed; postcondition=yes

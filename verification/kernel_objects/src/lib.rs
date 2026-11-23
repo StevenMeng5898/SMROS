@@ -1241,18 +1241,36 @@ fn fifo_transfer_bytes(elem_size: usize, count: usize) -> (out: Option<usize>)
     smros_fifo_transfer_bytes_body!(elem_size, count)
 }
 
+proof fn lemma_ring_index_sum(b: int, o: int, c: int)
+    requires
+        0 < c,
+        0 <= b < c,
+        0 <= o < c,
+    ensures
+        (b + o) % c == if b + o >= c { b + o - c } else { b + o },
+{
+    if b + o >= c {
+        vstd::arithmetic::div_mod::lemma_mod_sub_multiples_vanish(b + o, c);
+        vstd::arithmetic::div_mod::lemma_small_mod((b + o - c) as nat, c as nat);
+    } else {
+        vstd::arithmetic::div_mod::lemma_small_mod((b + o) as nat, c as nat);
+    }
+}
+
 fn fifo_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
     ensures
-        capacity == 0 ==> out == 0,
-        capacity > 0 ==> out < capacity,
-        read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1,
+        out as int == fifo_ring_index_spec(read_pos as int, offset as int, capacity as int),
 {
-    assert(capacity > 0 ==> read_pos % capacity < capacity);
-    assert(capacity > 0 ==> offset % capacity < capacity);
-    let out = smros_fifo_ring_index_body!(read_pos, offset, capacity);
-    assert(0usize % 2 == 0 && 1usize % 2 == 1) by (compute);
-    assert(read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1);
-    out
+    if capacity > 0 {
+        proof {
+            lemma_ring_index_sum(
+                (read_pos % capacity) as int,
+                (offset % capacity) as int,
+                capacity as int,
+            );
+        }
+    }
+    smros_fifo_ring_index_body!(read_pos, offset, capacity)
 }
 
 fn fifo_remaining_capacity(len: usize, capacity: usize) -> (out: usize)
@@ -1381,16 +1399,18 @@ fn socket_mask_options(options: u32, mask: u32) -> (out: u32)
 
 fn socket_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
     ensures
-        capacity == 0 ==> out == 0,
-        capacity > 0 ==> out < capacity,
-        read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1,
+        out as int == socket_ring_index_spec(read_pos as int, offset as int, capacity as int),
 {
-    assert(capacity > 0 ==> read_pos % capacity < capacity);
-    assert(capacity > 0 ==> offset % capacity < capacity);
-    let out = smros_socket_ring_index_body!(read_pos, offset, capacity);
-    assert(0usize % 2 == 0 && 1usize % 2 == 1) by (compute);
-    assert(read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1);
-    out
+    if capacity > 0 {
+        proof {
+            lemma_ring_index_sum(
+                (read_pos % capacity) as int,
+                (offset % capacity) as int,
+                capacity as int,
+            );
+        }
+    }
+    smros_socket_ring_index_body!(read_pos, offset, capacity)
 }
 
 fn socket_remaining_capacity(len: usize, capacity: usize) -> (out: usize)

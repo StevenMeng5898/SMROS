@@ -163,17 +163,23 @@ def mutants_for(rtype, body):
         # zero and max are both required. Drop the extra wrapping mutant.
         return [item for item in mutants if item[0] in {"return-zero", "return-max"}]
     if rtype.startswith("(") and rtype.endswith(")"):
+        # Flip one component and keep the others from the real result.
+        # Zeroing the other fields kills a spec that only constrains one field.
         parts = split_commas(rtype[1:-1])
         component_mutants = []
+        block = "{" + body.strip() + "}"
         for index, part in enumerate(parts):
-            flipped = alt_expr(part, "max") or alt_expr(part, "one") or "1"
-            values = []
+            fields = []
             for other_index, other in enumerate(parts):
                 if other_index == index:
-                    values.append(flipped)
+                    if other.strip() == "bool":
+                        fields.append(f"!__o.{other_index}")
+                    else:
+                        fields.append(alt_expr(other, "max") or alt_expr(other, "one") or "1")
                 else:
-                    values.append(zero_expr(other) or "0")
-            component_mutants.append((f"component-{index}", "(" + ", ".join(values) + ")"))
+                    fields.append(f"__o.{other_index}")
+            expr = "let __o = " + block + "; (" + ", ".join(fields) + ")"
+            component_mutants.append((f"component-{index}", expr))
         return component_mutants
     return mutants
 
@@ -344,6 +350,11 @@ def gate_exit(kind):
     return 0 if kind == "killed" else 1
 
 
+def signed_off_fails_gate(signed_count):
+    """A signed function is 待证明. Any sign-off fails the gate."""
+    return signed_count > 0
+
+
 def run_verus(bin_path, source, function, env, timeout):
     command = [
         str(bin_path),
@@ -508,7 +519,14 @@ def function_cache_key(row, function_text, bin_path):
     harness = harness_path.read_bytes()
     shared = included_shared_blobs(harness_path)
     return cache_digest(
-        [harness, *shared, tool_fingerprint(bin_path), f"rlimit={RLIMIT}", function_text]
+        [
+            harness,
+            *shared,
+            tool_fingerprint(bin_path),
+            f"rlimit={RLIMIT}",
+            "tuple-mutant=keep-other-components",
+            function_text,
+        ]
     )
 
 
@@ -526,6 +544,7 @@ def write_summary(rows):
     killed = sum(1 for row in rows if row["result"] == "killed")
     signed = sum(1 for row in rows if row["result"] == "signed-off")
     vacuous = sum(1 for row in rows if row["result"] == "vacuous")
+    proved = len(rows) - signed
     dirty = git(
         "status",
         "--porcelain",
@@ -539,7 +558,7 @@ def write_summary(rows):
         "utc=" + subprocess.check_output(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], text=True).strip(),
         "git_head=" + (git("rev-parse", "HEAD") or "unknown"),
         "git_dirty=" + ("true" if dirty else "false"),
-        f"functions={len(rows)}",
+        f"functions={proved}",
         f"killed={killed}",
         f"signed_off={signed}",
         f"vacuous={vacuous}",
@@ -801,8 +820,15 @@ def audit(argv):
         print("partial harness run does not rewrite the summary cache")
     killed = sum(1 for row in finished if row["result"] == "killed")
     signed_count = sum(1 for row in finished if row["result"] == "signed-off")
+    # Signed functions are 待证明. They are not part of the proved count, and
+    # a non-empty sign-off fails the gate instead of passing as status 0.
+    proved = len(finished) - signed_count
+    if signed_off_fails_gate(signed_count):
+        status |= fail(
+            f"signed-off functions are 待证明 and are excluded from the proved count: {signed_count}"
+        )
     print(
-        f"mutation gate functions={len(finished)} killed={killed} signed_off={signed_count} status={status}"
+        f"mutation gate functions={proved} killed={killed} signed_off={signed_count} status={status}"
     )
     return status
 
@@ -873,6 +899,23 @@ fn matched(n: u64) -> (out: Option<u64>)
         failures += 1
     else:
         print("tuple one-sided component: audit exit 1")
+    preserved = mutants_for("(usize, usize)", "\n    (7, x)\n")
+    preserved_text = " ".join(expr for _label, expr in preserved)
+    if (
+        len(preserved) != 2
+        or "let __o = {(7, x)}; (usize::MAX, __o.1)" not in preserved_text
+        or "let __o = {(7, x)}; (__o.0, usize::MAX)" not in preserved_text
+        or "(usize::MAX, 0)" in preserved_text
+    ):
+        print(f"tuple mutant still zeroes other fields: {preserved}", file=sys.stderr)
+        failures += 1
+    else:
+        print("tuple mutant keeps the other component")
+    if not signed_off_fails_gate(1) or signed_off_fails_gate(0):
+        print("signed-off still leaves the gate at status 0", file=sys.stderr)
+        failures += 1
+    else:
+        print("signed-off function: audit exit 1")
     invalid_cases = [
         (1, "error: aborting due to 1 previous error\nexpected `{`, found `!`\n", "syntax-bad mutation"),
         (1, "error: mutation run timed out\n", "timeout"),
@@ -950,6 +993,13 @@ fn tight(flag: bool) -> (out: bool)
 {
     flag
 }
+
+fn pair(x: usize) -> (out: (usize, usize))
+    ensures
+        out.1 == x,
+{
+    (7, x)
+}
 }
 """
     with tempfile.TemporaryDirectory(prefix="smros-verus-mutation-") as tmp:
@@ -986,6 +1036,19 @@ fn tight(flag: bool) -> (out: bool)
                 failures += 1
             elif function == "matched" and expr == "None":
                 print("match-out body mutation killed by postcondition")
+        pair_span = function_span(source, "pair")
+        pair_body = source[pair_span[1] + 1 : pair_span[2]]
+        pair_results = []
+        for label, expr in mutants_for("(usize, usize)", pair_body):
+            path.write_text(apply_mutant(source, pair_span[1], pair_span[2], expr))
+            code, output = run_verus(bin_path, path, "pair", env, timeout=60)
+            pair_results.append((label, classify(code, output)))
+        pair_judge = judge_mutants("(usize, usize)", pair_results)
+        if pair_judge[0] != "one-sided" or gate_exit(1) != 1:
+            print(f"one-sided tuple (7, x) judged {pair_judge} from {pair_results}", file=sys.stderr)
+            failures += 1
+        else:
+            print("one-sided tuple out.1 == x: audit exit 1")
         implies = judge_mutants(
             "bool",
             [("return-zero", "survived"), ("return-one", "killed")],

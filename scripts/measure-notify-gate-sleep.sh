@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Boot SMROS and run `sectest notify-gate-sleep` N times.
-# Prints one NOTIFY-GATE SLEEP line and one CASE line per run.
-# Usage: scripts/measure-notify-gate-sleep.sh [runs]
+# Boot one SMROS QEMU (-smp 4) and run `sectest notify-gate-sleep` N times
+# sequentially in that same shell. This is not N boots and it is not parallel.
+# The full serial stays in $LOG. Usage: scripts/measure-notify-gate-sleep.sh [runs]
 
 set -euo pipefail
 
@@ -71,6 +71,9 @@ fi
 echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "git_head=$(git -C "$ROOT" rev-parse HEAD)"
 echo "runs=$RUNS"
+echo "boot_mode=one-qemu-sequential"
+echo "parallel=false"
+echo "qemu_smp=4"
 echo "boot_prompt_seen=1"
 
 for run in $(seq 1 "$RUNS"); do

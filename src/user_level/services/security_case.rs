@@ -249,6 +249,9 @@ static NOTIFY_GATE_SLEEP_NS: [AtomicU64; NOTIFY_GATE_SLEEP_SLOTS] = [
     AtomicU64::new(0),
 ];
 static NOTIFY_GATE_SLEEP_COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Lates accumulated since the campaign reset. One late may pass; a larger total fails.
+static NOTIFY_GATE_CAMPAIGN_LATE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) const NOTIFY_GATE_CAMPAIGN_LATE_MAX: usize = 1;
 static CLOCK_SNAPSHOT_VALID: AtomicBool = AtomicBool::new(false);
 static CLOCK_SNAPSHOT_DENIED: AtomicBool = AtomicBool::new(false);
 static CLOCK_SNAPSHOT_APPLIED: AtomicBool = AtomicBool::new(false);
@@ -670,8 +673,17 @@ fn run_and_print(serial: &mut Serial, case: Case) -> FinishedCase {
         }
     };
     print_notify_gate_summary(serial, attempts, late);
+    NOTIFY_GATE_CAMPAIGN_LATE.fetch_add(late, Ordering::Relaxed);
     print_case(serial, case.id, &finished);
     finished
+}
+
+pub(crate) fn reset_notify_gate_campaign_late() {
+    NOTIFY_GATE_CAMPAIGN_LATE.store(0, Ordering::Relaxed);
+}
+
+pub(crate) fn notify_gate_campaign_late() -> usize {
+    NOTIFY_GATE_CAMPAIGN_LATE.load(Ordering::Relaxed)
 }
 
 fn samples_max_since(before: usize) -> u64 {

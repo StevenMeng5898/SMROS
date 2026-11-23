@@ -1398,10 +1398,27 @@ fn emit_host_share(
     link_host_share_archive(out_dir);
 }
 
+fn emit_compiled_commit(manifest_dir: &Path) {
+    println!("cargo:rerun-if-changed={}/.git/HEAD", manifest_dir.display());
+    let commit = Command::new("git")
+        .arg("-C")
+        .arg(manifest_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|text| text.trim().to_string())
+        .filter(|text| text.len() == 40 && text.chars().all(|character| character.is_ascii_hexdigit()))
+        .unwrap_or_else(|| "unknown".to_string());
+    println!("cargo:rustc-env=SMROS_GIT_COMMIT={commit}");
+}
+
 fn main() {
     configure_linker();
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    emit_compiled_commit(&manifest_dir);
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let target = env::var("TARGET").unwrap();
     let host_share_root = manifest_dir.join(HOST_SHARE_DIR);
