@@ -1,5 +1,5 @@
-utc=2026-11-23T07:22:01Z
-git_head=a88c27712e039699d949dc06b0a35b4b0348358f
+utc=2026-11-23T09:57:05Z
+git_head=e1cc89396baad96f4f077798c847f585e2d41e9b
 git_dirty=false
 command=make skt
 SMROS QEMU smoke test passed: found 'smros:/>' and every required serial pattern.
