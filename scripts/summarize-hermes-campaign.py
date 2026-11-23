@@ -41,18 +41,21 @@ NOTIFY_GATE_LATE_MAX = 1
 
 
 # A later boot may keep an older POSIX stage only when the commits differ by
-# logs, docs, or these host runners. src/, build.rs, and proof or gate scripts
-# are not allowed to lag.
+# logs, docs, or the baseline host runners. The QEMU boot scripts are not in
+# this set: a lag that touches them is rejected unless the preamble records
+# their blob sha256 at git_head.
 _LAG_ALLOW_EXACT = {
     "scripts/posix/baseline.py",
     "scripts/posix/cli.py",
-    "scripts/smros-vm-launcher.py",
-    "scripts/run-hermes-campaign.sh",
-    "scripts/measure-notify-gate-sleep.sh",
 }
 _LAG_ALLOW_PREFIX = (
     "verification/logs/",
     "docs/",
+)
+_BOOT_SCRIPTS = (
+    "scripts/smros-vm-launcher.py",
+    "scripts/run-hermes-campaign.sh",
+    "scripts/measure-notify-gate-sleep.sh",
 )
 
 
@@ -73,8 +76,42 @@ def _git_ok(args):
     return completed.stdout
 
 
-def _event_commit_allowed(event_sha, git_head):
-    """Prefer an equal commit. A lag is allowed only for logs, docs, and host runners."""
+def _boot_script_sha_ok(text, git_head, path):
+    """Preamble hash must be the blob of this path at git_head."""
+    head = git_head[: -len("-dirty")] if git_head.endswith("-dirty") else git_head
+    if not head or head == "missing":
+        return False
+    try:
+        completed = subprocess.run(
+            ["git", "show", f"{head}:{path}"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if completed.returncode != 0:
+        return False
+    digest = hashlib.sha256(completed.stdout).hexdigest()
+    return re.search(rf"^script_sha256 {re.escape(path)}={digest}$", text, re.M) is not None
+
+
+def _paths_allow_lag(paths, text, git_head):
+    """True when every lagged path is logs, docs, baseline/cli, or a re-run boot script."""
+    for path in paths:
+        if not path:
+            continue
+        if path.startswith(_LAG_ALLOW_PREFIX) or path in _LAG_ALLOW_EXACT:
+            continue
+        if path in _BOOT_SCRIPTS and _boot_script_sha_ok(text, git_head, path):
+            continue
+        return False
+    return True
+
+
+def _event_commit_allowed(event_sha, git_head, text):
+    """Prefer an equal commit. Other ancestors must stay inside the lag whitelist."""
     head = git_head[: -len("-dirty")] if git_head.endswith("-dirty") else git_head
     if not head or head == "missing":
         return False
@@ -89,13 +126,7 @@ def _event_commit_allowed(event_sha, git_head):
     names = _git_ok(["diff", "--name-only", event_sha, head])
     if names is None:
         return False
-    for path in names.splitlines():
-        if not path:
-            continue
-        if path.startswith(_LAG_ALLOW_PREFIX) or path in _LAG_ALLOW_EXACT:
-            continue
-        return False
-    return True
+    return _paths_allow_lag(names.splitlines(), text, head)
 
 
 def _published_results_sha256():
@@ -146,7 +177,21 @@ def _campaign_late(lines):
     return None
 
 
-def _problems(kept, text):
+def _posix_event_problems(text, diff_paths=None):
+    shas = sorted(set(re.findall(r'"smros_commit":"([0-9a-f]{40})"', text)))
+    if diff_paths is not None:
+        if not shas or not _paths_allow_lag(diff_paths, text, _meta(text, "git_head")):
+            return ["posix-event-commit"]
+        return []
+    problems = []
+    for sha in shas:
+        if not _event_commit_allowed(sha, _meta(text, "git_head"), text):
+            problems.append("posix-event-commit")
+            break
+    return problems
+
+
+def _problems(kept, text, diff_paths=None):
     """Missing finals, a failing count, or a contradiction. Empty means pass."""
     problems = []
     if POSIX_FINAL not in kept:
@@ -217,10 +262,7 @@ def _problems(kept, text):
         len(set(published)) != 1 or any(value != published[0] for value in claimed_hashes)
     ):
         problems.append("baseline-sha-mismatch")
-    for sha in sorted(set(re.findall(r'"smros_commit":"([0-9a-f]{40})"', text))):
-        if not _event_commit_allowed(sha, _meta(text, "git_head")):
-            problems.append("posix-event-commit")
-            break
+    problems.extend(_posix_event_problems(text, diff_paths))
     if _late_total(kept) > NOTIFY_GATE_LATE_MAX:
         problems.append("notify-gate-late")
     campaign_late = _campaign_late(kept)
@@ -238,13 +280,13 @@ def _problems(kept, text):
     return problems
 
 
-def summarize(serial_text, serial_bytes):
+def summarize(serial_text, serial_bytes, diff_paths=None):
     text = serial_text.replace("\r", "")
     kept = []
     for line in text.splitlines():
         if line.startswith(COUNT_PREFIXES):
             kept.append(line)
-    problems = _problems(kept, text)
+    problems = _problems(kept, text, diff_paths)
     if "missing-posixtest-final" in problems:
         kept.append("posixtest final missing")
     if "missing-sectest-91" in problems:
@@ -443,6 +485,54 @@ def main():
             if needle not in found:
                 print(f"{label} was accepted: {found}", file=sys.stderr)
                 return 1
+
+        def lag_rc(paths, extra="", git_head="head"):
+            sample = (
+                _passing_serial()
+                .replace("git_head=abc", f"git_head={git_head}")
+                .replace("smros_commit=abc", f"smros_commit={git_head}")
+                + 'SMROS_POSIX_EVENT {"smros_commit":"0123456789abcdef0123456789abcdef01234567"}\n'
+                + extra
+            )
+            _text, found = summarize(sample, sample.encode(), diff_paths=paths)
+            return 0 if not found else 1
+
+        launcher_rc = lag_rc(["scripts/smros-vm-launcher.py"])
+        campaign_rc = lag_rc(["scripts/run-hermes-campaign.sh"])
+        measure_rc = lag_rc(["scripts/measure-notify-gate-sleep.sh"])
+        baseline_rc = lag_rc(["scripts/posix/baseline.py"])
+        cli_rc = lag_rc(["docs/NOTIFY_GATE_SLEEP.md", "scripts/posix/cli.py"])
+        print(f"launcher-only lag rc={launcher_rc}")
+        print(f"campaign-script lag rc={campaign_rc}")
+        print(f"measure-script lag rc={measure_rc}")
+        print(f"baseline-only lag rc={baseline_rc}")
+        if launcher_rc != 1 or campaign_rc != 1 or measure_rc != 1 or baseline_rc != 0 or cli_rc != 0:
+            print(
+                "boot-script lag was allowed or a baseline/docs lag was rejected",
+                file=sys.stderr,
+            )
+            return 1
+        head = (_git_ok(["rev-parse", "HEAD"]) or "").strip()
+        shown = subprocess.run(
+            ["git", "show", f"{head}:scripts/smros-vm-launcher.py"],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            timeout=30,
+        )
+        if shown.returncode != 0:
+            print("cannot hash the launcher at HEAD", file=sys.stderr)
+            return 1
+        digest = hashlib.sha256(shown.stdout).hexdigest()
+        rerun_rc = lag_rc(
+            ["scripts/smros-vm-launcher.py"],
+            extra=f"script_sha256 scripts/smros-vm-launcher.py={digest}\n",
+            git_head=head,
+        )
+        print(f"launcher re-run hash rc={rerun_rc}")
+        if rerun_rc != 0:
+            print("a launcher lag with the HEAD blob hash was rejected", file=sys.stderr)
+            return 1
         print("campaign summary self-test passed")
         return 0
     if len(sys.argv) != 2:

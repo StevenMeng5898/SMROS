@@ -118,6 +118,11 @@ CROSS_CPU_NOTE = (
     "QEMU requests -smp 4. The kernel prints Hardware-online CPUs: 1. "
     "Only CPU0 is online. Cross-CPU paths are not covered."
 )
+BOOT_SCRIPT_PATHS = (
+    "scripts/smros-vm-launcher.py",
+    "scripts/run-hermes-campaign.sh",
+    "scripts/measure-notify-gate-sleep.sh",
+)
 
 
 def _git_describe() -> str:
@@ -155,7 +160,20 @@ def campaign_serial_preamble(argv: list[str]) -> str:
         + f"git_head={described}\n"
         + f"git_dirty={'true' if described.endswith('-dirty') else 'false'}\n"
         + f"smros_commit={described}\n"
+        + _boot_script_sha_lines()
     )
+
+
+def _boot_script_sha_lines() -> str:
+    lines = []
+    for rel in BOOT_SCRIPT_PATHS:
+        path = ROOT / rel
+        if path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            digest = "missing"
+        lines.append(f"script_sha256 {rel}={digest}")
+    return "\n".join(lines) + "\n"
 
 
 def write_campaign_preamble(path: Path, argv: list[str]) -> None:

@@ -116,11 +116,15 @@ when those two strings differ or either ends in `-dirty`.
 POSIX event `smros_commit` is the full SHA recorded by `posix-build`. The
 summary prefers that SHA to be the same commit as `git_head`. An older stage
 is accepted only when `git diff` from that SHA to `git_head` touches
-`verification/logs/`, `docs/`, or the host runner files
-`scripts/posix/baseline.py`, `scripts/posix/cli.py`,
-`scripts/smros-vm-launcher.py`, `scripts/run-hermes-campaign.sh`, and
-`scripts/measure-notify-gate-sleep.sh`. A diff that includes `src/`,
-`build.rs`, a Verus harness, or a gate script is rejected.
+`verification/logs/`, `docs/`, `scripts/posix/baseline.py`, or
+`scripts/posix/cli.py`. `scripts/smros-vm-launcher.py`,
+`scripts/run-hermes-campaign.sh`, and `scripts/measure-notify-gate-sleep.sh`
+choose the QEMU command, CPU count, image path, and how the campaign or the
+sleep measurement starts, so a lag that changes them is rejected. A re-run
+can record `script_sha256 <path>=<blob sha256 at git_head>` in the preamble;
+the summary accepts that lag only when every changed one of those three files
+has a matching line. A diff that includes `src/`, `build.rs`, a Verus
+harness, or a gate script is rejected.
 
 The 31 status changes between the `cf68ddc` baseline (1365 pass) and the
 `8eb3bda` baseline (1357 pass) are not only mqueue. They are 8
