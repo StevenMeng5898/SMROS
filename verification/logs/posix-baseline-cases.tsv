@@ -8,9 +8,9 @@ conformance/interfaces/aio_cancel/1-1.c	pass
 conformance/interfaces/aio_cancel/10-1.c	pass
 conformance/interfaces/aio_cancel/2-1.c	pass
 conformance/interfaces/aio_cancel/2-2.c	pass
-conformance/interfaces/aio_cancel/4-1.c	pass
+conformance/interfaces/aio_cancel/4-1.c	unresolved
 conformance/interfaces/aio_cancel/5-1.c	pass
-conformance/interfaces/aio_cancel/6-1.c	unresolved
+conformance/interfaces/aio_cancel/6-1.c	pass
 conformance/interfaces/aio_cancel/7-1.c	unresolved
 conformance/interfaces/aio_cancel/8-1.c	pass
 conformance/interfaces/aio_cancel/9-1.c	pass
@@ -26,7 +26,7 @@ conformance/interfaces/aio_fsync/8-1.c	crash
 conformance/interfaces/aio_fsync/8-2.c	pass
 conformance/interfaces/aio_fsync/8-3.c	pass
 conformance/interfaces/aio_fsync/8-4.c	pass
-conformance/interfaces/aio_fsync/9-1.c	crash
+conformance/interfaces/aio_fsync/9-1.c	pass
 conformance/interfaces/aio_read/10-1.c	fail
 conformance/interfaces/aio_read/11-1.c	pass
 conformance/interfaces/aio_read/11-2.c	pass

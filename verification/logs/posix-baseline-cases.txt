@@ -1,18 +1,19 @@
 ===== posix-baseline cases =====
-campaign_utc=2026-11-23T15:56:39Z
-git_head=479b0b5f
-git_describe=479b0b5
-run_id=63ee1e62ce89ed0bd4f8f01ab66a8562
-results_sha256=aa08838af973b53e30824a313c0d4b2058a13a71d45aeacb810e32bce2ae9536
-smros_commit=0d201b3dedfd47f48946b3ba2363b9731474f452
-hermes_line=posix-baseline=1357/243/0
-emfile=0
+campaign_utc=2026-11-23T17:06:54Z
+git_head=500c9486773717d901acb11636874d6d9a3512f2
+git_describe=500c948
+run_id=ba099d164b92008830c6dec366743506
+results_sha256=7845eb8ff9df8894d3752d9c047217df5ecda65fb615aa63a5f16e058b5fa7ed
+smros_commit=500c9486773717d901acb11636874d6d9a3512f2
+hermes_line=posix-baseline=1358/242/0
+emfile=40
+emfile_counts=Too many open files, EMFILE, and ENFILE
 qemu_user=/usr/bin/qemu-aarch64-static
 rlimit_nofile=524288
 mqueue_queues_max=256
 mqueue_msg_max=10
 mqueue_msgsize_max=8192
-Three isolated message-queues runs (127 tests) had emfile=0 and 0 status differences.
-The agreed bound for those isolated runs is 0 differing cases.
-status_counts={"crash": 27, "fail": 61, "pass": 1357, "timeout": 6, "unresolved": 128, "unsupported": 5, "untested": 16}
-changed_from_61d48f8_full_suite=31
+The previous counter reported emfile=0 because it only searched for the token EMFILE.
+This run's host stage line reports emfile=40, all of them the text Too many open files in mqueue attempts.
+status_counts={"crash": 26, "fail": 61, "pass": 1358, "timeout": 6, "unresolved": 128, "unsupported": 5, "untested": 16}
+The 31 changes from cf68ddc (1365 pass) to 8eb3bda (1357 pass) were 8 clock_settime, 3 mq_close, 2 aio_fsync, 2 sched_setparam, 2 sched_setscheduler, 2 shm_open, 2 sigqueue, and one each of aio_error, fork, mlock, mlockall, mq_timedsend, pthread_cond_init, pthread_detach, sched_getparam, sched_getscheduler, and sem_open.

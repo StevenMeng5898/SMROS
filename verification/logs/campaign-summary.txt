@@ -1,7 +1,7 @@
-utc=2026-11-23T15:56:39Z
-git_head=479b0b5
+utc=2026-11-23T17:06:54Z
+git_head=500c948
 git_dirty=false
-serial_sha256=0c88c45982c767d139bbc69b52fa974301a67b3a52bae7cef54bd317470224c6
+serial_sha256=8d5c4de116f6e39448f6b2ce6bf99c2916d13eacad8e4b67a1fb81b7e27d339e
 Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
 posixtest: selection tests=1600 apis=185 groups=9 interval=25 scope=selected
 posixtest: started
@@ -248,7 +248,7 @@ posixtest: progress tests=1580/1600 (98.75%) apis-complete=184/185 (99.45%) apis
 posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
 posixtest: completed
 Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
-NOTIFY-GATE SUMMARY attempts=1 late=0 values=89398176,50114368
+NOTIFY-GATE SUMMARY attempts=1 late=0 values=195272272,50114080
 CASE notify-gate-sleep RESULT PASS slept-on-time
 SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
 SECTEST SUMMARY pass=1 fail=0 xfail=0 xpass=0
@@ -327,12 +327,12 @@ Host stage PASS no-output
 Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
 Host stage PASS discovered-c=1979_shell=176_stub=147_excluded=94_runtime=53_test=169_generator=0_helper=7
 Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
-Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119863617
+Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119862750
 Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
-Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119863035
+Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119862706
 Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
-Host stage PASS reference_selected=1600_reference_passed=1357_reference_nonpass=243_run_id=63ee1e62ce89ed0bd4f8f01ab66a8562_results_sha256=aa08838af973b53e30824a313c0d4b2058a13a71d45aeacb810e32bce2ae9536_emfile=0_rlimit_nofile=524288_mqueue_queues_max=256_mqueue_msg_max=10_mqueue_msgsize_max=8192_qemu_user=/usr/bin/qemu-aarch64-static
-Hermes phase posix-baseline phase=done pass=1357 fail=243 unavailable=0
+Host stage PASS reference_selected=1600_reference_passed=1358_reference_nonpass=242_run_id=ba099d164b92008830c6dec366743506_results_sha256=7845eb8ff9df8894d3752d9c047217df5ecda65fb615aa63a5f16e058b5fa7ed_emfile=40_rlimit_nofile=524288_mqueue_queues_max=256_mqueue_msg_max=10_mqueue_msgsize_max=8192_qemu_user=/usr/bin/qemu-aarch64-static
+Hermes phase posix-baseline phase=done pass=1358 fail=242 unavailable=0
 Host stage PASS OK
 Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
 Host stage PASS campaign_summary_self-test_passed
@@ -355,7 +355,7 @@ Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
-Hermes phase posix-baseline phase=done pass=1357 fail=243 unavailable=0
+Hermes phase posix-baseline phase=done pass=1358 fail=242 unavailable=0
 Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
 Hermes phase verus phase=done pass=1 fail=0 unavailable=0
 Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
@@ -363,5 +363,5 @@ Hermes phase fuzzsc phase=done pass=1 fail=0 unavailable=0
 Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
 Hermes phase futex-stress phase=done pass=1 fail=0 unavailable=0
 Hermes phase shm-mode pass mode=040755
-Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1357/243/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1358/242/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
 Hermes test-all result: PASS
