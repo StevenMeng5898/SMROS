@@ -160,7 +160,7 @@ pub enum HermesExtraStage {
 }
 
 pub const HERMES_EXTRA_STAGE_COUNT: usize = 16;
-pub const HERMES_GUEST_CASE_COUNT: usize = 7;
+pub const HERMES_GUEST_CASE_COUNT: usize = 8;
 /// `sectest all` listed probes plus the heap-fork and elf-memsz kernel cases.
 pub const HERMES_SECTEST_ALL_CASES: usize = 91;
 pub const HERMES_GUEST_CASES: [&str; HERMES_GUEST_CASE_COUNT] = [
@@ -171,6 +171,7 @@ pub const HERMES_GUEST_CASES: [&str; HERMES_GUEST_CASE_COUNT] = [
     "/shared/f5_ptrace.elf",
     "/shared/g1_stopcont.elf",
     "/shared/g1b_stop.elf",
+    "/shared/g2_stop_group.elf",
 ];
 /// Single `sectest <id>` the campaign runs after `sectest all` and `sectest undef`.
 pub const HERMES_SECTEST_ONE_ID: &str = "el0-read-kernel-ram";

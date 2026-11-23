@@ -60,7 +60,7 @@ export POSIX_QUALITY_EVIDENCE
 GUEST_CC ?= aarch64-linux-gnu-gcc
 GUEST_CFLAGS ?= -O2 -Wall -Wextra -fPIE
 GUEST_LDFLAGS ?= -pie -Wl,-dynamic-linker,/lib/ld-linux-aarch64.so.1 -Wl,-z,now
-GUEST_CASE_SRCS := tests/guest/f1_seccomp.c tests/guest/f2_landlock.c tests/guest/f3_pkey.c tests/guest/f4_iouring.c tests/guest/f5_ptrace.c tests/guest/g1_stopcont.c tests/guest/g1b_stop.c
+GUEST_CASE_SRCS := tests/guest/f1_seccomp.c tests/guest/f2_landlock.c tests/guest/f3_pkey.c tests/guest/f4_iouring.c tests/guest/f5_ptrace.c tests/guest/g1_stopcont.c tests/guest/g1b_stop.c tests/guest/g2_stop_group.c
 
 .PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher vm-launcher-restart help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services guest-cases
 
@@ -240,8 +240,10 @@ guest-cases:
 	@mkdir -p host_shared
 	@set -e; for src in $(GUEST_CASE_SRCS); do \
 		base=$$(basename "$$src" .c); \
+		extra=; \
+		if [ "$$base" = "g2_stop_group" ]; then extra="-pthread"; fi; \
 		echo "guest-cases: $$base.elf"; \
-		$(GUEST_CC) $(GUEST_CFLAGS) -I tests/guest $(GUEST_LDFLAGS) -o "host_shared/$$base.elf" "$$src"; \
+		$(GUEST_CC) $(GUEST_CFLAGS) $$extra -I tests/guest $(GUEST_LDFLAGS) $$extra -o "host_shared/$$base.elf" "$$src"; \
 	done
 
 # Run with QEMU (simple mode)

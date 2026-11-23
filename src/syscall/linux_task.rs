@@ -894,6 +894,50 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
     result
 }
 
+/// Park every runnable thread in `tgid` as `Stopped`.
+///
+/// A default stop signal stops the whole thread group, not only the thread
+/// that dequeued it. Threads already blocked in a syscall stay there; their
+/// return-to-user path parks them if the process is still stopped. Returns
+/// whether the caller itself was parked and must leave the CPU.
+pub(crate) fn park_runnable_group_for_stop(tgid: usize) -> Result<bool, SysError> {
+    if tgid == 0 || kernel_dispatch_active() {
+        return Ok(false);
+    }
+    let current_scheduler = scheduler::scheduler().current().0;
+    let runnable = with_runtime(|runtime| {
+        let mut runnable = Vec::new();
+        for task in runtime.tasks.tasks.iter().copied() {
+            if task.tgid == tgid && task.state == LinuxTaskState::Runnable {
+                runnable.push(task);
+            }
+        }
+        runnable
+    });
+    let mut parked_current = false;
+    for task in runnable {
+        if task.scheduler_thread == 0 {
+            continue;
+        }
+        let blocked = with_runtime(|runtime| {
+            runtime
+                .tasks
+                .block(task.tid, task.scheduler_thread, LinuxBlockReason::Stopped)
+        });
+        if !blocked {
+            continue;
+        }
+        if scheduler::scheduler().block_thread(ThreadId(task.scheduler_thread)) {
+            if task.scheduler_thread == current_scheduler {
+                parked_current = true;
+            }
+        } else {
+            let _ = with_runtime(|runtime| runtime.tasks.wake(task.tid, task.scheduler_thread));
+        }
+    }
+    Ok(parked_current)
+}
+
 pub(crate) fn wake_stopped_group(tgid: usize) -> usize {
     let stopped = with_runtime(|runtime| {
         let mut stopped = Vec::new();

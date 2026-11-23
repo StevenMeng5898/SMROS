@@ -466,7 +466,27 @@ pub(crate) fn stop_current_child(
     signum: usize,
 ) -> Result<Option<LinuxChildStateTransition>, SysError> {
     let process = current()?;
-    let transition = with_runtime(|runtime| runtime.processes.stop_child(process.pid, signum));
+    stop_process(process.pid, signum)
+}
+
+/// Stop one process for a default stop signal.
+///
+/// A second stop while the process is already stopped does not emit another
+/// child-status transition. The caller parks every runnable thread in the
+/// group separately; this only publishes the process-level wait status.
+pub(crate) fn stop_process(
+    pid: usize,
+    signum: usize,
+) -> Result<Option<LinuxChildStateTransition>, SysError> {
+    let transition = with_runtime(|runtime| {
+        let already_stopped = runtime.processes.by_pid(pid).is_some_and(|process| {
+            process.stopped || process.state != LinuxProcessState::Running
+        });
+        if already_stopped {
+            return None;
+        }
+        runtime.processes.stop_child(pid, signum)
+    });
     if let Some(transition) = transition {
         let _ = linux_task::wake_process_waiters(transition.parent_pid);
     }

@@ -550,7 +550,7 @@ effective seed for replay and persists a bounded report at
 64 round details, then record how many details were omitted. `hermes test-all`
 runs the native Hermes check once, then `posixtest all` and `sectest all` once
 (`sectest undef`, one case id, and a full case-id coverage check are part of that phase),
-then the guest ELFs `f1_seccomp`, `f2_landlock`, `f3_pkey`, `f4_iouring`, `f5_ptrace`, `g1_stopcont`, and `g1b_stop` (each must exit 0),
+then the guest ELFs `f1_seccomp`, `f2_landlock`, `f3_pkey`, `f4_iouring`, `f5_ptrace`, `g1_stopcont`, `g1b_stop`, and `g2_stop_group` (each must exit 0),
 then executes one deterministic random guest
 operation and each host job once per iteration (`make ut` and `make it`). Optional `mode=syscall` keeps
 the same per-iteration host jobs but selects the focused syscall/POSIX guest catalog.

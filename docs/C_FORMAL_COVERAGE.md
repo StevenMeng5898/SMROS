@@ -240,6 +240,9 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
 - `tests/guest/g1b_stop.c`
   - 待证明
     SMROS guest test, not the upstream POSIX suite. Not yet discharged.
+- `tests/guest/g2_stop_group.c`
+  - 待证明
+    SMROS guest test, not the upstream POSIX suite. Not yet discharged.
 - `tests/guest/poc_common.h`
   - 待证明
     SMROS guest test, not the upstream POSIX suite. Not yet discharged.

@@ -6156,14 +6156,51 @@ pub(crate) fn queue_process_linux_signal_and_wake(
     queue_process_linux_signal_and_wake_at(tgid, record, None)
 }
 
+/// Stop every runnable thread in the group and publish one wait status.
+///
+/// The stop signal is consumed here. Leaving it pending would stop the group
+/// again on the way back from `SIGCONT`. Returns whether the caller was parked.
+fn apply_linux_group_stop(tgid: usize, signum: usize) -> Result<bool, SysError> {
+    let parked_current = linux_task::park_runnable_group_for_stop(tgid)?;
+    if let Some(transition) = linux_process::stop_process(tgid, signum)? {
+        notify_linux_child_state(transition, LINUX_CLD_STOPPED)?;
+    }
+    Ok(parked_current)
+}
+
+fn finish_linux_group_stop(parked_current: bool) {
+    if !parked_current {
+        return;
+    }
+    while linux_task::current_task().is_ok_and(|task| {
+        task.state == linux_task::LinuxTaskState::Blocked
+            && task.block_reason == LinuxBlockReason::Stopped
+    }) {
+        scheduler::schedule();
+        if linux_task::current_task().is_ok_and(|task| {
+            task.state == linux_task::LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::Stopped
+        }) {
+            crate::kernel_lowlevel::cpu::wait_for_interrupt();
+        }
+    }
+}
+
 fn queue_process_linux_signal_and_wake_at(
     tgid: usize,
     record: LinuxPendingSignal,
     timer_deadline_nanos: Option<u64>,
 ) -> Result<(), SysError> {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let mut parked_current = false;
     let result = (|| {
         cancel_opposing_linux_stop_continue_signals(tgid, record.signum);
+        if !linux_task::kernel_dispatch_active()
+            && linux_signal_disposition_for(tgid, record.signum)? == LinuxSignalDisposition::Stop
+        {
+            parked_current = apply_linux_group_stop(tgid, record.signum)?;
+            return Ok(());
+        }
         if record.signum == LINUX_SIGCONT {
             // Continue even when SIGCONT is blocked. The signal stays pending
             // until it is unblocked; the default action is never termination.
@@ -6238,6 +6275,9 @@ fn queue_process_linux_signal_and_wake_at(
         Ok(())
     })();
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    if result.is_ok() {
+        finish_linux_group_stop(parked_current);
+    }
     result
 }
 
@@ -6248,6 +6288,7 @@ fn queue_directed_linux_signal(
     make_record: impl FnOnce() -> Result<LinuxPendingSignal, SysError>,
 ) -> SysResult {
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
+    let mut parked_current = false;
     let result = (|| {
         let validated_target = linux_task::queue_task_signal(tgid, tid, LinuxPendingSignal::EMPTY)?;
         if signum == 0 {
@@ -6257,6 +6298,14 @@ fn queue_directed_linux_signal(
             return terminate_linux_process_by_signal(validated_target.tgid, signum);
         }
         cancel_opposing_linux_stop_continue_signals(validated_target.tgid, signum);
+        if !linux_task::kernel_dispatch_active()
+            && linux_signal_disposition_for(validated_target.tgid, signum)?
+                == LinuxSignalDisposition::Stop
+        {
+            // tkill/tgkill of a stop signal still stops the whole thread group.
+            parked_current = apply_linux_group_stop(validated_target.tgid, signum)?;
+            return Ok(0);
+        }
         match linux_signal_disposition_for(validated_target.tgid, signum)? {
             LinuxSignalDisposition::Ignore => Ok(0),
             LinuxSignalDisposition::Stop
@@ -6279,6 +6328,9 @@ fn queue_directed_linux_signal(
         }
     })();
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
+    if result.is_ok() {
+        finish_linux_group_stop(parked_current);
+    }
     result
 }
 
