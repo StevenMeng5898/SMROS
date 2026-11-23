@@ -123,7 +123,9 @@ choose the QEMU command, CPU count, image path, and how the campaign or the
 sleep measurement starts, so a lag that changes them is rejected. A re-run
 can record `script_sha256 <path>=<blob sha256 at git_head>` in the preamble;
 the summary accepts that lag only when every changed one of those three files
-has a matching line. A diff that includes `src/`, `build.rs`, a Verus
+has exactly one `script_sha256` line and that line matches the blob. A second
+line for the same path, including a wrong digest before or after the right
+one, is rejected. A diff that includes `src/`, `build.rs`, a Verus
 harness, or a gate script is rejected.
 
 The 31 status changes between the `cf68ddc` baseline (1365 pass) and the

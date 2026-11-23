@@ -94,7 +94,8 @@ def _boot_script_sha_ok(text, git_head, path):
     if completed.returncode != 0:
         return False
     digest = hashlib.sha256(completed.stdout).hexdigest()
-    return re.search(rf"^script_sha256 {re.escape(path)}={digest}$", text, re.M) is not None
+    lines = re.findall(rf"^script_sha256 {re.escape(path)}=(.*)$", text, re.M)
+    return len(lines) == 1 and lines[0] == digest
 
 
 def _paths_allow_lag(paths, text, git_head):
@@ -532,6 +533,24 @@ def main():
         print(f"launcher re-run hash rc={rerun_rc}")
         if rerun_rc != 0:
             print("a launcher lag with the HEAD blob hash was rejected", file=sys.stderr)
+            return 1
+        wrong = "0" * 64
+        correct_line = f"script_sha256 scripts/smros-vm-launcher.py={digest}\n"
+        wrong_line = f"script_sha256 scripts/smros-vm-launcher.py={wrong}\n"
+        correct_then_wrong = lag_rc(
+            ["scripts/smros-vm-launcher.py"],
+            extra=correct_line + wrong_line,
+            git_head=head,
+        )
+        wrong_then_correct = lag_rc(
+            ["scripts/smros-vm-launcher.py"],
+            extra=wrong_line + correct_line,
+            git_head=head,
+        )
+        print(f"launcher two-hash correct-then-wrong rc={correct_then_wrong}")
+        print(f"launcher two-hash wrong-then-correct rc={wrong_then_correct}")
+        if correct_then_wrong != 1 or wrong_then_correct != 1:
+            print("contradictory script_sha256 lines were accepted", file=sys.stderr)
             return 1
         print("campaign summary self-test passed")
         return 0
