@@ -1,0 +1,136 @@
+
+**************************************************
+
+  SMROS-A Distributed AI-Native Operating System
+
+**************************************************
+  v1.2.0
+
+[OK] Kernel initialized successfully!
+[OK] Serial console initialized
+[OK] ARM64 architecture detected
+[DRV] Platform: linux,dummy-virt source=fdt nodes=5 uart=0x9000000 gic=gicv3/gicv4 gicd=0x8000000 gicr/gicc=0x80a0000 timer_irq=30
+
+--- System Information ---
+[CPU] MPIDR_EL1: 0x80000000
+[SYS] SCTLR_EL1: 0x30c50838
+--------------------------
+[OK] Initializing ARM GICv3/v4 interrupt controller... done
+[OK] Initializing ARM Generic Timer... done
+[INFO] Timer frequency: 62 MHz
+[SMP] Initializing SMP support...
+[SMP] Boot CPU (CPU0) MPIDR: 0x80000000
+[SMP] Only the boot CPU is hardware-online
+[OK] Initializing memory management... [MEM] Initializing memory management...
+[MEM] Process manager initialized with init process (PID 1)
+[MEM] Page size: 4KB (4 KB)
+[MEM] Max processes: 64, Max pages per process: 64
+done
+[OK] Installing kernel object rights config... done
+[OK] Initializing syscall interface... [SYSCALL] Syscall handler initialized
+done
+[OK] Initializing MMU... [MMU] Page table manager initialized
+done
+[OK] Initializing syscall handler... [SYSCALL] Syscall handler initialized
+done
+[OK] Initializing channel subsystem... [CHANNEL] Channel subsystem initialized
+done
+[OK] Initializing user-level process management... [EL0] User process manager initialized
+edu: ident=0x010000ed bar0=0x4e275000
+[USER] Driver framework, component framework, FxFS, and /svc initialized
+done
+[OK] Initializing preemptive RR scheduler... done
+[OK] Deferring bootstrap component EL0 launchers until requested
+[OK] Enabling timer interrupts (100Hz tick)... done
+[OK] Unmasking CPU interrupts... done
+
+--- SMP Multi-Core Initialization ---
+[SMP] Single-core security gate
+[SMP] Only the boot CPU is hardware-online
+[SMP] Hardware-online CPUs: 1 (boot CPU only)
+
+=== SMP Status ===
+Online CPUs: 1/8
+
+CPU0: Online  MPIDR: 0x80000000
+CPU1: Offline  MPIDR: 0x0
+CPU2: Offline  MPIDR: 0x0
+CPU3: Offline  MPIDR: 0x0
+CPU4: Offline  MPIDR: 0x0
+CPU5: Offline  MPIDR: 0x0
+CPU6: Offline  MPIDR: 0x0
+CPU7: Offline  MPIDR: 0x0
+====================
+
+[INFO] Fast boot complete. Starting shell; run testsc for syscall validation.
+[SHELL] Starting shell as scheduled thread...
+[SHELL] Shell thread created (ID: 1)
+[SHELL] Shell will start on next scheduler tick
+[KERNEL] Starting scheduler - jumping to shell thread...
+
+
+╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║     SMROS Shell v1.2.0                                    ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝
+
+Welcome to SMROS shell!
+Type 'help' for available commands.
+
+smros:/> run /shared/g2_stop_group.elf
+run: /shared/g2_stop_group.elf
+  type: dynamic PIE
+  entry: 0x2140
+  load segments: 2
+  interpreter: /lib/ld-linux-aarch64.so.1 -> /shared/posixtest/lib/ld-linux-aarch64.so.1
+  needed:
+    libc.so.6 -> /shared/posixtest/lib/libc.so.6
+    ld-linux-aarch64.so.1 -> /shared/posixtest/lib/ld-linux-aarch64.so.1
+run: started dynamic loader thread
+run: program output begins below; exit code 0 means success
+smros:/> thread-group stop waitpid=2 status=0x137f errno=0
+thread-group cont waitpid=2 status=0xffff errno=0
+PASS thread group stopped and resumed
+pgroup first stop waitpid=6 status=0x137f errno=0
+pgroup second stop waitpid=7 status=0x137f errno=0
+pgroup first cont waitpid=6 status=0xffff errno=0
+pgroup second cont waitpid=7 status=0xffff errno=0
+PASS process group stopped and resumed
+repeat first stop waitpid=8 status=0x137f errno=0
+STOP/STOP/CONT waitpid=8 status=0xffff errno=0
+pre-kill stop waitpid=8 status=0x137f errno=0
+PASS repeated SIGSTOP and SIGKILL
+futex waitpid=9 status=0x137f errno=0
+futex waitpid=9 status=0xffff errno=0
+PASS futex expired across SIGSTOP
+sigtimedwait waitpid=11 status=0x137f errno=0
+sigtimedwait waitpid=11 status=0xffff errno=0
+PASS sigtimedwait expired across SIGSTOP
+unblock SIGTSTP waitpid=14 status=0x147f errno=0
+PASS blocked SIGTSTP
+PASS handler SIGTSTP
+PASS ignored SIGTSTP
+default SIGTSTP waitpid=17 status=0x147f errno=0
+default SIGTSTP waitpid=17 status=0xffff errno=0
+PASS default SIGTSTP
+partial SIGTSTP waitpid=18 status=0x147f errno=0
+partial SIGCONT waitpid=18 status=0xffff errno=0
+PASS partial SIGTSTP block
+PASS sigwait peer SIGTSTP
+default SIGTTIN waitpid=22 status=0x157f errno=0
+default SIGTTIN waitpid=22 status=0xffff errno=0
+PASS default SIGTTIN
+default SIGTTOU waitpid=23 status=0x167f errno=0
+default SIGTTOU waitpid=23 status=0xffff errno=0
+PASS default SIGTTOU
+PASS exit SIGSTOP reaped
+PASS stop/cont hammer x1000
+PASS 1ns sigtimedwait x1000
+PASS SIGSTOP broadcast
+
+run: program output ended
+run: process finished
+  path: /shared/g2_stop_group.elf
+  exit code: 0 (success)
+  elapsed: 126.77s (12677 timer ticks)
