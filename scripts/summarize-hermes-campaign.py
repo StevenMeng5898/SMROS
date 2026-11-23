@@ -3,9 +3,11 @@
 
 Every count line is kept verbatim, including failures. A missing family is
 written as `missing`. The header is taken from the serial log itself plus the
-sha256 of that file, so running the script again is byte-identical.
+sha256 of the file bytes, including when the file is gzip. Running the
+script again on the same file is byte-identical.
 """
 
+import gzip
 import hashlib
 import pathlib
 import re
@@ -53,6 +55,19 @@ def summarize(serial_text, serial_bytes):
     return "\n".join(header + kept) + "\n"
 
 
+def load_serial_bytes(raw, gzipped):
+    if gzipped:
+        text = gzip.decompress(raw).decode("utf-8", "replace")
+    else:
+        text = raw.decode("utf-8", "replace")
+    return text, raw
+
+
+def load_serial(path):
+    raw = path.read_bytes()
+    return load_serial_bytes(raw, path.suffix == ".gz" or raw.startswith(b"\x1f\x8b"))
+
+
 def main():
     if "--self-test" in sys.argv:
         injected = (
@@ -76,14 +91,19 @@ def main():
         if summarize(injected, raw) != text:
             print("summarize is not deterministic", file=sys.stderr)
             return 1
+        packed = gzip.compress(raw)
+        gz_text, gz_raw = load_serial_bytes(packed, gzipped=True)
+        gz_summary = summarize(gz_text, gz_raw)
+        if "fail=1" not in gz_summary or hashlib.sha256(packed).hexdigest() not in gz_summary:
+            print("gzipped failure count was dropped", file=sys.stderr)
+            return 1
         print("campaign summary self-test passed")
         return 0
     if len(sys.argv) != 2:
         print("usage: summarize-hermes-campaign.py SERIAL", file=sys.stderr)
         return 2
     path = pathlib.Path(sys.argv[1])
-    raw = path.read_bytes()
-    text = raw.decode("utf-8", "replace")
+    text, raw = load_serial(path)
     out = ROOT / "verification/logs/campaign-summary.txt"
     rendered = summarize(text, raw)
     out.write_text(rendered)

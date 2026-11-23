@@ -67,8 +67,8 @@ parent's timer loop delays preemption.
 ## Retry
 
 The guest prints `NOTIFY-GATE SUMMARY attempts=… late=… values=…`.
-`scripts/summarize-hermes-campaign.py` copies that line and repeats it when
-`late` is not zero.
+`scripts/summarize-hermes-campaign.py` copies that line verbatim, so a
+non-zero `late` stays in the summary.
 
 One late sample at or under 300ms may be retried once. A second late, or any
 sample over 300ms, fails immediately. Early wakes fail immediately. The 200ms
@@ -96,8 +96,8 @@ window still fails on the first attempt.
   again so every count line is kept. The 50-run above booted this commit.
 - A later commit whose diff is only `verification/logs/` republishes the host
   Verus, CBMC, and futex logs for the documentation commit that contains this
-  table. The hermes serial is gzipped at
-  `verification/logs/hermes-campaign-serial.log.gz`.
-  `scripts/summarize-hermes-campaign.py` rebuilds
-  `verification/logs/hermes-campaign-summary.txt` from that gzip, including a
-  failing count line instead of dropping it.
+  table. The hermes serial, with `utc`, `git_head`, and `git_dirty` on the
+  first lines, is gzipped at `verification/logs/hermes-campaign-serial.log.gz`.
+  `scripts/summarize-hermes-campaign.py` reads that gzip and rebuilds
+  `verification/logs/campaign-summary.txt`, including a failing count line
+  instead of dropping it. `serial_sha256` is the sha256 of the gzip bytes.
