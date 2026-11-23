@@ -1,10 +1,15 @@
 posix-baseline is the Linux qemu-user reference. It does not run the SMROS kernel.
-Totals seen on this host: 1397/203, 1395/205, 1364/236, 1358/242.
-The 1397 and 1395 per-test files were overwritten before they were committed,
-so the exact 31 names from 1395 to 1364 are not recoverable.
-run-1364 and run-1358 are the two saved runs. DIFF-1364-to-1358.txt lists
-the 10 tests whose status changed. Seven passed cases became unresolved,
-crash, or fail; one crash became pass. Net pass count moved by 6.
-The flips are aio, mq_close, pthread, and sigaction results under qemu-user,
-including a 30s timeout and signal 11/6 crashes. That is reference variance,
-not a guest regression.
+
+The 1395/205 per-test file was overwritten before it was committed. Those
+rows cannot be reconstructed. run-1364 is the earlier saved capture
+(pthread_create/10-1.c is SIGSEGV, status crash, empty stdout).
+
+run-1358.ndjson is the old classifier output. Its 10-1 row says pass while
+stdout is "Test FAILED: Did not receive segmentation fault".
+run-1358-reclassified.ndjson applies classify_status and _pts_status to the
+stored exit code, signal, timeout, and stdout. 10-1 is fail/fail there.
+
+run-1365.ndjson is the 1365/235 campaign capture from
+target/posix/aarch64/linux-reference/results.ndjson, with the same
+reclassifier applied. 10-1 in that run is signal 11, status crash, pts_status
+empty, and the stdout is empty. It is not the 1358 pass row.
