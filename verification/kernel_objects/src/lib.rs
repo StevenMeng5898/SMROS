@@ -807,7 +807,7 @@ spec fn fifo_ring_index_spec(read_pos: int, offset: int, capacity: int) -> int {
     if capacity <= 0 {
         0
     } else {
-        (read_pos + offset) % capacity
+        (read_pos % capacity + offset % capacity) % capacity
     }
 }
 
@@ -868,7 +868,7 @@ spec fn socket_ring_index_spec(read_pos: int, offset: int, capacity: int) -> int
     if capacity <= 0 {
         0
     } else {
-        (read_pos + offset) % capacity
+        (read_pos % capacity + offset % capacity) % capacity
     }
 }
 
@@ -1242,67 +1242,29 @@ fn fifo_transfer_bytes(elem_size: usize, count: usize) -> (out: Option<usize>)
     smros_fifo_transfer_bytes_body!(elem_size, count)
 }
 
-#[verifier::spinoff_prover]
-proof fn ring_wrap_is_mod(read_pos: int, offset: int, capacity: int)
-    requires
-        capacity > 0,
-        read_pos >= 0,
-        offset >= 0,
-    ensures
-        ({
-            let base = read_pos % capacity;
-            let off = offset % capacity;
-            let computed = if base >= capacity - off {
-                base - (capacity - off)
-            } else {
-                base + off
-            };
-            computed == (read_pos + offset) % capacity
-        }),
+proof fn lemma_ring_index_sum(b: int, o: int, c: int)
+    requires 0 < c, 0 <= b < c, 0 <= o < c,
+    ensures (b + o) % c == if b + o >= c { b + o - c } else { b + o },
 {
-    let base = read_pos % capacity;
-    let off = offset % capacity;
-    let sum_mod = (read_pos + offset) % capacity;
-    vstd::arithmetic::div_mod::lemma_mod_adds(read_pos, offset, capacity);
-    assert(base + off == sum_mod + capacity * ((base + off) / capacity));
-    if base >= capacity - off {
-        assert((base + off) >= capacity);
-        assert((base + off) < (capacity * 2)) by(nonlinear_arith)
-            requires
-                capacity > 0,
-                0 <= base,
-                base < capacity,
-                0 <= off,
-                off < capacity,
-        ;
-        assert((base + off) / capacity == 1) by(nonlinear_arith)
-            requires
-                capacity > 0,
-                (base + off) >= capacity,
-                (base + off) < (capacity * 2),
-        ;
-        assert(base + off == sum_mod + capacity);
-        assert(sum_mod == base + off - capacity);
+    if b + o >= c {
+        vstd::arithmetic::div_mod::lemma_mod_sub_multiples_vanish(b + o, c);
+        vstd::arithmetic::div_mod::lemma_small_mod((b + o - c) as nat, c as nat);
     } else {
-        assert((base + off) < capacity);
-        assert((base + off) / capacity == 0) by(nonlinear_arith)
-            requires
-                capacity > 0,
-                0 <= base + off,
-                (base + off) < capacity,
-        ;
-        assert(base + off == sum_mod);
+        vstd::arithmetic::div_mod::lemma_small_mod((b + o) as nat, c as nat);
     }
 }
 
 fn fifo_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
     ensures
-        capacity == 0 ==> out == 0,
-        capacity > 0 ==> out as int == (read_pos as int + offset as int) % (capacity as int),
+        out as int == fifo_ring_index_spec(read_pos as int, offset as int, capacity as int),
 {
-    proof {
-        if capacity > 0 {
-            ring_wrap_is_mod(read_pos as int, offset as int, capacity as int);
+    if capacity > 0 {
+        proof {
+            lemma_ring_index_sum(
+                (read_pos % capacity) as int,
+                (offset % capacity) as int,
+                capacity as int,
+            );
         }
     }
     smros_fifo_ring_index_body!(read_pos, offset, capacity)
@@ -1442,12 +1404,15 @@ fn socket_mask_options(options: u32, mask: u32) -> (out: u32)
 
 fn socket_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
     ensures
-        capacity == 0 ==> out == 0,
-        capacity > 0 ==> out as int == (read_pos as int + offset as int) % (capacity as int),
+        out as int == socket_ring_index_spec(read_pos as int, offset as int, capacity as int),
 {
-    proof {
-        if capacity > 0 {
-            ring_wrap_is_mod(read_pos as int, offset as int, capacity as int);
+    if capacity > 0 {
+        proof {
+            lemma_ring_index_sum(
+                (read_pos % capacity) as int,
+                (offset % capacity) as int,
+                capacity as int,
+            );
         }
     }
     smros_socket_ring_index_body!(read_pos, offset, capacity)
