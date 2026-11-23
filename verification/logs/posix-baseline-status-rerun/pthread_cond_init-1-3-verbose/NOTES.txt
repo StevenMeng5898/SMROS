@@ -1,0 +1,53 @@
+Twenty runs of one binary compiled with -DVERBOSE=2. The source file and the
+16 patches were not edited. SHA256SUMS covers the raw stdout and stderr of
+each run. Every stderr file is empty.
+
+Campaign staged binary, which does not contain the string "was awaken":
+a1f87d3014ca5d768688a6d4eaed6382fcb6086d7eec9115504f82c9e505ea6a
+
+This binary:
+8e0fdcdff19c7b369f156acecf4118dabe28974f60cab9cf9374201f5e58e61c
+
+Compile, from the existing patched tree, output left outside the repo:
+
+aarch64-linux-gnu-gcc -std=gnu99 -O2 -D_POSIX_C_SOURCE=200112L \
+  -D_XOPEN_SOURCE=600 -DVERBOSE=2 -pthread \
+  -I scripts/posix/runtime/include \
+  -I target/posix/src/85555325079ea362fa680bd2209c843cfe47e670/include \
+  target/posix/src/85555325079ea362fa680bd2209c843cfe47e670/conformance/interfaces/pthread_cond_init/1-3.c \
+  -o /tmp/pc13-verbose -lrt -lm
+
+Launch matches the baseline runner: private /dev/mqueue via the runner's
+unshare wrapper, qemu-aarch64-static -L a sysroot containing the stage's
+ld-linux, libc.so.6, libgcc_s.so.1, and libsmros-posix-compat.so.
+LD_PRELOAD was not set. LD_DEBUG=bindings on the staged binary resolves
+pthread_cond_init, pthread_cond_wait, pthread_cond_signal, and
+pthread_cond_broadcast to libc.so.6.
+
+Printed order is reference, null attribute, default attribute. The numbers
+are the test's "times" (counter >> 1). Expected value is 200.
+
+01 pass 200 200 200
+02 fail 200 200 199
+03 pass 200 200 200
+04 pass 200 199 169
+05 fail 199 199 198
+06 pass 200 200 200
+07 fail 200 200 196
+08 fail 200 200 199
+09 pass 200 200 200
+10 pass 200 200 200
+11 fail 200 198 200
+12 pass 200 200 200
+13 fail 200 200 199
+14 pass 200 200 200
+15 pass 200 199 197
+16 pass 200 200 200
+17 pass 200 200 200
+18 fail 200 200 193
+19 pass 200 200 200
+20 pass 200 200 200
+
+Seven failures. The side that does not equal the reference is short by 1 to
+7. No side is 0. Run 04 passes with default=169 because neither side equals
+the reference. See docs/KNOWN_ISSUES.md.
