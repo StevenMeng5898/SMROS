@@ -1,7 +1,7 @@
-utc=2026-11-23T09:16:22Z
-git_head=86a692779845c29b5c09406c116d74d8898d7700
+utc=2026-11-23T11:10:06Z
+git_head=3bd7e4162ab2481a3674f7844d40364516163e24
 git_dirty=false
-serial_sha256=41f8fa8b93ec0e5df1da516486b72f624c02a53bcb99c212c7d3b6755ced0990
+serial_sha256=b01c39a7235560426500f6461d9123b100c168c0b36859de0f85f55d7954faef
 Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
 posixtest: selection tests=1600 apis=185 groups=9 interval=25 scope=selected
 posixtest: started
@@ -248,7 +248,7 @@ posixtest: progress tests=1580/1600 (98.75%) apis-complete=184/185 (99.45%) apis
 posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
 posixtest: completed
 Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
-NOTIFY-GATE SUMMARY attempts=1 late=0 values=50264848,50131488
+NOTIFY-GATE SUMMARY attempts=1 late=0 values=53974784,53525904
 CASE notify-gate-sleep RESULT PASS slept-on-time
 SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
 SECTEST SUMMARY pass=1 fail=0 xfail=0 xpass=0
@@ -323,13 +323,14 @@ Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
-Hermes phase posix-baseline phase=done pass=1393 fail=207 unavailable=0
+Hermes phase posix-baseline phase=done pass=1392 fail=208 unavailable=0
 Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
 Hermes phase verus phase=done pass=1 fail=0 unavailable=0
 Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
 Hermes phase futex-stress phase=done pass=1 fail=0 unavailable=0
 Hermes phase fuzzsc phase=done pass=1 fail=0 unavailable=0
 Hermes phase shm-mode pass mode=040755
+NOTIFY-GATE CAMPAIGN late=0 threshold=1
 Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
 Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0
 Hermes phase guest phase=done pass=7 fail=0 unavailable=0
@@ -341,7 +342,7 @@ Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
 Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
-Hermes phase posix-baseline phase=done pass=1393 fail=207 unavailable=0
+Hermes phase posix-baseline phase=done pass=1392 fail=208 unavailable=0
 Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
 Hermes phase verus phase=done pass=1 fail=0 unavailable=0
 Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
@@ -349,5 +350,5 @@ Hermes phase fuzzsc phase=done pass=1 fail=0 unavailable=0
 Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
 Hermes phase futex-stress phase=done pass=1 fail=0 unavailable=0
 Hermes phase shm-mode pass mode=040755
-Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1393/207/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1392/208/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
 Hermes test-all result: PASS

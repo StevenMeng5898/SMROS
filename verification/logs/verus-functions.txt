@@ -1,5 +1,5 @@
 ===== verus function evidence =====
-git_head=86a692779845c29b5c09406c116d74d8898d7700
+git_head=3bd7e4162ab2481a3674f7844d40364516163e24
 git_dirty=false
 dirty_files<<END
 
@@ -21,7 +21,7 @@ c087382ff717d959261cc1d78531a28bd71ba9103eec3f32d027ae97c653bef8  src/user_level
 6142815ce463b6edae3939eeacf1a56c9e1b05c31229353fea0f71b08a9531bc  src/user_level/services/security_case_logic_shared.rs
 harness_sha256:
 81b63a4059fd940cb56980edeafea5e011ad774d3a3c00124b6b606229905c73  verification/syscall/src/lib.rs
-581406736eae3ad71cab400203b938cde56ad9c272d790d5757bace610081107  verification/kernel_objects/src/lib.rs
+4be3af905275c7d4069c05379bc7e638a74f248688c79ed255385c5169b7e2fe  verification/kernel_objects/src/lib.rs
 4cf8574761adf412686d15be616c4137897620e21852e6dc5dbc556a1bfbd576  verification/kernel_lowlevel/src/lib.rs
 e46878989df6f430cf93f4e68430b414abc9768efe232691eea8f5a6301e6dd3  verification/user_level/src/lib.rs
 209bcab43ca47220a56e61becabc8b5dcd2f30c0d3fa8eeb3038e93f19fa8429  verification/services/src/lib.rs
