@@ -88,6 +88,7 @@ Implemented groups:
 - Stat/fstatat can report FxFS attributes for visible FxFS paths; statfs paths still return a modeled filesystem record.
 - Socket and IPC syscalls are modeled enough for deterministic syscall tests, not for a complete network stack or SysV IPC implementation.
 - The current user-level smoke tests do not validate a full Linux userspace ABI.
+- Group stop holds the process table lock across the running/exiting check and the task-table park, so an exit that has already entered `Exiting` is not parked. Two gaps remain. The scheduler thread is marked `Blocked` only after the task table update, so a thread can still be switched onto for a moment. `kernel_dispatch_active` (the shell's fuzz and Hermes dispatch path) does not take the group-stop path: `block_current` refuses to park that thread, and a queued stop is not applied to every sibling. `SIGSTOP` still stops a normal process immediately. `SIGTSTP`, `SIGTTIN`, and `SIGTTOU` are queued instead when every thread blocks them or a thread is already in `sigwait` / `sigtimedwait`.
 
 ## Zircon Side
 

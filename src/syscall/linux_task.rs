@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::kernel_lowlevel::thread::{self, ThreadId};
 use crate::kernel_objects::scheduler;
@@ -36,6 +36,43 @@ impl LinuxTaskRuntime {
             clone_slots: [riscv64_clone::LinuxCloneSlot::EMPTY; LINUX_TASK_LIMIT],
         }
     }
+}
+
+const PENDING_SIGNAL_WAKE_WORDS: usize = (thread::MAX_THREADS + 63) / 64;
+/// Set when a precision or tick expiry completed a signal wait but the
+/// scheduler thread was not `Blocked` yet. `block_current` and `schedule`
+/// consume it so the waiter is not left asleep with the outcome already done.
+static PENDING_SIGNAL_WAKE: [AtomicU64; PENDING_SIGNAL_WAKE_WORDS] = {
+    const WORD: AtomicU64 = AtomicU64::new(0);
+    [WORD; PENDING_SIGNAL_WAKE_WORDS]
+};
+
+fn pending_signal_wake_mask(scheduler_thread: usize) -> Option<(usize, u64)> {
+    if scheduler_thread == 0 || scheduler_thread >= thread::MAX_THREADS {
+        return None;
+    }
+    Some((scheduler_thread / 64, 1u64 << (scheduler_thread % 64)))
+}
+
+fn note_pending_signal_wake(scheduler_thread: usize) {
+    let Some((word, bit)) = pending_signal_wake_mask(scheduler_thread) else {
+        return;
+    };
+    PENDING_SIGNAL_WAKE[word].fetch_or(bit, Ordering::Release);
+}
+
+fn pending_signal_wake_is_set(scheduler_thread: usize) -> bool {
+    let Some((word, bit)) = pending_signal_wake_mask(scheduler_thread) else {
+        return false;
+    };
+    PENDING_SIGNAL_WAKE[word].load(Ordering::Acquire) & bit != 0
+}
+
+fn clear_pending_signal_wake(scheduler_thread: usize) {
+    let Some((word, bit)) = pending_signal_wake_mask(scheduler_thread) else {
+        return;
+    };
+    PENDING_SIGNAL_WAKE[word].fetch_and(!bit, Ordering::AcqRel);
 }
 
 static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
@@ -845,9 +882,13 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
                         scheduler_thread.0
                     );
                 }
+                // The timer may have completed this wait after the task table
+                // said Blocked and before the scheduler thread did.
+                honor_pending_signal_wake(scheduler_thread.0);
             }
             return Ok(task);
         }
+        clear_pending_signal_wake(scheduler_thread.0);
         let _ = with_runtime(|runtime| runtime.tasks.wake(task.tid, scheduler_thread.0));
         Err(SysError::EAGAIN)
     })();
@@ -892,6 +933,134 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
     })();
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
+}
+
+/// A completed signal wait could not wake `scheduler_thread` because it was
+/// not scheduler-blocked yet. If that thread is now blocked in `sigwait` /
+/// `sigtimedwait` with a finished outcome, make it runnable again.
+pub(crate) fn honor_pending_signal_wake(scheduler_thread: usize) {
+    if !pending_signal_wake_is_set(scheduler_thread) {
+        return;
+    }
+    clear_pending_signal_wake(scheduler_thread);
+    let wake_task = with_runtime(|runtime| match runtime.tasks.by_scheduler(scheduler_thread) {
+        Some(task)
+            if task.state == LinuxTaskState::Blocked
+                && task.block_reason == LinuxBlockReason::SignalWait =>
+        {
+            let finished = runtime
+                .tasks
+                .signal_state_mut(task.tid, scheduler_thread)
+                .and_then(|state| state.signal_wait)
+                .is_some_and(|wait| wait.outcome != LinuxSignalWaitOutcome::Waiting);
+            finished && runtime.tasks.wake(task.tid, scheduler_thread)
+        }
+        _ => false,
+    });
+    if !wake_task {
+        return;
+    }
+    if scheduler::scheduler().wake_thread(ThreadId(scheduler_thread)) {
+        return;
+    }
+    let _ = with_runtime(|runtime| {
+        let Some(task) = runtime.tasks.by_scheduler(scheduler_thread) else {
+            return;
+        };
+        let _ = runtime
+            .tasks
+            .block(task.tid, scheduler_thread, LinuxBlockReason::SignalWait);
+    });
+    note_pending_signal_wake(scheduler_thread);
+}
+
+/// Result of deciding whether a generated stop signal stops the group now.
+pub(crate) enum GeneratedGroupStop {
+    /// Queue the signal. A catchable stop is blocked by every thread, or a
+    /// `sigwait` / `sigtimedwait` is already waiting for it.
+    Defer,
+    /// Those runnable tasks are `Stopped` in the task table. The caller blocks
+    /// their scheduler threads after dropping the process lock.
+    Parked { runnable: Vec<LinuxTaskCore> },
+}
+
+/// Under the task lock, either defer a catchable stop or park the group.
+///
+/// `force` is `SIGSTOP`: it cannot be blocked or waited for as a catchable
+/// signal, so the group is parked whenever the caller has already decided the
+/// process is still running. The caller holds the process lock across this
+/// call so an exit cannot start between the state check and the park.
+///
+/// A catchable stop is deferred when a `sigwait` / `sigtimedwait` accepts it,
+/// or when every live thread has it blocked. A wait for a different signal
+/// does not defer the stop; that wait is interrupted by the stop itself.
+pub(crate) fn commit_generated_group_stop(
+    tgid: usize,
+    signum: usize,
+    force: bool,
+) -> Result<GeneratedGroupStop, SysError> {
+    if tgid == 0 || kernel_dispatch_active() {
+        return Ok(GeneratedGroupStop::Defer);
+    }
+    let runnable = with_runtime(|runtime| {
+        let defer = !force
+            && (runtime
+                .tasks
+                .accepting_signal_wait_target_for(tgid, signum)
+                .is_some()
+                || runtime
+                    .tasks
+                    .process_signal_target_for(tgid, signum)
+                    .is_none());
+        if defer {
+            None
+        } else {
+            let candidates: Vec<LinuxTaskCore> = runtime
+                .tasks
+                .tasks
+                .iter()
+                .copied()
+                .filter(|task| {
+                    task.tgid == tgid
+                        && task.state == LinuxTaskState::Runnable
+                        && task.scheduler_thread != 0
+                })
+                .collect();
+            let mut runnable = Vec::new();
+            for task in candidates {
+                if runtime.tasks.block(
+                    task.tid,
+                    task.scheduler_thread,
+                    LinuxBlockReason::Stopped,
+                ) {
+                    runnable.push(task);
+                }
+            }
+            Some(runnable)
+        }
+    });
+    match runnable {
+        Some(runnable) => Ok(GeneratedGroupStop::Parked { runnable }),
+        None => Ok(GeneratedGroupStop::Defer),
+    }
+}
+
+/// Block scheduler threads that `commit_generated_group_stop` already marked
+/// `Stopped`. Call this without the process lock: the scheduler lock and the
+/// process lock are acquired in opposite orders on the riscv switch path.
+pub(crate) fn block_scheduler_for_group_stop(runnable: Vec<LinuxTaskCore>) -> bool {
+    let current_scheduler = scheduler::scheduler().current().0;
+    let mut parked_current = false;
+    for task in runnable {
+        if scheduler::scheduler().block_thread(ThreadId(task.scheduler_thread)) {
+            if task.scheduler_thread == current_scheduler {
+                parked_current = true;
+            }
+        } else {
+            let _ = with_runtime(|runtime| runtime.tasks.wake(task.tid, task.scheduler_thread));
+        }
+    }
+    parked_current
 }
 
 /// Park every runnable thread in `tgid` as `Stopped`.
@@ -1224,12 +1393,7 @@ pub(crate) fn on_timer_tick(now: u64) {
         {
             let (tid, scheduler_thread, reason) = identity;
             if !wake_blocked(tid, scheduler_thread, reason) {
-                let _ = with_runtime(|runtime| {
-                    runtime
-                        .tasks
-                        .signal_state_mut(tid, scheduler_thread)
-                        .and_then(|state| state.take_signal_wait_outcome())
-                });
+                note_pending_signal_wake(scheduler_thread);
             }
         }
 
@@ -1271,12 +1435,9 @@ pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
         if wake_blocked(tid, scheduler_thread, reason) {
             woke_task = true;
         } else {
-            let _ = with_runtime(|runtime| {
-                runtime
-                    .tasks
-                    .signal_state_mut(tid, scheduler_thread)
-                    .and_then(|state| state.take_signal_wait_outcome())
-            });
+            // Leave the completed outcome in place. Clearing it here races
+            // with block_current and the waiter sleeps forever.
+            note_pending_signal_wake(scheduler_thread);
         }
     }
     loop {

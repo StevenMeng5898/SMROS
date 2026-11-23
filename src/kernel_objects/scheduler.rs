@@ -2199,6 +2199,8 @@ extern "C" fn idle_thread_entry() -> ! {
 
 /// Perform a context switch to the next thread
 pub fn schedule() {
+    let pending_waiter = scheduler().current();
+    crate::syscall::linux_task::honor_pending_signal_wake(pending_waiter.0);
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let s = scheduler();
     let executing_cpu = crate::kernel_lowlevel::smp::current_cpu_id() as usize;
@@ -2209,7 +2211,12 @@ pub fn schedule() {
     if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
         let current_id = s.current_thread;
         if next_id == current_id {
-            // No need to switch
+            // A pending signal-wait wake can mark this thread Ready while it
+            // is still the thread on the CPU. Keep that state Running.
+            if s.threads[current_id.0].state == ThreadState::Ready {
+                s.threads[current_id.0].state = ThreadState::Running;
+                s.set_ready_bit(current_id.0, false);
+            }
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
         }
@@ -2498,7 +2505,10 @@ pub fn schedule_on_cpu(cpu_id: usize) {
     if let Some(next_id) = s.schedule_next_for_cpu(cpu_id) {
         let current_id = s.current_thread;
         if next_id == current_id {
-            // No need to switch
+            if s.threads[current_id.0].state == ThreadState::Ready {
+                s.threads[current_id.0].state = ThreadState::Running;
+                s.set_ready_bit(current_id.0, false);
+            }
             crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
             return;
         }

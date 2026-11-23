@@ -1,4 +1,6 @@
 /target/
+**/__pycache__/
+*.pyc
 /target/posix/
 /host_shared/posixtest/
 /host_shared/.posixtest.tmp-*/

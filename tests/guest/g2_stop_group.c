@@ -7,7 +7,10 @@
 #include "poc_common.h"
 
 #include <pthread.h>
+#include <sys/syscall.h>
 #include <time.h>
+
+static int expect_no_further_stop(pid_t child, const char *label);
 
 struct group_state {
 	volatile unsigned started[4];
@@ -164,6 +167,8 @@ static int test_thread_group(void)
 	}
 	if (poc_expect_status(child, WUNTRACED, 0x137f, "thread-group stop") != 0)
 		return 1;
+	if (expect_no_further_stop(child, "thread-group second wait") != 0)
+		return 1;
 	if (sample_frozen(state, frozen) != 0)
 		return 1;
 	if (kill(child, SIGCONT) != 0) {
@@ -243,6 +248,9 @@ static int test_process_group(void)
 		return 1;
 	if (poc_expect_status(second, WUNTRACED, 0x137f, "pgroup second stop") != 0)
 		return 1;
+	if (expect_no_further_stop(first, "pgroup first second wait") != 0 ||
+	    expect_no_further_stop(second, "pgroup second second wait") != 0)
+		return 1;
 	before[0] = page[0];
 	before[1] = page[1];
 	usleep(80000);
@@ -274,11 +282,358 @@ static int test_process_group(void)
 	return 0;
 }
 
+static int expect_no_further_stop(pid_t child, const char *label)
+{
+	int status = -1;
+	pid_t got;
+
+	errno = 0;
+	got = waitpid(child, &status, WNOHANG | WUNTRACED);
+	if (got != 0) {
+		printf("FAIL %s waitpid=%d status=0x%x errno=%d\n", label,
+		       (int)got, status, errno);
+		return -1;
+	}
+	return 0;
+}
+
+static pid_t fork_spinner(volatile unsigned *slot, volatile unsigned *started)
+{
+	pid_t child = fork();
+
+	if (child < 0) {
+		perror("fork spinner");
+		exit(1);
+	}
+	if (child == 0)
+		spin_process(slot, started);
+	return child;
+}
+
+static int test_repeat_stop_and_kill(void)
+{
+	volatile unsigned *page = poc_shared_progress();
+	pid_t child;
+	int status = 0;
+
+	child = fork_spinner(&page[0], &page[1]);
+	if (wait_until(&page[1], "repeat spinner") != 0)
+		return 1;
+	if (kill(child, SIGSTOP) != 0) {
+		perror("repeat SIGSTOP");
+		return 1;
+	}
+	if (poc_expect_status(child, WUNTRACED, 0x137f, "repeat first stop") != 0)
+		return 1;
+	if (kill(child, SIGSTOP) != 0) {
+		perror("repeat second SIGSTOP");
+		return 1;
+	}
+	if (expect_no_further_stop(child, "STOP/STOP") != 0)
+		return 1;
+	if (kill(child, SIGCONT) != 0) {
+		perror("repeat SIGCONT");
+		return 1;
+	}
+	if (poc_expect_status(child, WCONTINUED, 0xffff, "STOP/STOP/CONT") != 0)
+		return 1;
+	if (kill(child, SIGSTOP) != 0) {
+		perror("pre-kill SIGSTOP");
+		return 1;
+	}
+	if (poc_expect_status(child, WUNTRACED, 0x137f, "pre-kill stop") != 0)
+		return 1;
+	if (kill(child, SIGKILL) != 0) {
+		perror("SIGKILL stopped group");
+		return 1;
+	}
+	if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) ||
+	    WTERMSIG(status) != SIGKILL) {
+		printf("FAIL stopped SIGKILL status=0x%x\n", status);
+		return 1;
+	}
+	printf("PASS repeated SIGSTOP and SIGKILL\n");
+	return 0;
+}
+
+struct wait_state {
+	volatile unsigned started;
+	volatile unsigned done;
+	volatile int word;
+};
+
+static void *futex_waiter(void *arg)
+{
+	struct wait_state *state = arg;
+	struct timespec timeout = { .tv_sec = 0, .tv_nsec = 200000000L };
+
+	state->started = 1;
+	syscall(SYS_futex, &state->word, 0, 0, &timeout, NULL, 0);
+	state->done = 1;
+	return NULL;
+}
+
+static void *signal_waiter(void *arg)
+{
+	struct wait_state *state = arg;
+	sigset_t set;
+	struct timespec timeout = { .tv_sec = 0, .tv_nsec = 200000000L };
+
+	sigemptyset(&set);
+	sigaddset(&set, SIGUSR2);
+	state->started = 1;
+	(void)sigtimedwait(&set, NULL, &timeout);
+	state->done = 1;
+	return NULL;
+}
+
+static int stop_while_waiting(void *(*worker)(void *), const char *label)
+{
+	struct wait_state *state = (struct wait_state *)group_state_map();
+	pthread_t thread;
+	pid_t child;
+
+	child = fork();
+	if (child < 0) {
+		perror("fork waiter");
+		return 1;
+	}
+	if (child == 0) {
+		if (pthread_create(&thread, NULL, worker, state) != 0)
+			_exit(1);
+		for (;;)
+			pause();
+	}
+	if (wait_until(&state->started, label) != 0)
+		return 1;
+	if (kill(child, SIGSTOP) != 0) {
+		perror("stop waiter");
+		return 1;
+	}
+	if (poc_expect_status(child, WUNTRACED, 0x137f, label) != 0)
+		return 1;
+	usleep(250000);
+	if (state->done != 0) {
+		printf("FAIL %s ran during SIGSTOP\n", label);
+		return 1;
+	}
+	if (kill(child, SIGCONT) != 0) {
+		perror("cont waiter");
+		return 1;
+	}
+	if (poc_expect_status(child, WCONTINUED, 0xffff, label) != 0)
+		return 1;
+	if (wait_until(&state->done, label) != 0)
+		return 1;
+	kill(child, SIGKILL);
+	waitpid(child, NULL, 0);
+	printf("PASS %s expired across SIGSTOP\n", label);
+	return 0;
+}
+
+static int test_blocked_sigtstp(void)
+{
+	volatile unsigned *page = poc_shared_progress();
+	volatile unsigned *phase = &page[0];
+	pid_t child;
+	sigset_t set;
+	sigset_t pending;
+	struct timespec slice = { .tv_sec = 1, .tv_nsec = 0 };
+	int got;
+	int status = 0;
+
+	*phase = 0;
+	child = fork();
+	if (child < 0) {
+		perror("fork sigtstp");
+		return 1;
+	}
+	if (child == 0) {
+		sigemptyset(&set);
+		sigaddset(&set, SIGTSTP);
+		if (sigprocmask(SIG_BLOCK, &set, NULL) != 0)
+			_exit(2);
+		if (kill(getpid(), SIGTSTP) != 0)
+			_exit(3);
+		if (sigpending(&pending) != 0 || !sigismember(&pending, SIGTSTP))
+			_exit(4);
+		got = sigtimedwait(&set, NULL, &slice);
+		if (got != SIGTSTP)
+			_exit(5);
+		phase[1] = 1;
+		_exit(0);
+	}
+	for (got = 0; got < 300 && phase[1] == 0; got++)
+		usleep(1000);
+	/*
+	 * The child exits as soon as sigtimedwait consumes the pending
+	 * SIGTSTP. WNOHANG may therefore observe that exit. A stop report
+	 * is the failure; a clean exit is the success.
+	 */
+	got = waitpid(child, &status, WNOHANG | WUNTRACED);
+	if (got == child && WIFSTOPPED(status)) {
+		printf("FAIL blocked SIGTSTP stopped the child status=0x%x\n",
+		       status);
+		return 1;
+	}
+	if (got == 0)
+		got = waitpid(child, &status, 0);
+	if (got != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+	    phase[1] == 0) {
+		printf("FAIL blocked SIGTSTP child status=0x%x phase=%u\n",
+		       status, phase[1]);
+		return 1;
+	}
+
+	*phase = 0;
+	child = fork();
+	if (child < 0) {
+		perror("fork sigtstp unblock");
+		return 1;
+	}
+	if (child == 0) {
+		sigemptyset(&set);
+		sigaddset(&set, SIGTSTP);
+		if (sigprocmask(SIG_BLOCK, &set, NULL) != 0)
+			_exit(2);
+		*phase = 1;
+		while (*phase == 1)
+			;
+		if (sigpending(&pending) != 0 || !sigismember(&pending, SIGTSTP))
+			_exit(4);
+		if (sigprocmask(SIG_UNBLOCK, &set, NULL) != 0)
+			_exit(5);
+		*phase = 3;
+		_exit(0);
+	}
+	if (wait_until(phase, "sigtstp blocked") != 0)
+		return 1;
+	if (kill(child, SIGTSTP) != 0) {
+		perror("kill SIGTSTP");
+		return 1;
+	}
+	*phase = 2;
+	if (poc_expect_status(child, WUNTRACED, 0x147f, "unblock SIGTSTP") != 0)
+		return 1;
+	if (expect_no_further_stop(child, "unblock SIGTSTP once") != 0)
+		return 1;
+	if (*phase == 3) {
+		printf("FAIL SIGTSTP unblock returned to userspace\n");
+		return 1;
+	}
+	if (kill(child, SIGCONT) != 0) {
+		perror("cont SIGTSTP");
+		return 1;
+	}
+	/*
+	 * The child exits as soon as SIGCONT resumes it, so the continued
+	 * status is not required to survive until wait. Reaching phase 3
+	 * is the resume, and the following reap must be a normal exit.
+	 */
+	for (got = 0; got < 300 && *phase != 3; got++)
+		usleep(1000);
+	if (*phase != 3) {
+		printf("FAIL SIGTSTP did not resume phase=%u\n", *phase);
+		return 1;
+	}
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != 0) {
+		printf("FAIL SIGTSTP child did not exit status=0x%x\n", status);
+		return 1;
+	}
+	printf("PASS blocked SIGTSTP\n");
+	return 0;
+}
+
+static int test_exit_sigstop_reaps(void)
+{
+	int i;
+
+	for (i = 0; i < 40; i++) {
+		pid_t child = fork();
+		int status = 0;
+		int spins = 0;
+
+		if (child < 0) {
+			perror("fork exit race");
+			return 1;
+		}
+		if (child == 0)
+			_exit(0);
+		(void)kill(child, SIGSTOP);
+		for (;;) {
+			pid_t got = waitpid(child, &status, WNOHANG | WUNTRACED);
+			if (got == child && WIFSTOPPED(status)) {
+				/*
+				 * SIGSTOP won the race and stopped a live
+				 * child. That is a normal stop, not an exit
+				 * that parked an unreported thread.
+				 */
+				if (kill(child, SIGCONT) != 0 && errno != ESRCH) {
+					printf("FAIL exit SIGSTOP cont child %d\n",
+					       (int)child);
+					return 1;
+				}
+				if (waitpid(child, &status, 0) != child) {
+					printf("FAIL exit SIGSTOP reap child %d\n",
+					       (int)child);
+					return 1;
+				}
+				break;
+			}
+			if (got == child)
+				break;
+			if (++spins > 200) {
+				printf("FAIL exit SIGSTOP left child %d\n", (int)child);
+				return 1;
+			}
+			usleep(1000);
+		}
+	}
+	printf("PASS exit SIGSTOP reaped\n");
+	return 0;
+}
+
+static int test_one_nanosecond_sigtimedwait(void)
+{
+	int i;
+
+	for (i = 0; i < 1000; i++) {
+		sigset_t set;
+		struct timespec timeout = { .tv_sec = 0, .tv_nsec = 1 };
+		int got;
+
+		sigemptyset(&set);
+		sigaddset(&set, SIGUSR2);
+		errno = 0;
+		got = sigtimedwait(&set, NULL, &timeout);
+		if (got != -1 || errno != EAGAIN) {
+			printf("FAIL 1ns sigtimedwait i=%d rc=%d errno=%d\n", i,
+			       got, errno);
+			return 1;
+		}
+	}
+	printf("PASS 1ns sigtimedwait x1000\n");
+	return 0;
+}
+
 int main(void)
 {
 	if (test_thread_group() != 0)
 		return 1;
 	if (test_process_group() != 0)
+		return 1;
+	if (test_repeat_stop_and_kill() != 0)
+		return 1;
+	if (stop_while_waiting(futex_waiter, "futex") != 0)
+		return 1;
+	if (stop_while_waiting(signal_waiter, "sigtimedwait") != 0)
+		return 1;
+	if (test_blocked_sigtstp() != 0)
+		return 1;
+	if (test_exit_sigstop_reaps() != 0)
+		return 1;
+	if (test_one_nanosecond_sigtimedwait() != 0)
 		return 1;
 	printf("PASS SIGSTOP broadcast\n");
 	return 0;

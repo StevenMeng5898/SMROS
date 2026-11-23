@@ -493,6 +493,71 @@ pub(crate) fn stop_process(
     Ok(transition)
 }
 
+pub(crate) struct LinuxGeneratedGroupStop {
+    pub parked_current: bool,
+    pub transition: Option<LinuxChildStateTransition>,
+}
+
+pub(crate) enum LinuxRunningGroupStop {
+    /// The signal stays pending and is handled on delivery.
+    Defer,
+    /// The process is gone or already exiting. Do not park and do not queue.
+    Exiting,
+    Stopped(LinuxGeneratedGroupStop),
+}
+
+/// Stop a still-running group, or report that the signal must stay queued.
+///
+/// The process lock is held across the running/exiting check, the optional
+/// wait-status update, and the task-table park. An exit that already called
+/// `begin_exit` therefore cannot be parked and then left unreported.
+pub(crate) fn stop_running_group(
+    pid: usize,
+    signum: usize,
+    force: bool,
+) -> Result<LinuxRunningGroupStop, SysError> {
+    let prepared = with_runtime(|runtime| {
+        let running = runtime
+            .processes
+            .by_pid(pid)
+            .is_some_and(|process| process.state == LinuxProcessState::Running);
+        if !running {
+            Ok(None)
+        } else {
+            let already_stopped = runtime
+                .processes
+                .by_pid(pid)
+                .is_some_and(|process| process.stopped);
+            match linux_task::commit_generated_group_stop(pid, signum, force) {
+                Ok(linux_task::GeneratedGroupStop::Defer) => Ok(Some(None)),
+                Ok(linux_task::GeneratedGroupStop::Parked { runnable }) => {
+                    let transition = if already_stopped {
+                        None
+                    } else {
+                        runtime.processes.stop_child(pid, signum)
+                    };
+                    Ok(Some(Some((runnable, transition))))
+                }
+                Err(error) => Err(error),
+            }
+        }
+    })?;
+    let Some(prepared) = prepared else {
+        return Ok(LinuxRunningGroupStop::Exiting);
+    };
+    let Some((runnable, transition)) = prepared else {
+        return Ok(LinuxRunningGroupStop::Defer);
+    };
+    let parked_current = linux_task::block_scheduler_for_group_stop(runnable);
+    if let Some(transition) = transition {
+        let _ = linux_task::wake_process_waiters(transition.parent_pid);
+    }
+    Ok(LinuxRunningGroupStop::Stopped(LinuxGeneratedGroupStop {
+        parked_current,
+        transition,
+    }))
+}
+
 pub(crate) fn continue_child(pid: usize) -> Result<Option<LinuxChildStateTransition>, SysError> {
     let transition = with_runtime(|runtime| runtime.processes.continue_child(pid));
     if let Some(transition) = transition {

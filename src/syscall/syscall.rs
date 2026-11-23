@@ -6156,16 +6156,42 @@ pub(crate) fn queue_process_linux_signal_and_wake(
     queue_process_linux_signal_and_wake_at(tgid, record, None)
 }
 
+/// `SIGSTOP` always stops the group. `SIGTSTP` / `SIGTTIN` / `SIGTTOU` stop
+/// immediately only when the default action is stop, some thread does not
+/// block the signal, and nobody is in `sigwait` / `sigtimedwait` for it.
+/// Otherwise the signal stays queued and the group stops at delivery, which
+/// is what happens after `sigprocmask` unblocks it.
+fn generated_stop_is_immediate(tgid: usize, signum: usize) -> Result<bool, SysError> {
+    if linux_task::kernel_dispatch_active() {
+        return Ok(false);
+    }
+    if signum == LINUX_SIGSTOP {
+        return Ok(true);
+    }
+    if !(linux_task::LINUX_STOP_SIGNAL_FIRST..=linux_task::LINUX_STOP_SIGNAL_LAST)
+        .contains(&signum)
+    {
+        return Ok(false);
+    }
+    Ok(linux_signal_disposition_for(tgid, signum)? == LinuxSignalDisposition::Stop)
+}
+
 /// Stop every runnable thread in the group and publish one wait status.
 ///
-/// The stop signal is consumed here. Leaving it pending would stop the group
-/// again on the way back from `SIGCONT`. Returns whether the caller was parked.
-fn apply_linux_group_stop(tgid: usize, signum: usize) -> Result<bool, SysError> {
-    let parked_current = linux_task::park_runnable_group_for_stop(tgid)?;
-    if let Some(transition) = linux_process::stop_process(tgid, signum)? {
-        notify_linux_child_state(transition, LINUX_CLD_STOPPED)?;
+/// `None` means the signal must be queued instead. A performed stop consumes
+/// the signal so `SIGCONT` does not stop the group a second time.
+fn apply_linux_group_stop(tgid: usize, signum: usize) -> Result<Option<bool>, SysError> {
+    let force = signum == LINUX_SIGSTOP;
+    match linux_process::stop_running_group(tgid, signum, force)? {
+        linux_process::LinuxRunningGroupStop::Defer => Ok(None),
+        linux_process::LinuxRunningGroupStop::Exiting => Ok(Some(false)),
+        linux_process::LinuxRunningGroupStop::Stopped(stop) => {
+            if let Some(transition) = stop.transition {
+                notify_linux_child_state(transition, LINUX_CLD_STOPPED)?;
+            }
+            Ok(Some(stop.parked_current))
+        }
     }
-    Ok(parked_current)
 }
 
 fn finish_linux_group_stop(parked_current: bool) {
@@ -6195,11 +6221,11 @@ fn queue_process_linux_signal_and_wake_at(
     let mut parked_current = false;
     let result = (|| {
         cancel_opposing_linux_stop_continue_signals(tgid, record.signum);
-        if !linux_task::kernel_dispatch_active()
-            && linux_signal_disposition_for(tgid, record.signum)? == LinuxSignalDisposition::Stop
-        {
-            parked_current = apply_linux_group_stop(tgid, record.signum)?;
-            return Ok(());
+        if generated_stop_is_immediate(tgid, record.signum)? {
+            if let Some(parked) = apply_linux_group_stop(tgid, record.signum)? {
+                parked_current = parked;
+                return Ok(());
+            }
         }
         if record.signum == LINUX_SIGCONT {
             // Continue even when SIGCONT is blocked. The signal stays pending
@@ -6298,13 +6324,13 @@ fn queue_directed_linux_signal(
             return terminate_linux_process_by_signal(validated_target.tgid, signum);
         }
         cancel_opposing_linux_stop_continue_signals(validated_target.tgid, signum);
-        if !linux_task::kernel_dispatch_active()
-            && linux_signal_disposition_for(validated_target.tgid, signum)?
-                == LinuxSignalDisposition::Stop
-        {
-            // tkill/tgkill of a stop signal still stops the whole thread group.
-            parked_current = apply_linux_group_stop(validated_target.tgid, signum)?;
-            return Ok(0);
+        if generated_stop_is_immediate(validated_target.tgid, signum)? {
+            // tkill/tgkill of SIGSTOP still stops the whole thread group.
+            // A catchable stop does so only when it can be delivered now.
+            if let Some(parked) = apply_linux_group_stop(validated_target.tgid, signum)? {
+                parked_current = parked;
+                return Ok(0);
+            }
         }
         match linux_signal_disposition_for(validated_target.tgid, signum)? {
             LinuxSignalDisposition::Ignore => Ok(0),
@@ -6590,7 +6616,15 @@ fn deliver_next_linux_signal(saved_regs: usize, return_pc: u64) -> LinuxSignalDe
                 if stop_current_linux_process_for_signal(signum).is_err() {
                     return LinuxSignalDeliveryOutcome::Idle;
                 }
-                if linux_task::block_current(LinuxBlockReason::Stopped).is_err() {
+                let parked_current = linux_task::current_task()
+                    .ok()
+                    .and_then(|task| {
+                        linux_task::park_runnable_group_for_stop(task.tgid).ok()
+                    })
+                    .unwrap_or(false);
+                let blocked_current =
+                    linux_task::block_current(LinuxBlockReason::Stopped).is_ok();
+                if !blocked_current && !parked_current {
                     return LinuxSignalDeliveryOutcome::Idle;
                 }
                 default_stopped = true;
