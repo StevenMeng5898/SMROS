@@ -1,5 +1,5 @@
 ===== verus function evidence =====
-git_head=6dff7d84e15cfadfa58c00742713fce1e52f9ff8
+git_head=9db5d557041daf07bf1590d142e5f9627ab0593f
 git_dirty=false
 dirty_files<<END
 
@@ -18,13 +18,13 @@ ae3ad0cda6a14038bab431cb62da6172e22fc6fb87e187c38990cd6c03b184f9  src/kernel_obj
 979e4fc5b09094a5a16403b1c8f72371a999c9f0caacfe36d50d23e6bd2aa0ed  src/syscall/uaccess_logic_shared.rs
 c087382ff717d959261cc1d78531a28bd71ba9103eec3f32d027ae97c653bef8  src/user_level/drivers/driver_logic_shared.rs
 13fda35133b588ba6e7bfd2e0848fdcfd00256f9c1fa9002dbaae35f10dc3c00  src/user_level/drivers/linux_logic_shared.rs
-129c8fbaf9e6cf85389ed7de6863d59538480891686ccad46169e0a5108213cd  src/user_level/services/security_case_logic_shared.rs
+6142815ce463b6edae3939eeacf1a56c9e1b05c31229353fea0f71b08a9531bc  src/user_level/services/security_case_logic_shared.rs
 harness_sha256:
 81b63a4059fd940cb56980edeafea5e011ad774d3a3c00124b6b606229905c73  verification/syscall/src/lib.rs
 bc905656807711a9a5ed149e463c5f8e58fd4d8e3652959255881c11d414c1cb  verification/kernel_objects/src/lib.rs
 4cf8574761adf412686d15be616c4137897620e21852e6dc5dbc556a1bfbd576  verification/kernel_lowlevel/src/lib.rs
 e46878989df6f430cf93f4e68430b414abc9768efe232691eea8f5a6301e6dd3  verification/user_level/src/lib.rs
-16618596d57f605edf1b3189502b833fde4d4146d7fb03d3655a32de0065c585  verification/services/src/lib.rs
+209bcab43ca47220a56e61becabc8b5dcd2f30c0d3fa8eeb3038e93f19fa8429  verification/services/src/lib.rs
 harness function mode success origin
 verus-kernel-lowlevel.log	lib::verified_kernel_budget_admit_heap	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_admit_heap_body
 verus-kernel-lowlevel.log	lib::verified_kernel_budget_admit_process	exec	True	src/kernel_lowlevel/kernel_budget_logic_shared.rs::smros_kernel_budget_admit_process_body
@@ -109,4 +109,5 @@ verus-user-level.log	lib::linux_bus_kind_valid	exec	True	src/user_level/drivers/
 verus-user-level.log	lib::linux_probe_status_ok	exec	True	src/user_level/drivers/linux_logic_shared.rs::smros_linux_probe_status_ok_body
 verus-services.log	lib::verified_sectest_trap_verdict	exec	True	src/user_level/services/security_case_logic_shared.rs::smros_sectest_trap_verdict_body
 verus-services.log	lib::verified_sectest_case_timed_out	exec	True	src/user_level/services/security_case_logic_shared.rs::smros_sectest_case_timed_out_body
+verus-services.log	lib::verified_notify_gate_allow_retry	exec	True	src/user_level/services/security_case_logic_shared.rs::smros_notify_gate_allow_retry_body
 verus-services.log	lib::verified_sectest_address_in_window	exec	True	src/user_level/services/security_case_logic_shared.rs::smros_sectest_address_in_window_body
