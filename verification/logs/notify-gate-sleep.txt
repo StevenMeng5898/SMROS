@@ -1,0 +1,69 @@
+===== notify-gate-sleep =====
+utc_start=2026-11-23T03:39:17Z
+utc_end=2026-11-23T03:40:26Z
+git_head=338c158d66e3b8cdf0be5543b9e332627a660ec5
+git_dirty=true
+measured_kernel=worktree that adds duration samples and the late-only retry on top of git_head. A later log-only commit republishes this file with that commit's git_head.
+runs=50
+fail=0
+retries=0
+early=0
+non_late_fail=0
+judge=one-shot; zero NOTIFY-GATE RETRY lines, so the late-only retry did not fire
+bound_ns=200000000
+request_ns=49999872
+percentile=linear interpolation at (n-1)*p on the sorted samples
+nanosleep_ns min=50172576 median=85245608 p95=158747254 max=179106496
+clock_ns min=50072192 median=51342432 p95=129054676 max=138816928
+failing_values=none
+run result detail nanosleep_ns clock_ns
+1 PASS slept-on-time 55369712 50072192
+2 PASS slept-on-time 54896736 50419328
+3 PASS slept-on-time 179106496 50121280
+4 PASS slept-on-time 92409632 50212992
+5 PASS slept-on-time 107372000 98981760
+6 PASS slept-on-time 148801248 50405264
+7 PASS slept-on-time 54119520 50242496
+8 PASS slept-on-time 129455744 50143792
+9 PASS slept-on-time 71087840 64132496
+10 PASS slept-on-time 53049664 52265536
+11 PASS slept-on-time 109172128 93450208
+12 PASS slept-on-time 93228336 77194608
+13 PASS slept-on-time 74455776 135046832
+14 PASS slept-on-time 60134304 138816928
+15 PASS slept-on-time 71192288 101895856
+16 PASS slept-on-time 70321808 110450320
+17 PASS slept-on-time 69028592 121467104
+18 PASS slept-on-time 65655856 50135824
+19 PASS slept-on-time 57523312 123396928
+20 PASS slept-on-time 50880192 66552272
+21 PASS slept-on-time 50172576 50149728
+22 PASS slept-on-time 95897248 110119392
+23 PASS slept-on-time 50203152 50117888
+24 PASS slept-on-time 138075792 50276496
+25 PASS slept-on-time 50305632 50305424
+26 PASS slept-on-time 172992992 50116768
+27 PASS slept-on-time 61186496 89443168
+28 PASS slept-on-time 98544752 50287760
+29 PASS slept-on-time 93425760 113540448
+30 PASS slept-on-time 140029728 50391776
+31 PASS slept-on-time 166884896 50372384
+32 PASS slept-on-time 108390080 50120848
+33 PASS slept-on-time 105644128 69111216
+34 PASS slept-on-time 78081584 88346384
+35 PASS slept-on-time 74418672 112831024
+36 PASS slept-on-time 99563136 50165184
+37 PASS slept-on-time 51676896 82443392
+38 PASS slept-on-time 52200288 80176128
+39 PASS slept-on-time 106666752 50118048
+40 PASS slept-on-time 125919120 50113088
+41 PASS slept-on-time 94590288 50136400
+42 PASS slept-on-time 72248224 65182256
+43 PASS slept-on-time 131735040 50167264
+44 PASS slept-on-time 140966112 50122432
+45 PASS slept-on-time 95255728 64259520
+46 PASS slept-on-time 77280304 130923552
+47 PASS slept-on-time 67276480 126770496
+48 PASS slept-on-time 116471504 50296048
+49 PASS slept-on-time 114733040 50297808
+50 PASS slept-on-time 58312352 72152896

@@ -1,0 +1,6 @@
+# Manual sign-off for a 已证明 function the mutation gate cannot check.
+# One function per line, tab-separated:
+#   lib::function_name<TAB>why a body mutation cannot be run
+# A justification is required. The audit fails for any 已证明 function that
+# has neither a killing mutation in verification/logs/verus-mutation-summary.txt
+# nor a line here. Do not use this file to accept a spec that survived mutation.

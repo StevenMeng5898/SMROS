@@ -241,7 +241,9 @@ RISC-V64, or `qemu-system-x86_64` for x86_64.
 
 ## Verification Harnesses
 
-Run all currently wired Verus proof harnesses:
+Run all currently wired Verus proof harnesses, the coverage audit, and the
+mutation gate. The gate is also `make verus-mutation`. `hermes test-all` runs
+it as the existing `verus` stage.
 
 ```bash
 make verus

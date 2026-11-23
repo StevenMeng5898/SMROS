@@ -27,6 +27,7 @@ Commands:
 - `make verus-kernel-lowlevel`
 - `make verus-user-level`
 - `make verus-services`
+- `make verus-mutation`
 - `make verus`
 
 The setup script downloads the pinned Verus release into `.tools/verus/current` and installs the Rust toolchain requested by that Verus release.
