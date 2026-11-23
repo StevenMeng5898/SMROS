@@ -5744,7 +5744,9 @@ fn run_hermes_guest_case(path: &str) -> HermesGuestCaseResult {
         return HermesGuestCaseResult::Fail;
     }
     let start = scheduler::scheduler().get_tick_count();
-    let deadline_ticks = 100u64.saturating_mul(60);
+    // g2_stop_group's 1000-round multithreaded STOP/CONT hammer needs more
+    // than a minute on the single boot CPU. 180s still fails a hang.
+    let deadline_ticks = 100u64.saturating_mul(180);
     loop {
         if let Some(result) = run_elf::take_captured_exit() {
             run_elf::end_capture();

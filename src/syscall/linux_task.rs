@@ -75,6 +75,34 @@ fn clear_pending_signal_wake(scheduler_thread: usize) {
     PENDING_SIGNAL_WAKE[word].fetch_and(!bit, Ordering::AcqRel);
 }
 
+/// Set when `SIGCONT` observed a task-table `Stopped` thread whose scheduler
+/// thread was not `Blocked` yet. `block_thread` consumes it before returning,
+/// so the continue cannot be lost in that window. A newer stop clears the bit
+/// while it marks the task `Stopped`.
+static PENDING_GROUP_CONTINUE: [AtomicU64; PENDING_SIGNAL_WAKE_WORDS] = {
+    const WORD: AtomicU64 = AtomicU64::new(0);
+    [WORD; PENDING_SIGNAL_WAKE_WORDS]
+};
+
+fn note_pending_group_continue(scheduler_thread: usize) {
+    let Some((word, bit)) = pending_signal_wake_mask(scheduler_thread) else {
+        return;
+    };
+    PENDING_GROUP_CONTINUE[word].fetch_or(bit, Ordering::Release);
+}
+
+fn take_pending_group_continue(scheduler_thread: usize) -> bool {
+    let Some((word, bit)) = pending_signal_wake_mask(scheduler_thread) else {
+        return false;
+    };
+    let previous = PENDING_GROUP_CONTINUE[word].fetch_and(!bit, Ordering::AcqRel);
+    previous & bit != 0
+}
+
+fn clear_group_continue(scheduler_thread: usize) {
+    let _ = take_pending_group_continue(scheduler_thread);
+}
+
 static LINUX_TASK_RUNTIME: LinuxRuntimeLock<LinuxTaskRuntime> =
     LinuxRuntimeLock::new(LinuxTaskRuntime::new());
 /// Set by the guest POSIX runner when the active launch root exceeds its
@@ -883,8 +911,13 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
                     );
                 }
                 // The timer may have completed this wait after the task table
-                // said Blocked and before the scheduler thread did.
+                // said Blocked and before the scheduler thread did. The bit is
+                // set under the task lock before that observation, and this
+                // recheck runs under the same lock.
                 honor_pending_signal_wake(scheduler_thread.0);
+            }
+            if reason == LinuxBlockReason::Stopped {
+                let _ = consume_pending_group_continue(scheduler_thread.0);
             }
             return Ok(task);
         }
@@ -896,12 +929,59 @@ pub(crate) fn block_current(reason: LinuxBlockReason) -> Result<LinuxTaskCore, S
     result
 }
 
+fn signal_wait_finished(runtime: &mut LinuxTaskRuntime, tid: usize, scheduler_thread: usize) -> bool {
+    runtime
+        .tasks
+        .signal_state_mut(tid, scheduler_thread)
+        .and_then(|state| state.signal_wait)
+        .is_some_and(|wait| wait.outcome != LinuxSignalWaitOutcome::Waiting)
+}
+
+/// Record a continue or a finished signal wait before looking at the scheduler.
+/// The bit and the later `block_thread` recheck share the task lock, so a
+/// continuer cannot observe "not blocked yet" and then lose the race.
+fn arm_wake_before_scheduler_check(tid: usize, scheduler_thread: usize, reason: LinuxBlockReason) {
+    if !matches!(
+        reason,
+        LinuxBlockReason::Stopped | LinuxBlockReason::SignalWait
+    ) {
+        return;
+    }
+    with_runtime(|runtime| {
+        let Some(task) = runtime.tasks.by_tid(tid) else {
+            return;
+        };
+        if task.scheduler_thread != scheduler_thread
+            || task.state != LinuxTaskState::Blocked
+            || task.block_reason != reason
+        {
+            return;
+        }
+        if reason == LinuxBlockReason::Stopped {
+            note_pending_group_continue(scheduler_thread);
+            return;
+        }
+        if signal_wait_finished(runtime, tid, scheduler_thread) {
+            note_pending_signal_wake(scheduler_thread);
+        }
+    });
+}
+
+fn disarm_armed_wake(scheduler_thread: usize, reason: LinuxBlockReason) {
+    if reason == LinuxBlockReason::Stopped {
+        clear_group_continue(scheduler_thread);
+    } else if reason == LinuxBlockReason::SignalWait {
+        clear_pending_signal_wake(scheduler_thread);
+    }
+}
+
 pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlockReason) -> bool {
     if reason == LinuxBlockReason::None {
         return false;
     }
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let result = (|| {
+        arm_wake_before_scheduler_check(tid, scheduler_thread, reason);
         let scheduler_id = ThreadId(scheduler_thread);
         let scheduler_state = scheduler::scheduler()
             .get_thread(scheduler_id)
@@ -919,7 +999,11 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
             {
                 return false;
             }
-            runtime.tasks.wake(tid, scheduler_thread)
+            let woke = runtime.tasks.wake(tid, scheduler_thread);
+            if woke {
+                disarm_armed_wake(scheduler_thread, reason);
+            }
+            woke
         });
         if !woken {
             return false;
@@ -929,10 +1013,31 @@ pub(crate) fn wake_blocked(tid: usize, scheduler_thread: usize, reason: LinuxBlo
             return true;
         }
         let _ = with_runtime(|runtime| runtime.tasks.block(tid, scheduler_thread, reason));
+        arm_wake_before_scheduler_check(tid, scheduler_thread, reason);
         false
     })();
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
     result
+}
+
+/// `block_thread` has published `Blocked`. If `SIGCONT` already cleared the
+/// stop, undo that block before the caller returns.
+fn consume_pending_group_continue(scheduler_thread: usize) -> bool {
+    with_runtime(|runtime| {
+        if !take_pending_group_continue(scheduler_thread) {
+            return false;
+        }
+        let Some(task) = runtime.tasks.by_scheduler(scheduler_thread) else {
+            return false;
+        };
+        let woke = task.state == LinuxTaskState::Blocked
+            && task.block_reason == LinuxBlockReason::Stopped
+            && runtime.tasks.wake(task.tid, scheduler_thread);
+        if woke {
+            let _ = scheduler::scheduler().wake_thread(ThreadId(scheduler_thread));
+        }
+        woke
+    })
 }
 
 /// A completed signal wait could not wake `scheduler_thread` because it was
@@ -1015,6 +1120,11 @@ pub(crate) fn commit_generated_group_stop(
         if defer {
             None
         } else {
+            for task in runtime.tasks.tasks.iter().copied() {
+                if task.tgid == tgid {
+                    clear_group_continue(task.scheduler_thread);
+                }
+            }
             let candidates: Vec<LinuxTaskCore> = runtime
                 .tasks
                 .tasks
@@ -1046,14 +1156,17 @@ pub(crate) fn commit_generated_group_stop(
 }
 
 /// Block scheduler threads that `commit_generated_group_stop` already marked
-/// `Stopped`. Call this without the process lock: the scheduler lock and the
-/// process lock are acquired in opposite orders on the riscv switch path.
+/// `Stopped`. There is no scheduler lock. Call this without the process lock:
+/// `schedule` on riscv takes that lock while it is already switching threads.
+/// After `block_thread`, a continue that arrived while the scheduler thread
+/// was still runnable is applied before this function returns.
 pub(crate) fn block_scheduler_for_group_stop(runnable: Vec<LinuxTaskCore>) -> bool {
     let current_scheduler = scheduler::scheduler().current().0;
     let mut parked_current = false;
     for task in runnable {
         if scheduler::scheduler().block_thread(ThreadId(task.scheduler_thread)) {
-            if task.scheduler_thread == current_scheduler {
+            let continued = consume_pending_group_continue(task.scheduler_thread);
+            if task.scheduler_thread == current_scheduler && !continued {
                 parked_current = true;
             }
         } else {
@@ -1089,6 +1202,7 @@ pub(crate) fn park_runnable_group_for_stop(tgid: usize) -> Result<bool, SysError
             continue;
         }
         let blocked = with_runtime(|runtime| {
+            clear_group_continue(task.scheduler_thread);
             runtime
                 .tasks
                 .block(task.tid, task.scheduler_thread, LinuxBlockReason::Stopped)
@@ -1097,7 +1211,8 @@ pub(crate) fn park_runnable_group_for_stop(tgid: usize) -> Result<bool, SysError
             continue;
         }
         if scheduler::scheduler().block_thread(ThreadId(task.scheduler_thread)) {
-            if task.scheduler_thread == current_scheduler {
+            let continued = consume_pending_group_continue(task.scheduler_thread);
+            if task.scheduler_thread == current_scheduler && !continued {
                 parked_current = true;
             }
         } else {
@@ -1108,6 +1223,15 @@ pub(crate) fn park_runnable_group_for_stop(tgid: usize) -> Result<bool, SysError
 }
 
 pub(crate) fn wake_stopped_group(tgid: usize) -> usize {
+    // Cover threads that are not Stopped yet. A continue that only wakes the
+    // threads already in the task table loses the race with block_thread.
+    with_runtime(|runtime| {
+        for task in runtime.tasks.tasks.iter().copied() {
+            if task.tgid == tgid && task.scheduler_thread != 0 {
+                note_pending_group_continue(task.scheduler_thread);
+            }
+        }
+    });
     let stopped = with_runtime(|runtime| {
         let mut stopped = Vec::new();
         for task in runtime.tasks.tasks.iter().copied() {
@@ -1389,12 +1513,15 @@ fn note_timer_notify_deferrals(now_tick: u64, tgids: &[usize]) -> bool {
 
 pub(crate) fn on_timer_tick(now: u64) {
     if crate::kernel_lowlevel::smp::current_cpu_id() == 0 {
-        while let Some(identity) = with_runtime(|runtime| runtime.tasks.expire_one_signal_wait(now))
-        {
-            let (tid, scheduler_thread, reason) = identity;
-            if !wake_blocked(tid, scheduler_thread, reason) {
+        while let Some(identity) = with_runtime(|runtime| {
+            let identity = runtime.tasks.expire_one_signal_wait(now);
+            if let Some((_, scheduler_thread, _)) = identity {
                 note_pending_signal_wake(scheduler_thread);
             }
+            identity
+        }) {
+            let (tid, scheduler_thread, reason) = identity;
+            let _ = wake_blocked(tid, scheduler_thread, reason);
         }
 
         loop {
@@ -1427,17 +1554,19 @@ pub(crate) fn on_timer_tick(now: u64) {
 pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
     let mut woke_task = false;
     while let Some(identity) = with_runtime(|runtime| {
-        runtime
+        let identity = runtime
             .tasks
-            .expire_one_signal_wait_precise(now_nanoseconds)
+            .expire_one_signal_wait_precise(now_nanoseconds);
+        if let Some((_, scheduler_thread, _)) = identity {
+            // Same task-lock section as the outcome update. The scheduler
+            // state is read only after this bit is visible.
+            note_pending_signal_wake(scheduler_thread);
+        }
+        identity
     }) {
         let (tid, scheduler_thread, reason) = identity;
         if wake_blocked(tid, scheduler_thread, reason) {
             woke_task = true;
-        } else {
-            // Leave the completed outcome in place. Clearing it here races
-            // with block_current and the waiter sleeps forever.
-            note_pending_signal_wake(scheduler_thread);
         }
     }
     loop {

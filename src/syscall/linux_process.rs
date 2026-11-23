@@ -234,6 +234,20 @@ pub(crate) fn visible_pids() -> Vec<usize> {
     })
 }
 
+pub(crate) fn current_running_slot() -> Result<usize, SysError> {
+    let pid = current()?.pid;
+    with_runtime(|runtime| {
+        runtime
+            .processes
+            .processes
+            .iter()
+            .position(|process| {
+                process.pid == pid && process.state == LinuxProcessState::Running
+            })
+            .ok_or(SysError::ESRCH)
+    })
+}
+
 pub(crate) fn set_process_group(pid: usize, process_group: usize) -> Result<(), SysError> {
     if process_group == 0 {
         return Err(SysError::EINVAL);

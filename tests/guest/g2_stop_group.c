@@ -7,6 +7,8 @@
 #include "poc_common.h"
 
 #include <pthread.h>
+#include <sched.h>
+#include <string.h>
 #include <sys/syscall.h>
 #include <time.h>
 
@@ -594,11 +596,424 @@ static int test_exit_sigstop_reaps(void)
 	return 0;
 }
 
-static int test_one_nanosecond_sigtimedwait(void)
+static volatile sig_atomic_t handled_signum;
+static volatile unsigned *handler_slot;
+
+static void catch_stop(int signum)
+{
+	handled_signum = signum;
+	if (handler_slot != NULL)
+		*handler_slot = 2;
+}
+
+struct kernel_sigaction {
+	void (*handler)(int);
+	unsigned long flags;
+	void (*restorer)(void);
+	unsigned long mask;
+};
+
+static int raw_sigaction(int signum, void (*handler)(int))
+{
+	struct kernel_sigaction action;
+
+	memset(&action, 0, sizeof(action));
+	action.handler = handler;
+	return syscall(SYS_rt_sigaction, signum, &action, NULL, 8);
+}
+
+static int test_caught_sigtstp(void)
+{
+	volatile unsigned *page = poc_shared_progress();
+	pid_t child;
+	int status = 0;
+
+	memset((void *)page, 0, 4096);
+	handled_signum = 0;
+	handler_slot = &page[1];
+	child = fork();
+	if (child < 0) {
+		perror("fork caught SIGTSTP");
+		return 1;
+	}
+	if (child == 0) {
+		page[2] = 1;
+		if (raw_sigaction(SIGTSTP, catch_stop) != 0)
+			_exit(2);
+		page[2] = 2;
+		page[0] = 1;
+		while (handled_signum == 0)
+			getpid();
+		page[2] = 3;
+		_exit(handled_signum == SIGTSTP ? 0 : 3);
+	}
+	if (wait_until(page, "caught SIGTSTP") != 0)
+		return 1;
+	if (kill(child, SIGTSTP) != 0) {
+		perror("kill caught SIGTSTP");
+		return 1;
+	}
+	if (waitpid(child, &status, 0) != child || !WIFEXITED(status) ||
+	    WEXITSTATUS(status) != 0) {
+		printf("FAIL handler SIGTSTP status=0x%x slot=%u stage=%u\n", status,
+		       page[1], page[2]);
+		return 1;
+	}
+	printf("PASS handler SIGTSTP\n");
+	return 0;
+}
+
+static int test_ignored_sigtstp(void)
+{
+	volatile unsigned *page = poc_shared_progress();
+	pid_t child;
+	int status = 0;
+	int got;
+
+	child = fork();
+	if (child < 0) {
+		perror("fork ignored SIGTSTP");
+		return 1;
+	}
+	if (child == 0) {
+		sigset_t pending;
+
+		if (raw_sigaction(SIGTSTP, SIG_IGN) != 0)
+			_exit(2);
+		if (kill(getpid(), SIGTSTP) != 0)
+			_exit(3);
+		if (sigpending(&pending) != 0 || sigismember(&pending, SIGTSTP))
+			_exit(4);
+		page[0] = 1;
+		_exit(0);
+	}
+	for (got = 0; got < 300 && page[0] == 0; got++)
+		usleep(1000);
+	got = waitpid(child, &status, WNOHANG | WUNTRACED);
+	if (got == child && WIFSTOPPED(status)) {
+		printf("FAIL ignored SIGTSTP stopped status=0x%x\n", status);
+		return 1;
+	}
+	if (got == 0)
+		got = waitpid(child, &status, 0);
+	if (got != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		printf("FAIL ignored SIGTSTP status=0x%x\n", status);
+		return 1;
+	}
+	printf("PASS ignored SIGTSTP\n");
+	return 0;
+}
+
+static int test_default_stop(int signum, const char *label)
+{
+	volatile unsigned *page = poc_shared_progress();
+	pid_t child;
+	int want = (signum << 8) | 0x7f;
+
+	child = fork();
+	if (child < 0) {
+		perror(label);
+		return 1;
+	}
+	if (child == 0) {
+		page[0] = 1;
+		for (;;)
+			pause();
+	}
+	if (wait_until(page, label) != 0)
+		return 1;
+	if (kill(child, signum) != 0) {
+		perror(label);
+		return 1;
+	}
+	if (poc_expect_status(child, WUNTRACED, want, label) != 0)
+		return 1;
+	if (expect_no_further_stop(child, label) != 0)
+		return 1;
+	if (kill(child, SIGCONT) != 0) {
+		perror(label);
+		return 1;
+	}
+	if (poc_expect_status(child, WCONTINUED, 0xffff, label) != 0)
+		return 1;
+	kill(child, SIGKILL);
+	waitpid(child, NULL, 0);
+	printf("PASS %s\n", label);
+	return 0;
+}
+
+struct partial_state {
+	volatile unsigned started;
+	volatile unsigned open_spin;
+	volatile unsigned blocked_spin;
+};
+
+static void *blocked_sigtstp_spin(void *arg)
+{
+	struct partial_state *state = arg;
+	sigset_t set;
+
+	sigemptyset(&set);
+	sigaddset(&set, SIGTSTP);
+	if (sigprocmask(SIG_BLOCK, &set, NULL) != 0)
+		return NULL;
+	state->started = 1;
+	for (;;)
+		state->blocked_spin++;
+	return NULL;
+}
+
+static int test_partial_block(void)
+{
+	struct partial_state *state = (struct partial_state *)group_state_map();
+	pthread_t thread;
+	pid_t child;
+	unsigned open_at_stop;
+	unsigned blocked_at_stop;
+
+	child = fork();
+	if (child < 0) {
+		perror("fork partial");
+		return 1;
+	}
+	if (child == 0) {
+		if (pthread_create(&thread, NULL, blocked_sigtstp_spin, state) != 0)
+			_exit(1);
+		while (state->started == 0)
+			usleep(1000);
+		for (;;)
+			state->open_spin++;
+	}
+	if (wait_until(&state->started, "partial block") != 0)
+		return 1;
+	usleep(2000);
+	if (kill(child, SIGTSTP) != 0) {
+		perror("partial SIGTSTP");
+		return 1;
+	}
+	if (poc_expect_status(child, WUNTRACED, 0x147f, "partial SIGTSTP") != 0)
+		return 1;
+	open_at_stop = state->open_spin;
+	blocked_at_stop = state->blocked_spin;
+	usleep(2000);
+	if (state->open_spin != open_at_stop ||
+	    state->blocked_spin != blocked_at_stop) {
+		printf("FAIL partial block ran while stopped\n");
+		return 1;
+	}
+	if (expect_no_further_stop(child, "partial SIGTSTP") != 0)
+		return 1;
+	if (kill(child, SIGCONT) != 0) {
+		perror("partial SIGCONT");
+		return 1;
+	}
+	if (poc_expect_status(child, WCONTINUED, 0xffff, "partial SIGCONT") != 0)
+		return 1;
+	if (wait_until(&state->open_spin, "partial resume") != 0)
+		return 1;
+	usleep(2000);
+	if (state->open_spin <= open_at_stop ||
+	    state->blocked_spin <= blocked_at_stop) {
+		printf("FAIL partial block did not resume\n");
+		return 1;
+	}
+	kill(child, SIGKILL);
+	waitpid(child, NULL, 0);
+	printf("PASS partial SIGTSTP block\n");
+	return 0;
+}
+
+struct sigwait_state {
+	volatile unsigned started;
+	volatile unsigned got;
+};
+
+static void *sigtstp_sigwait(void *arg)
+{
+	struct sigwait_state *state = arg;
+	sigset_t set;
+	int signum = 0;
+
+	sigemptyset(&set);
+	sigaddset(&set, SIGTSTP);
+	if (sigprocmask(SIG_BLOCK, &set, NULL) != 0)
+		return NULL;
+	state->started = 1;
+	if (sigwait(&set, &signum) == 0 && signum == SIGTSTP)
+		state->got = 1;
+	return NULL;
+}
+
+static int test_sigwait_peer(void)
+{
+	struct sigwait_state *state = (struct sigwait_state *)group_state_map();
+	pthread_t thread;
+	pid_t child;
+	int status = 0;
+	int got;
+
+	child = fork();
+	if (child < 0) {
+		perror("fork sigwait peer");
+		return 1;
+	}
+	if (child == 0) {
+		if (pthread_create(&thread, NULL, sigtstp_sigwait, state) != 0)
+			_exit(1);
+		while (state->got == 0)
+			usleep(1000);
+		_exit(0);
+	}
+	if (wait_until(&state->started, "sigwait peer") != 0)
+		return 1;
+	if (kill(child, SIGTSTP) != 0) {
+		perror("sigwait SIGTSTP");
+		return 1;
+	}
+	for (got = 0; got < 300 && state->got == 0; got++)
+		usleep(1000);
+	got = waitpid(child, &status, WNOHANG | WUNTRACED);
+	if (got == child && WIFSTOPPED(status)) {
+		printf("FAIL sigwait peer stopped status=0x%x\n", status);
+		return 1;
+	}
+	if (state->got == 0) {
+		printf("FAIL sigwait peer did not receive SIGTSTP\n");
+		return 1;
+	}
+	if (got == 0)
+		got = waitpid(child, &status, 0);
+	if (got != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+		printf("FAIL sigwait peer status=0x%x\n", status);
+		return 1;
+	}
+	printf("PASS sigwait peer SIGTSTP\n");
+	return 0;
+}
+
+struct hammer_state {
+	volatile unsigned spin[4];
+};
+
+static void *hammer_spin(void *arg)
+{
+	volatile unsigned *slot = arg;
+
+	for (;;) {
+		(*slot)++;
+		if ((*slot & 63u) == 0)
+			sched_yield();
+	}
+	return NULL;
+}
+
+static int quiet_status(pid_t child, int options, int want)
+{
+	int status = 0;
+
+	if (waitpid(child, &status, options) != child || status != want)
+		return -1;
+	return 0;
+}
+
+static int counters_held(struct hammer_state *state, const unsigned *sample)
 {
 	int i;
 
-	for (i = 0; i < 1000; i++) {
+	for (i = 0; i < 4; i++) {
+		if (state->spin[i] != sample[i])
+			return 0;
+	}
+	return 1;
+}
+
+static int counters_moved(struct hammer_state *state, const unsigned *sample)
+{
+	int i;
+	int spins;
+
+	for (spins = 0; spins < 300; spins++) {
+		int ready = 1;
+
+		for (i = 0; i < 4; i++) {
+			/* A spinning counter wraps. Any change is progress. */
+			if (state->spin[i] == sample[i])
+				ready = 0;
+		}
+		if (ready)
+			return 1;
+		usleep(1000);
+	}
+	return 0;
+}
+
+static int test_stop_cont_hammer(void)
+{
+	struct hammer_state *state = (struct hammer_state *)group_state_map();
+	pthread_t thread[4];
+	pid_t child;
+	int round;
+
+	child = fork();
+	if (child < 0) {
+		perror("fork hammer");
+		return 1;
+	}
+	if (child == 0) {
+		int i;
+
+		for (i = 0; i < 4; i++) {
+			if (pthread_create(&thread[i], NULL, hammer_spin,
+					   (void *)&state->spin[i]) != 0)
+				_exit(1);
+		}
+		for (;;)
+			pause();
+	}
+	if (wait_until(&state->spin[0], "hammer") != 0)
+		return 1;
+	for (round = 0; round < 1000; round++) {
+		unsigned sample[4];
+		int i;
+
+		for (i = 0; i < 4; i++)
+			sample[i] = state->spin[i];
+		if (kill(child, SIGSTOP) != 0) {
+			perror("hammer SIGSTOP");
+			return 1;
+		}
+		if (quiet_status(child, WUNTRACED, 0x137f) != 0) {
+			printf("FAIL hammer round %d did not stop\n", round);
+			return 1;
+		}
+		if (!counters_held(state, sample)) {
+			printf("FAIL hammer round %d ran while stopped\n", round);
+			return 1;
+		}
+		if (kill(child, SIGCONT) != 0) {
+			perror("hammer SIGCONT");
+			return 1;
+		}
+		if (quiet_status(child, WCONTINUED, 0xffff) != 0) {
+			printf("FAIL hammer round %d did not continue\n", round);
+			return 1;
+		}
+		if (!counters_moved(state, sample)) {
+			printf("FAIL hammer round %d thread stalled\n", round);
+			return 1;
+		}
+	}
+	kill(child, SIGKILL);
+	waitpid(child, NULL, 0);
+	printf("PASS stop/cont hammer x1000\n");
+	return 0;
+}
+
+static int test_one_nanosecond_sigtimedwait(int count)
+{
+	int i;
+
+	for (i = 0; i < count; i++) {
 		sigset_t set;
 		struct timespec timeout = { .tv_sec = 0, .tv_nsec = 1 };
 		int got;
@@ -613,12 +1028,31 @@ static int test_one_nanosecond_sigtimedwait(void)
 			return 1;
 		}
 	}
-	printf("PASS 1ns sigtimedwait x1000\n");
+	printf("PASS 1ns sigtimedwait x%d\n", count);
 	return 0;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+	if (argc > 1 && strcmp(argv[1], "handler") == 0)
+		return test_caught_sigtstp();
+	if (argc > 1 && strcmp(argv[1], "hammer") == 0)
+		return test_stop_cont_hammer();
+	if (argc > 1 && strcmp(argv[1], "seq") == 0) {
+		if (test_caught_sigtstp() != 0)
+			return 1;
+		if (test_blocked_sigtstp() != 0)
+			return 1;
+		if (test_caught_sigtstp() != 0)
+			return 1;
+		printf("PASS handler after blocked\n");
+		return 0;
+	}
+	if (argc > 1 && strcmp(argv[1], "nsec") == 0) {
+		int count = argc > 2 ? atoi(argv[2]) : 100000;
+
+		return test_one_nanosecond_sigtimedwait(count);
+	}
 	if (test_thread_group() != 0)
 		return 1;
 	if (test_process_group() != 0)
@@ -631,9 +1065,25 @@ int main(void)
 		return 1;
 	if (test_blocked_sigtstp() != 0)
 		return 1;
+	if (test_caught_sigtstp() != 0)
+		return 1;
+	if (test_ignored_sigtstp() != 0)
+		return 1;
+	if (test_default_stop(SIGTSTP, "default SIGTSTP") != 0)
+		return 1;
+	if (test_partial_block() != 0)
+		return 1;
+	if (test_sigwait_peer() != 0)
+		return 1;
+	if (test_default_stop(SIGTTIN, "default SIGTTIN") != 0)
+		return 1;
+	if (test_default_stop(SIGTTOU, "default SIGTTOU") != 0)
+		return 1;
 	if (test_exit_sigstop_reaps() != 0)
 		return 1;
-	if (test_one_nanosecond_sigtimedwait() != 0)
+	if (test_stop_cont_hammer() != 0)
+		return 1;
+	if (test_one_nanosecond_sigtimedwait(1000) != 0)
 		return 1;
 	printf("PASS SIGSTOP broadcast\n");
 	return 0;

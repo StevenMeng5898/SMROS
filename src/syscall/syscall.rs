@@ -4315,7 +4315,10 @@ impl MemorySyscallState {
 }
 
 static mut MEMORY_SYSCALL_STATE: Option<MemorySyscallState> = None;
-static LINUX_SIGNAL_TRAMPOLINE: AtomicU64 = AtomicU64::new(0);
+static LINUX_SIGNAL_TRAMPOLINE: [AtomicU64; linux_process::LINUX_PROCESS_LIMIT] = {
+    const SLOT: AtomicU64 = AtomicU64::new(0);
+    [SLOT; linux_process::LINUX_PROCESS_LIMIT]
+};
 static LINUX_TIMER_SIGNAL_DIAGNOSTIC_TICKS: AtomicU64 = AtomicU64::new(0);
 static LINUX_TIMER_SIGNAL_DIAGNOSTIC_REJECTS: AtomicU64 = AtomicU64::new(0);
 static LINUX_REALTIME_OFFSET_NANOS: AtomicI64 = AtomicI64::new(LINUX_DEFAULT_REALTIME_OFFSET_NANOS);
@@ -5633,7 +5636,9 @@ fn linux_timeval_from_ticks(ticks: u64) -> LinuxTimeval {
 
 pub fn reset_linux_signal_timer_state() {
     let _ = linux_process::reset_current_signal_state();
-    LINUX_SIGNAL_TRAMPOLINE.store(0, Ordering::SeqCst);
+    for slot in &LINUX_SIGNAL_TRAMPOLINE {
+        slot.store(0, Ordering::SeqCst);
+    }
     LINUX_REALTIME_OFFSET_NANOS.store(LINUX_DEFAULT_REALTIME_OFFSET_NANOS, Ordering::SeqCst);
     LINUX_CPU_CLOCK_OFFSET_NANOS.store(0, Ordering::SeqCst);
 }
@@ -5686,9 +5691,36 @@ fn store_linux_signal_action(signum: usize, action: LinuxKernelSigaction) -> Res
     Ok(())
 }
 
+fn linux_signal_trampoline_matches(address: usize) -> bool {
+    if !linux_user_buffer_readable(address, 4) {
+        return false;
+    }
+    let mut bytes = [0u8; 4];
+    if linux_copy_from_user(address, &mut bytes).is_err() {
+        return false;
+    }
+    let word = u32::from_ne_bytes(bytes);
+    #[cfg(target_arch = "aarch64")]
+    {
+        word == 0xd63f_0200
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        word == 0x08b0_0893
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    {
+        let _ = word;
+        false
+    }
+}
+
 fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
-    let existing = LINUX_SIGNAL_TRAMPOLINE.load(Ordering::SeqCst) as usize;
-    if existing != 0 {
+    let slot = linux_process::current_running_slot()?;
+    let existing = LINUX_SIGNAL_TRAMPOLINE[slot].load(Ordering::SeqCst) as usize;
+    // A reused process slot can land on a different address space where the
+    // old numeric address is readable but is no longer this trampoline.
+    if existing != 0 && linux_signal_trampoline_matches(existing) {
         return Ok(existing);
     }
 
@@ -5717,7 +5749,7 @@ fn ensure_linux_signal_trampoline() -> Result<usize, SysError> {
         PAGE_SIZE,
         MmapProt::READ.bits() | MmapProt::EXEC.bits(),
     )?;
-    LINUX_SIGNAL_TRAMPOLINE.store(mapped as u64, Ordering::SeqCst);
+    LINUX_SIGNAL_TRAMPOLINE[slot].store(mapped as u64, Ordering::SeqCst);
     Ok(mapped)
 }
 
