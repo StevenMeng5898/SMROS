@@ -1,0 +1,13 @@
+# Status changes between the saved 1364 run and this official rerun (1358 pass).
+# posix-baseline runs the Linux qemu-user reference. It does not execute the SMROS kernel.
+test_id	old	new	duration_ms	signal
+conformance/interfaces/aio_cancel/6-1.c	pass	unresolved	220	None
+conformance/interfaces/aio_fsync/4-1.c	pass	crash	222	1
+conformance/interfaces/aio_fsync/4-2.c	pass	crash	244	11
+conformance/interfaces/aio_fsync/8-2.c	pass	crash	204	1
+conformance/interfaces/mq_close/1-1.c	pass	unresolved	200	None
+conformance/interfaces/mq_close/3-1.c	pass	unresolved	200	None
+conformance/interfaces/mq_close/4-1.c	fail	unresolved	216	None
+conformance/interfaces/pthread_cond_init/4-1.c	timeout	unresolved	25816	None
+conformance/interfaces/pthread_create/10-1.c	crash	pass	10209	None
+conformance/interfaces/sigaction/16-12.c	pass	fail	232	None
