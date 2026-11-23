@@ -1,15 +1,7 @@
-===== campaign summary =====
-utc_start=2026-11-23T05:07:44Z
-utc_end=2026-11-23T06:31:38Z
-git_head=6dff7d84e15cfadfa58c00742713fce1e52f9ff8
-git_dirty=false
-The guest booted this commit. Full serial output is not committed.
-posixtest: progress tests=1600/1600 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+NOTIFY-GATE SUMMARY attempts=1 late=0 values=90367648,111783200
+notify-gate disclosure attempts=1 late=0 values=90367648,111783200
+posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
 posixtest: completed
-NOTIFY-GATE SLEEP samples=2 nanosleep_ns=124469792 clock_ns=52513456
-CASE notify-gate-sleep RESULT PASS slept-on-time
-NOTIFY-GATE RETRY count=0
 SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
-posix-baseline reference pass=1393 nonpass=207 unavailable=0
-Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1393/207/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1392/208/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
 Hermes test-all result: PASS

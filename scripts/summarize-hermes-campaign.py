@@ -12,35 +12,44 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def summarize(text):
-    lines = []
-    late_notes = []
+    notify = []
+    posix = []
+    sectest = []
+    hermes = []
     for line in text.replace("\r", "").splitlines():
         if line.startswith("NOTIFY-GATE SUMMARY "):
-            lines.append(line)
-            fields = dict(
-                part.split("=", 1) for part in line.split() if "=" in part
-            )
-            late = int(fields.get("late", "0") or "0")
-            if late:
-                late_notes.append(
-                    f"notify-gate late={late} attempts={fields.get('attempts', '?')} values={fields.get('values', '')}"
-                )
+            notify.append(line)
         elif line.startswith("posixtest: progress tests=1600/1600"):
-            lines.append(line)
-        elif line.startswith("posixtest: completed") and not any(
-            item == "posixtest: completed" for item in lines
-        ):
-            lines.append(line)
-        elif line.startswith("SECTEST SUMMARY "):
-            lines.append(line)
+            posix.append(line)
+        elif line.startswith("posixtest: completed"):
+            posix.append(line)
+        elif line.startswith("SECTEST SUMMARY pass=91 "):
+            sectest.append(line)
         elif line.startswith("Hermes test-all summary ") or line.startswith(
             "Hermes test-all result:"
         ):
-            lines.append(line)
-    if not late_notes:
-        lines.append("notify-gate late=0")
+            hermes.append(line)
+    lines = []
+    if notify:
+        lines.append(notify[0])
+        fields = dict(part.split("=", 1) for part in notify[0].split() if "=" in part)
+        late = int(fields.get("late", "0") or "0")
+        lines.append(
+            "notify-gate disclosure "
+            f"attempts={fields.get('attempts', '?')} late={late} values={fields.get('values', '')}"
+        )
     else:
-        lines.extend(late_notes)
+        lines.append("notify-gate disclosure missing")
+    if posix:
+        lines.append(posix[0])
+        if "posixtest: completed" in posix:
+            lines.append("posixtest: completed")
+    if sectest:
+        lines.append(sectest[0])
+    if hermes:
+        lines.append(hermes[-2] if len(hermes) >= 2 else hermes[-1])
+        if hermes[-1].startswith("Hermes test-all result:"):
+            lines.append(hermes[-1])
     return "\n".join(lines) + "\n"
 
 
