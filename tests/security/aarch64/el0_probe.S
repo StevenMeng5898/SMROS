@@ -9,6 +9,8 @@
  *      13 owner chmod then non-owner EPERM
  *      14 SIGEV_THREAD notify-gate: process A re-arms a near deadline while
  *         process B's nanosleep and clock_nanosleep must return within 200ms
+ *         and not before the requested 49999872 ns. Early wakes use 36 and 37
+ *         and are not retried.
  *   Path for op 13 is planted at 0x400. The fd is saved at 0x480.
  *   stat buffer is 0x500.
  *   8  target
@@ -435,7 +437,8 @@ chmod_kept:
  * the kernel gate is armed, then forks. The child measures a 50ms nanosleep
  * and a 50ms clock_nanosleep. The parent keeps re-arming a 1ms deadline and
  * then wait4s without returning to sigwait, so the gate stays armed. Exit 0
- * only when both of the child's sleeps finish in under 200ms.
+ * only when both of the child's sleeps last at least the requested 49999872 ns
+ * and finish in under 200ms.
  *
  * Data page:
  *   0x200 sigevent, 0x240 itimerspec, 0x260 sleep request,
@@ -624,6 +627,10 @@ ng_child:
     add x4, x4, x5
 ng_nano_delta:
     cbnz x2, ng_child_slow_nano
+    movz x5, #0xF080
+    movk x5, #0x02FA, lsl #16
+    cmp x4, x5
+    b.lo ng_child_early_nano
     movz x5, #0xC200
     movk x5, #0x0BEB, lsl #16
     cmp x4, x5
@@ -670,6 +677,10 @@ ng_nano_delta:
     add x4, x4, x5
 ng_cns_delta:
     cbnz x2, ng_child_slow_clock
+    movz x5, #0xF080
+    movk x5, #0x02FA, lsl #16
+    cmp x4, x5
+    b.lo ng_child_early_clock
     movz x5, #0xC200
     movk x5, #0x0BEB, lsl #16
     cmp x4, x5
@@ -714,6 +725,12 @@ ng_child_cns:
     b exit_now
 ng_child_slow_clock:
     mov x0, #35
+    b exit_now
+ng_child_early_nano:
+    mov x0, #36
+    b exit_now
+ng_child_early_clock:
+    mov x0, #37
     b exit_now
 exit_now:
     movz x8, #93

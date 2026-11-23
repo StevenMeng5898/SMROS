@@ -142,8 +142,12 @@ def alt_expr(rtype, kind):
     return None
 
 
+BLOCK_OPENERS = {"match", "if", "while", "for", "loop", "unsafe"}
+RLIMIT = "10"
+
+
 def mutants_for(rtype, body):
-    """Ordered mutants. The first successful verification failure wins."""
+    """Candidate bodies. Bool and Option need both sides killed."""
     rtype = rtype.strip()
     zero = zero_expr(rtype)
     one = alt_expr(rtype, "one")
@@ -160,37 +164,124 @@ def mutants_for(rtype, body):
     return mutants
 
 
-def function_span(text, name):
-    pattern = re.compile(rf"(?m)^(?:pub(?:\([^)]*\))?\s+)?fn {re.escape(name)}\b")
-    found = list(pattern.finditer(text))
-    if len(found) != 1:
-        return None
-    start = found[0].start()
-    index = found[0].end()
-    paren = 0
-    body = None
+def skip_trivia(text, index):
     while index < len(text):
+        if text.startswith("//", index):
+            newline = text.find("\n", index)
+            if newline < 0:
+                return len(text)
+            index = newline + 1
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                return len(text)
+            index = end + 2
+            continue
+        if text[index] == '"':
+            index += 1
+            while index < len(text) and text[index] != '"':
+                index += 2 if text[index] == "\\" else 1
+            index += 1
+            continue
+        return index
+    return index
+
+
+def read_word(text, index):
+    if index >= len(text) or not (text[index].isalpha() or text[index] == "_"):
+        return None, index
+    end = index + 1
+    while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+        end += 1
+    return text[index:end], end
+
+
+def body_open_index(text, index):
+    """Index of the function-body brace after the signature and spec.
+
+    A `{` that opens `match`/`if`/loop in an ensures clause is not the body.
+    """
+    paren = brace = bracket = 0
+    seen_arrow = False
+    signature_done = False
+    pending = None
+    while index < len(text):
+        index = skip_trivia(text, index)
+        if index >= len(text):
+            break
+        if not signature_done and text.startswith("->", index) and paren == 0 and brace == 0:
+            seen_arrow = True
+            index += 2
+            continue
+        word, next_index = read_word(text, index)
+        if word is not None:
+            if (
+                signature_done
+                and word in BLOCK_OPENERS
+                and brace == 0
+                and paren == 0
+                and bracket == 0
+            ):
+                pending = word
+            index = next_index
+            continue
         char = text[index]
-        if char == "(":
+        if char == "{":
+            if brace == 0 and paren == 0 and bracket == 0 and pending:
+                pending = None
+                brace = 1
+            elif signature_done and brace == 0 and paren == 0 and bracket == 0:
+                return index
+            else:
+                brace += 1
+        elif char == "}":
+            brace = max(0, brace - 1)
+        elif char == "(":
             paren += 1
         elif char == ")":
             paren = max(0, paren - 1)
-        elif char == "{" and paren == 0:
-            body = index
-            break
+            if paren == 0 and brace == 0 and seen_arrow:
+                signature_done = True
+        elif char == "[":
+            bracket += 1
+        elif char == "]":
+            bracket = max(0, bracket - 1)
         index += 1
-    if body is None:
-        return None
+    return None
+
+
+def matching_brace(text, body):
     depth = 0
-    for index in range(body, len(text)):
+    index = body
+    while index < len(text):
+        index = skip_trivia(text, index)
+        if index >= len(text):
+            return None
         char = text[index]
         if char == "{":
             depth += 1
         elif char == "}":
             depth -= 1
             if depth == 0:
-                return start, body, index
+                return index
+        index += 1
     return None
+
+
+def function_span(text, name):
+    pattern = re.compile(rf"(?m)^(?:pub(?:\([^)]*\))?\s+)?fn {re.escape(name)}\b")
+    found = list(pattern.finditer(text))
+    if len(found) != 1:
+        return None
+    start = found[0].start()
+    body = body_open_index(text, found[0].end())
+    if body is None:
+        return None
+    close = matching_brace(text, body)
+    if close is None:
+        return None
+    return start, body, close
 
 
 def return_type(signature):
@@ -220,20 +311,23 @@ def apply_mutant(text, body_open, body_close, expr):
 
 
 def classify(code, output):
+    """Only a postcondition or assertion failure is a kill.
+
+    Syntax errors, timeouts, a missing toolchain, rlimit, and panics are
+    invalid. The gate fails on invalid; it does not count them as killed.
+    """
     if code == 0 and re.search(r"\b0 errors\b", output):
         return "survived"
-    compile_error = (
-        re.search(r"error\[E\d+\]", output) is not None
-        or "mismatched types" in output
-        or "cannot find value" in output
-        or "expected expression" in output
-    )
-    proof_error = "postcondition" in output or "assertion failed" in output
-    if compile_error and not proof_error:
-        return "invalid"
-    if code != 0:
+    if code != 0 and (
+        "postcondition not satisfied" in output or "assertion failed" in output
+    ):
         return "killed"
     return "invalid"
+
+
+def gate_exit(kind):
+    """Killed is the only passing mutant result. Everything else fails the gate."""
+    return 0 if kind == "killed" else 1
 
 
 def run_verus(bin_path, source, function, env, timeout):
@@ -264,6 +358,8 @@ def run_verus(bin_path, source, function, env, timeout):
         except subprocess.TimeoutExpired as exc:
             out = (exc.stdout or "") + (exc.stderr or "")
             return 1, out + "\nerror: mutation run timed out\n"
+        except OSError as exc:
+            return 1, f"error: toolchain missing: {exc}\n"
     return result.returncode, result.stdout + result.stderr
 
 
@@ -321,15 +417,51 @@ def load_cache():
         return cached
     for line in SUMMARY.read_text().splitlines():
         parts = line.split("\t")
-        if len(parts) != 5 or not parts[0].startswith("lib::"):
+        if len(parts) != 6 or not parts[0].startswith("lib::"):
             continue
-        qualified, harness, mutation, digest, result = parts
+        qualified, harness, mutation, body_sha, cache_sha, result = parts
         cached[(harness, qualified)] = {
             "mutation": mutation,
-            "digest": digest,
+            "digest": body_sha,
+            "cache": cache_sha,
             "result": result,
         }
     return cached
+
+
+def tool_fingerprint(bin_path):
+    try:
+        result = subprocess.run(
+            [str(bin_path), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        text = (result.stdout + result.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        text = f"missing:{exc}"
+    return f"{text}\nrlimit={RLIMIT}".encode()
+
+
+def cache_digest(parts):
+    digest = hashlib.sha256()
+    for part in parts:
+        if isinstance(part, str):
+            part = part.encode()
+        digest.update(part)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def function_cache_key(row, function_text, bin_path):
+    harness = HARNESS[row["harness"]].read_bytes()
+    origin = row.get("origin", "").split("::", 1)[0]
+    shared_path = ROOT / origin if origin else None
+    shared = shared_path.read_bytes() if shared_path and shared_path.is_file() else b""
+    return cache_digest(
+        [harness, shared, tool_fingerprint(bin_path), f"rlimit={RLIMIT}", function_text]
+    )
 
 
 def harness_filter(argv):
@@ -363,8 +495,10 @@ def write_summary(rows):
         f"killed={killed}",
         f"signed_off={signed}",
         f"vacuous={vacuous}",
-        "A matching body_sha256 skips Verus. Full prover output is not stored.",
-        "function\tharness\tmutation\tbody_sha256\tresult",
+        "body_sha256 covers the whole fn, including ensures. cache_sha256 also covers the harness, the origin *_shared.rs, and the Verus version plus rlimit.",
+        "A cache hit requires cache_sha256. Changing only a spec fn changes the harness hash and re-verifies.",
+        "Full prover output is not stored.",
+        "function\tharness\tmutation\tbody_sha256\tcache_sha256\tresult",
     ]
     for row in rows:
         lines.append(
@@ -374,12 +508,19 @@ def write_summary(rows):
                     row["harness"],
                     row["mutation"],
                     row["digest"],
+                    row.get("cache", ""),
                     row["result"],
                 ]
             )
         )
     SUMMARY.parent.mkdir(parents=True, exist_ok=True)
     SUMMARY.write_text("\n".join(lines) + "\n")
+
+
+def run_mutant(path, original, body_open, body_close, expr, name, bin_path, env):
+    path.write_text(apply_mutant(original, body_open, body_close, expr))
+    code, output = run_verus(bin_path, path, name, env, timeout=90)
+    return classify(code, output)
 
 
 def prove_function(row, bin_path, env):
@@ -392,12 +533,26 @@ def prove_function(row, bin_path, env):
             "harness": row["harness"],
             "mutation": "missing-function",
             "digest": "",
-            "result": "vacuous",
+            "cache": "",
+            "result": "invalid",
             "detail": "harness function not found",
         }
     start, body_open, body_close = span
     function_text = original[start : body_close + 1]
+    # The body hash includes ensures. A `match out {` inside ensures must not
+    # truncate the function.
+    if "match out {" in original[start:body_open] and body_close <= body_open:
+        return {
+            "qualified": row["qualified"],
+            "harness": row["harness"],
+            "mutation": "span",
+            "digest": "",
+            "cache": "",
+            "result": "invalid",
+            "detail": "function body was not located after ensures",
+        }
     digest = hashlib.sha256(function_text.encode()).hexdigest()
+    cache = function_cache_key(row, function_text, bin_path)
     rtype = return_type(original[start:body_open])
     body = original[body_open + 1 : body_close]
     if rtype is None:
@@ -406,33 +561,73 @@ def prove_function(row, bin_path, env):
             "harness": row["harness"],
             "mutation": "missing-type",
             "digest": digest,
-            "result": "vacuous",
+            "cache": cache,
+            "result": "invalid",
             "detail": "return type not parsed",
         }
-    chosen = None
-    invalid = []
+    kind_name = re.sub(r"\s+", "", rtype)
     try:
+        baseline_code, baseline_out = run_verus(bin_path, path, row["name"], env, timeout=90)
+        if classify(baseline_code, baseline_out) != "survived":
+            return {
+                "qualified": row["qualified"],
+                "harness": row["harness"],
+                "mutation": "baseline",
+                "digest": digest,
+                "cache": cache,
+                "result": "invalid",
+                "detail": "unmutated baseline did not verify",
+            }
+        kinds = []
         for label, expr in mutants_for(rtype, body):
-            path.write_text(apply_mutant(original, body_open, body_close, expr))
-            code, output = run_verus(bin_path, path, row["name"], env, timeout=90)
-            kind = classify(code, output)
-            if kind == "killed":
-                chosen = label
-                break
+            kind = run_mutant(
+                path, original, body_open, body_close, expr, row["name"], bin_path, env
+            )
+            kinds.append((label, kind))
             if kind == "invalid":
-                invalid.append(label)
-        result = "killed" if chosen else "vacuous"
-        detail = chosen or ("invalid:" + ",".join(invalid) if invalid else "all-survived")
+                return {
+                    "qualified": row["qualified"],
+                    "harness": row["harness"],
+                    "mutation": label,
+                    "digest": digest,
+                    "cache": cache,
+                    "result": "invalid",
+                    "detail": f"{label} was not a postcondition failure",
+                }
+        result, mutation, detail = judge_mutants(kind_name, kinds)
         return {
             "qualified": row["qualified"],
             "harness": row["harness"],
-            "mutation": chosen or "none",
+            "mutation": mutation,
             "digest": digest,
+            "cache": cache,
             "result": result,
             "detail": detail,
         }
     finally:
         path.write_text(original)
+
+
+def judge_mutants(rtype, kinds):
+    """Bool needs both constants killed. Option needs None and some Some killed."""
+    by_label = {label: kind for label, kind in kinds}
+    if rtype == "bool":
+        if by_label.get("return-zero") == "killed" and by_label.get("return-one") == "killed":
+            return "killed", "return-false+return-true", "both-bool"
+        return "one-sided", "bool-one-sided", "true and false were not both killed"
+    if rtype.startswith("Option<"):
+        some_killed = [
+            label
+            for label, kind in kinds
+            if label != "return-zero" and kind == "killed"
+        ]
+        if by_label.get("return-zero") == "killed" and some_killed:
+            return "killed", "none+" + "+".join(some_killed), "option-both"
+        return "one-sided", "option-one-sided", "Some and None were not both killed"
+    killed = [label for label, kind in kinds if kind == "killed"]
+    if killed:
+        return "killed", killed[0], killed[0]
+    return "one-sided", "none", "no postcondition failure"
 
 
 def audit(argv):
@@ -469,32 +664,49 @@ def audit(argv):
         if signed:
             if not signed:
                 status |= fail(f"sign-off is missing a justification: {row['qualified']}")
+            if bin_path is None:
+                bin_path = verus_bin()
+                env = verus_env()
+            base_code, base_out = run_verus(bin_path, path, row["name"], env, timeout=90)
+            if classify(base_code, base_out) != "survived":
+                status |= fail(f"signed-off baseline did not verify: {row['qualified']}")
             finished.append(
                 {
                     "qualified": row["qualified"],
                     "harness": row["harness"],
                     "mutation": "sign-off",
                     "digest": digest,
+                    "cache": "",
                     "result": "signed-off",
                 }
             )
             print(f"signed-off {row['qualified']}")
             continue
-        if cached and cached["digest"] == digest and cached["result"] == "killed" and digest:
+        if bin_path is None:
+            bin_path = verus_bin()
+            env = verus_env()
+        function_text = ""
+        if span is not None:
+            function_text = original[span[0] : span[2] + 1]
+        cache_sha = function_cache_key(row, function_text, bin_path) if function_text else ""
+        if (
+            cached
+            and cached.get("cache") == cache_sha
+            and cached["result"] == "killed"
+            and cache_sha
+        ):
             finished.append(
                 {
                     "qualified": row["qualified"],
                     "harness": row["harness"],
                     "mutation": cached["mutation"],
                     "digest": digest,
+                    "cache": cache_sha,
                     "result": "killed",
                 }
             )
             print(f"cached {row['qualified']} mutation={cached['mutation']}")
             continue
-        if bin_path is None:
-            bin_path = verus_bin()
-            env = verus_env()
         proved = prove_function(row, bin_path, env)
         finished.append(
             {
@@ -502,6 +714,7 @@ def audit(argv):
                 "harness": proved["harness"],
                 "mutation": proved["mutation"],
                 "digest": proved["digest"],
+                "cache": proved.get("cache", ""),
                 "result": proved["result"],
             }
         )
@@ -525,22 +738,113 @@ def audit(argv):
 
 
 def self_test():
-    """The two vacuous specs must survive mutation. A tight spec must not."""
+    """Span, classify, cache key, one-sided bool specs, and a match-ensures body."""
+    failures = 0
+    match_src = """
+fn matched(n: u64) -> (out: Option<u64>)
+    ensures
+        match out {
+            Some(value) => value == n,
+            None => false,
+        },
+{
+    Some(n)
+}
+"""
+    span = function_span(match_src, "matched")
+    if span is None:
+        print("match-out span was not found", file=sys.stderr)
+        failures += 1
+    else:
+        start, body, close = span
+        ensures = match_src[start:body]
+        body_text = match_src[body : close + 1]
+        if "match out {" not in ensures or "Some(n)" not in body_text:
+            print("match-out brace was treated as the function body", file=sys.stderr)
+            failures += 1
+        else:
+            mutated = apply_mutant(match_src, body, close, "None")
+            if "match out {" not in mutated or "\n    None\n" not in mutated:
+                print("match-out mutation did not replace the body", file=sys.stderr)
+                failures += 1
+            else:
+                print("match-out ensures kept; body mutation is after the spec")
+    same = cache_digest([b"spec fn old", b"shared", b"verus", b"fn target"])
+    changed = cache_digest([b"spec fn new", b"shared", b"verus", b"fn target"])
+    if same == changed:
+        print("spec-only edit did not change the cache key", file=sys.stderr)
+        failures += 1
+    else:
+        print("spec fn edit changes cache_sha256 and must re-verify")
+    invalid_cases = [
+        (1, "error: aborting due to 1 previous error\nexpected `{`, found `!`\n", "syntax-bad mutation"),
+        (1, "error: mutation run timed out\n", "timeout"),
+        (1, "error: verus: required rust toolchain 1.95 not found\n", "toolchain missing"),
+        (1, "error: resource limit (rlimit) exceeded\n", "rlimit"),
+        (1, "thread 'rustc' panicked at compiler\n", "panic"),
+    ]
+    for code, output, label in invalid_cases:
+        kind = classify(code, output)
+        if kind != "invalid" or gate_exit(kind) != 1:
+            print(f"{label} was classified {kind}", file=sys.stderr)
+            failures += 1
+        else:
+            print(f"{label}: audit exit 1")
+    if classify(1, "error: postcondition not satisfied\n") != "killed":
+        print("postcondition failure was not a kill", file=sys.stderr)
+        failures += 1
+    if classify(1, "error: assertion failed\n") != "killed":
+        print("assertion failure was not a kill", file=sys.stderr)
+        failures += 1
+
+    one_false = judge_mutants("bool", [("return-zero", "survived"), ("return-one", "killed")])
+    one_true = judge_mutants("bool", [("return-zero", "killed"), ("return-one", "survived")])
+    both = judge_mutants("bool", [("return-zero", "killed"), ("return-one", "killed")])
+    if one_false[0] == "killed" or one_true[0] == "killed" or both[0] != "killed":
+        print("one-sided bool implication was accepted as killed", file=sys.stderr)
+        failures += 1
+    else:
+        print("one-sided out ==> condition: audit exit 1")
+        print("one-sided condition ==> out: audit exit 1")
+    option_one = judge_mutants(
+        "Option<u64>",
+        [("return-zero", "killed"), ("return-one", "survived")],
+    )
+    option_both = judge_mutants(
+        "Option<u64>",
+        [("return-zero", "killed"), ("return-one", "killed")],
+    )
+    if option_one[0] == "killed" or option_both[0] != "killed":
+        print("Option Some/None rule is wrong", file=sys.stderr)
+        failures += 1
+
+    bin_path = verus_bin()
+    env = verus_env()
     source = r"""
 use vstd::prelude::*;
 verus! {
-fn vacuous_bound(flag: bool, deadline: u64) -> (out: bool)
+fn matched(n: u64) -> (out: Option<u64>)
     ensures
-        out ==> deadline < deadline + 1,
+        match out {
+            Some(value) => value == n,
+            None => false,
+        },
 {
-    flag
+    Some(n)
 }
 
-fn vacuous_neg(flag: bool) -> (out: bool)
+fn implies_out(flag: bool) -> (out: bool)
     ensures
-        !(out && !out),
+        out ==> flag,
 {
-    flag
+    false
+}
+
+fn out_implies(flag: bool) -> (out: bool)
+    ensures
+        flag ==> out,
+{
+    true
 }
 
 fn tight(flag: bool) -> (out: bool)
@@ -551,24 +855,19 @@ fn tight(flag: bool) -> (out: bool)
 }
 }
 """
-    bin_path = verus_bin()
-    env = verus_env()
-    failures = 0
     with tempfile.TemporaryDirectory(prefix="smros-verus-mutation-") as tmp:
-        path = Path(tmp) / "vacuous.rs"
+        path = Path(tmp) / "gate.rs"
         path.write_text(source)
-        code, output = run_verus(bin_path, path, "vacuous_bound", env, timeout=60)
-        if classify(code, output) != "survived":
-            print("counterexample baseline did not verify", file=sys.stderr)
-            failures += 1
-        cases = [
-            ("vacuous_bound", "false", "survived", "out ==> deadline < deadline + 1"),
-            ("vacuous_bound", "true", "survived", "out ==> deadline < deadline + 1"),
-            ("vacuous_neg", "false", "survived", "!(out && !out)"),
-            ("vacuous_neg", "true", "survived", "!(out && !out)"),
-            ("tight", "false", "killed", "out == flag"),
-        ]
-        for function, expr, expect, label in cases:
+        for function, expr, expect in (
+            ("matched", None, "survived"),
+            ("matched", "None", "killed"),
+            ("implies_out", "false", "survived"),
+            ("implies_out", "true", "killed"),
+            ("out_implies", "true", "survived"),
+            ("out_implies", "false", "killed"),
+            ("tight", "false", "killed"),
+            ("tight", "true", "killed"),
+        ):
             text = source
             span = function_span(text, function)
             if span is None:
@@ -576,7 +875,10 @@ fn tight(flag: bool) -> (out: bool)
                 failures += 1
                 continue
             _start, body_open, body_close = span
-            path.write_text(apply_mutant(text, body_open, body_close, expr))
+            if expr is None:
+                path.write_text(text)
+            else:
+                path.write_text(apply_mutant(text, body_open, body_close, expr))
             code, output = run_verus(bin_path, path, function, env, timeout=60)
             got = classify(code, output)
             if got != expect:
@@ -585,14 +887,33 @@ fn tight(flag: bool) -> (out: bool)
                     file=sys.stderr,
                 )
                 failures += 1
-            elif expect == "survived":
-                print(f"counterexample semantic: {label}: audit exit 1")
-            else:
-                print(f"self-test killed tight spec with {expr}")
+            elif function == "matched" and expr == "None":
+                print("match-out body mutation killed by postcondition")
+        implies = judge_mutants(
+            "bool",
+            [("return-zero", "survived"), ("return-one", "killed")],
+        )
+        reverse = judge_mutants(
+            "bool",
+            [("return-zero", "killed"), ("return-one", "survived")],
+        )
+        if gate_exit(0 if implies[0] == "killed" else 1) != 1 or gate_exit(
+            0 if reverse[0] == "killed" else 1
+        ) != 1:
+            print("one-sided implication gate did not exit 1", file=sys.stderr)
+            failures += 1
+        syntax = apply_mutant(source, *function_span(source, "tight")[1:], "!!!")
+        path.write_text(syntax)
+        code, output = run_verus(bin_path, path, "tight", env, timeout=60)
+        if classify(code, output) != "invalid" or gate_exit("invalid") != 1:
+            print("syntax-bad mutation was not rejected", file=sys.stderr)
+            failures += 1
+        else:
+            print("syntax-bad mutation: audit exit 1")
     if failures:
         print("mutation self-test failed", file=sys.stderr)
         return 1
-    print("mutation self-test passed; vacuous counterexamples fail the audit")
+    print("mutation self-test passed")
     return 0
 
 

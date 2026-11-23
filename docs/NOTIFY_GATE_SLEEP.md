@@ -6,9 +6,10 @@ armed, then forks. The child measures a 50ms `nanosleep` (`0x02FAF080` ns)
 and a 50ms `clock_nanosleep`. The parent keeps re-arming a 1ms deadline
 (`0x000F4240` ns) and does not return to `sigwait`, so its own gate stays
 armed, until 300ms have passed (`0x11E1A300` ns). The child exits 0 only when
-both sleeps finish in under 200ms (`0x0BEBC200` ns). Exit 33 is
-`nanosleep-late`. Exit 35 is `clock-nanosleep-late`. Other exits are setup
-or syscall failures.
+both sleeps last at least 49999872 ns and finish in under 200ms
+(`0x0BEBC200` ns). Exit 33 is `nanosleep-late`. Exit 35 is
+`clock-nanosleep-late`. Exit 36 is `nanosleep-early`. Exit 37 is
+`clock-nanosleep-early`. Other exits are setup or syscall failures.
 
 The 200ms line is not a guess at scheduler slack. It sits under the parent's
 300ms hold. `TimerNotifyGate::blocks_sleep` defers only the arming process.
@@ -17,6 +18,10 @@ child's 50ms sleep would stay blocked until that 300ms hold ended and the
 case would fail late every time. A sleep that returns on its own deadline
 stays well under 200ms. Raising the bound would also let a real cross-process
 hold pass.
+
+The probe also rejects a sleep shorter than the requested 49999872 ns.
+`nanosleep-early` is exit 36 and `clock-nanosleep-early` is exit 37. Neither
+is retried.
 
 ## What the 50 one-shot runs showed
 
@@ -56,7 +61,22 @@ timer loop delays preemption.
 
 ## Retry
 
-`notify-gate-sleep` repeats a `nanosleep-late` or `clock-nanosleep-late`
-result up to three attempts. Any other failure is returned at once. The
-200ms bound is unchanged. A gate bug that holds the child for the parent's
-300ms window still fails every attempt.
+The guest prints `NOTIFY-GATE SUMMARY attempts=… late=… values=…`.
+`scripts/summarize-hermes-campaign.py` copies that line and repeats it when
+`late` is not zero.
+
+One late sample at or under 300ms may be retried once. A second late, or any
+sample over 300ms, fails immediately. Early wakes fail immediately. The 200ms
+bound is unchanged. A gate bug that holds the child past the parent's 300ms
+window still fails on the first attempt.
+
+## Log commits
+
+- `2a7abfa` is the kernel and mutation-gate code: duration samples, the first
+  retry, and the mutation script. It does not include later log republishes.
+- `324061b` only republishes `notify-gate-sleep.txt` and
+  `verus-mutation-summary.txt` headers onto that code.
+- `6dff7d8` records host `ut`/`it`/`skt`, the five Verus harness totals, CBMC,
+  and futex-stress. It does not change kernel or proof sources.
+- Later campaign logs are regenerated on the commit that contains these
+  corrections. Full serial is not stored.

@@ -93,5 +93,5 @@ for run in $(seq 1 "$RUNS"); do
         echo "run=$run TIMEOUT" >&2
         exit 1
     fi
-    awk -v start="$before" 'NR > start && (/NOTIFY-GATE SLEEP / || /CASE notify-gate-sleep RESULT /) { print }' "$LOG"
+    awk -v start="$before" 'NR > start && (/NOTIFY-GATE SUMMARY / || /CASE notify-gate-sleep RESULT /) { print }' "$LOG"
 done
