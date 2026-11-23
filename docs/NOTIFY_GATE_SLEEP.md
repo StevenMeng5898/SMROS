@@ -142,8 +142,9 @@ the text `Too many open files`. The counter now includes that text and
 The `751b308` qemu-user reference (`verification/logs/posix-baseline-results.ndjson.gz`,
 pass=1357) differs from the `500c948` reference (pass=1358) in seven attempts.
 `git diff 500c9486773717d901acb11636874d6d9a3512f2 751b308560119ceb3de3571cfaf90787cd8de44d`
-has no changes under `src/` or `scripts/posix/baseline.py`. None of the seven
-is a true regression, and none is an open product defect.
+has no changes under `src/` or `scripts/posix/baseline.py`. These rows are
+the qemu-user host reference. They are not the guest kernel futex path.
+`pthread_cond_init/1-3.c` is tracked in `docs/KNOWN_ISSUES.md`.
 
 | test | `500c948` | `751b308` campaign | class |
 | --- | --- | --- | --- |
@@ -151,9 +152,9 @@ is a true regression, and none is an open product defect.
 | `conformance/interfaces/aio_fsync/8-1.c` | crash, signal 1 | pass | timing |
 | `conformance/interfaces/mq_send/5-1.c` | fail, "didn't appear to complete", 7203 ms | pass, 4205 ms | timing |
 | `conformance/interfaces/mq_timedsend/5-1.c` | pass, 4199 ms | fail, "mq_send() didn't appear to complete", 7232 ms | timing |
-| `conformance/interfaces/pthread_cond_init/1-3.c` | pass | fail, "behave differently across processes" | timing |
-| `conformance/interfaces/pthread_cond_init/4-1.c` | unresolved, child killed, EBADF, 6387 ms | timeout, signal 15, 33689 ms | host resource |
-| `conformance/interfaces/pthread_mutex_init/5-1.c` | unresolved, child killed, 6460 ms | timeout, signal 15, 31367 ms | host resource |
+| `conformance/interfaces/pthread_cond_init/1-3.c` | pass | fail, "behave differently across processes", about 200 ms, no timeout token | scheduling-sensitive; closed in KNOWN_ISSUES |
+| `conformance/interfaces/pthread_cond_init/4-1.c` | unresolved, child killed, EBADF, 6387 ms | timeout, signal 15, 33689 ms | address-space limit exhaustion, inferred |
+| `conformance/interfaces/pthread_mutex_init/5-1.c` | unresolved, child killed, 6460 ms | timeout, signal 15, 31367 ms | address-space limit exhaustion, inferred |
 
 `aio_error/2-1.c` returns unresolved when none of 128 `aio_write` calls is
 still `EINPROGRESS`. Three isolated reruns were pass, pass, unresolved.
@@ -162,12 +163,16 @@ inside `sleep(3)` after `mq_receive`. The campaign fail printed that the send
 did not complete; three isolated reruns all passed. `mq_send/5-1.c` is the
 same sleep race and moved from fail to pass. `aio_fsync/8-1.c` moved from one
 SIGHUP crash to pass; it was not repeated because it did not leave pass.
-`pthread_cond_init/1-3.c` compares two process-shared condvars after a sleep.
-Three isolated reruns were pass, fail, pass, and the fail used the same
-message as the campaign. `pthread_cond_init/4-1.c` and
-`pthread_mutex_init/5-1.c` fork, lower `RLIMIT_AS`, and allocate until memory
-is exhausted. Both archives are non-pass; the later run hit the harness
-timeout instead of recording a killed child.
+`pthread_cond_init/1-3.c` compares wakeup counts for a NULL condattr, a
+default condattr, and a process-shared reference. It is not a sleep timer.
+The staged binary does not print those counts. A `-DVERBOSE=2` rebuild of the
+existing source, without editing that source or the patches, was run 20 times
+on one binary. The counts and the close decision are in
+`docs/KNOWN_ISSUES.md`. `pthread_cond_init/4-1.c` and
+`pthread_mutex_init/5-1.c` fork, lower `RLIMIT_AS`, and allocate until that
+address-space limit is exhausted. That reading is inferred: the saved stdout
+does not contain `ENOMEM`. Both archives are non-pass; the later run hit the
+harness timeout instead of recording a killed child.
 
 The three tests that left pass were repeated with `run_baseline` on
 `host_shared/posixtest` (manifest `smros_commit`
