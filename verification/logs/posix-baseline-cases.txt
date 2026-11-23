@@ -21,3 +21,6 @@ conformance/interfaces/mq_timedsend/5-1.c: pass -> fail
 conformance/interfaces/pthread_cond_init/1-3.c: pass -> fail
 conformance/interfaces/pthread_cond_init/4-1.c: unresolved -> timeout
 conformance/interfaces/pthread_mutex_init/5-1.c: unresolved -> timeout
+Classification and the three-run repeats of the tests that left pass are in
+docs/NOTIFY_GATE_SLEEP.md and verification/logs/posix-baseline-status-rerun/.
+None of the seven is a true regression.
