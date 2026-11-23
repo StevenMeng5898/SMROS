@@ -637,9 +637,23 @@ def _mirror_returncode(returncode: int) -> int:
     return returncode
 
 
+def _is_elf(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
 def _mqueue_isolated_argv(argv: Sequence[str]) -> list[str]:
-    """Run one test against a private empty /dev/mqueue when user namespaces work."""
+    """Run one ELF qemu-user against a private empty /dev/mqueue.
+
+    Non-ELF paths stay direct so a missing or invalid qemu remains a launch
+    error instead of a shell exit.
+    """
     if os.environ.get("SMROS_POSIX_MQUEUE_ISOLATION", "1") == "0":
+        return list(argv)
+    if not argv or not _is_elf(str(argv[0])):
         return list(argv)
     unshare = shutil.which("unshare")
     if unshare is None:
@@ -1865,7 +1879,9 @@ def _resolve_qemu(qemu: str | Path) -> Path:
             f"qemu-aarch64 is not executable: {path}"
         )
     name = Path(os.fspath(qemu)).name
-    if name in {"qemu-aarch64", "qemu-aarch64-static"}:
+    # An explicit test binary path is not the host toolchain. Only the bare
+    # command names qemu-aarch64 and qemu-aarch64-static must resolve together.
+    if "/" not in os.fspath(qemu) and name in {"qemu-aarch64", "qemu-aarch64-static"}:
         other = "qemu-aarch64-static" if name != "qemu-aarch64-static" else "qemu-aarch64"
         other_found = shutil.which(other)
         if other_found is not None:
