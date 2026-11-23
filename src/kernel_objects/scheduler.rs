@@ -15,6 +15,7 @@ use crate::syscall::linux_syscall_context;
 use core::cell::UnsafeCell;
 use core::ptr;
 use core::sync::atomic::{AtomicU64, Ordering};
+include!("scheduler_queue_logic_shared.rs");
 include!("scheduler_logic_shared.rs");
 
 /// A Sync wrapper around UnsafeCell that is safe to use as a static.
@@ -1654,39 +1655,30 @@ impl Scheduler {
         if index == 0 || index >= MAX_THREADS {
             return;
         }
-        let word = index / 64;
-        let mask = 1u64 << (index % 64);
-        let was_ready = self.ready_threads[word] & mask != 0;
+        let word = smros_sched_ready_word_index_body!(index);
+        let mask = smros_sched_ready_bit_mask_body!(index);
+        let was_ready = smros_sched_ready_bit_is_set_body!(self.ready_threads[word], mask);
         if was_ready == ready {
             return;
         }
+        self.ready_threads[word] =
+            smros_sched_ready_word_after_body!(self.ready_threads[word], mask, ready);
         let priority = self.schedule_info[index].priority as usize;
-        if ready {
-            self.ready_threads[word] |= mask;
-            self.ready_priority_counts[priority] =
-                self.ready_priority_counts[priority].saturating_add(1);
-        } else {
-            self.ready_threads[word] &= !mask;
-            self.ready_priority_counts[priority] =
-                self.ready_priority_counts[priority].saturating_sub(1);
-        }
+        self.ready_priority_counts[priority] = smros_sched_ready_count_after_body!(
+            self.ready_priority_counts[priority],
+            was_ready,
+            ready
+        );
         match self.threads[index].cpu_affinity {
             Some(cpu) if cpu < MAX_CPUS => {
-                let count = &mut self.ready_priority_counts_by_cpu[cpu][priority];
-                if ready {
-                    *count = count.saturating_add(1);
-                } else {
-                    *count = count.saturating_sub(1);
-                }
+                let count = self.ready_priority_counts_by_cpu[cpu][priority];
+                self.ready_priority_counts_by_cpu[cpu][priority] =
+                    smros_sched_ready_count_after_body!(count, was_ready, ready);
             }
             None => {
                 for counts in &mut self.ready_priority_counts_by_cpu {
-                    let count = &mut counts[priority];
-                    if ready {
-                        *count = count.saturating_add(1);
-                    } else {
-                        *count = count.saturating_sub(1);
-                    }
+                    let count = counts[priority];
+                    counts[priority] = smros_sched_ready_count_after_body!(count, was_ready, ready);
                 }
             }
             Some(_) => {}
@@ -1747,7 +1739,7 @@ impl Scheduler {
                 Some(_) => 0,
                 None => self.ready_priority_counts[priority],
             };
-            if ready_count == 0 {
+            if !smros_sched_priority_count_ready_body!(ready_count) {
                 continue;
             }
             if !current_ready {
@@ -1788,9 +1780,14 @@ impl Scheduler {
         let mut selected = None;
         let best_priority = self.highest_ready_priority(cpu_id)?;
         self.visit_ready_threads(start, scan_limit, |idx| {
-            if self.schedule_info[idx].priority == best_priority
-                && self.candidate_can_run(idx, current, cpu_id)
-            {
+            if smros_sched_best_priority_candidate_body!(
+                self.threads[idx].state == ThreadState::Ready,
+                self.schedule_info[idx].priority,
+                best_priority,
+                self.thread_allowed_on_cpu(idx, cpu_id),
+                idx == current,
+                idx != 0
+            ) {
                 selected = Some(idx);
                 return true;
             }
@@ -1812,9 +1809,14 @@ impl Scheduler {
 
         while attempts < scan_limit {
             let idx = object_logic::scheduler_candidate_index(start, attempts, scan_limit);
-            if self.candidate_can_run(idx, current, cpu_id)
-                && self.schedule_info[idx].priority == best_priority
-            {
+            if smros_sched_best_priority_candidate_body!(
+                self.threads[idx].state == ThreadState::Ready,
+                self.schedule_info[idx].priority,
+                best_priority,
+                self.thread_allowed_on_cpu(idx, cpu_id),
+                idx == current,
+                idx != 0
+            ) {
                 let deadline = self.schedule_info[idx].deadline_tick;
                 if smros_sched_edf_better_body!(deadline, best.is_some(), best_deadline) {
                     best = Some(idx);
@@ -1845,9 +1847,14 @@ impl Scheduler {
 
         while attempts < scan_limit {
             let idx = object_logic::scheduler_candidate_index(start, attempts, scan_limit);
-            if self.candidate_can_run(idx, current, cpu_id)
-                && self.schedule_info[idx].priority == best_priority
-            {
+            if smros_sched_best_priority_candidate_body!(
+                self.threads[idx].state == ThreadState::Ready,
+                self.schedule_info[idx].priority,
+                best_priority,
+                self.thread_allowed_on_cpu(idx, cpu_id),
+                idx == current,
+                idx != 0
+            ) {
                 let credit = self.schedule_info[idx].credit;
                 if smros_sched_credit_better_body!(credit, best.is_some(), best_credit) {
                     best = Some(idx);
@@ -1875,9 +1882,14 @@ impl Scheduler {
 
         while attempts < scan_limit {
             let idx = object_logic::scheduler_candidate_index(start, attempts, scan_limit);
-            if self.candidate_can_run(idx, current, cpu_id)
-                && self.schedule_info[idx].priority == best_priority
-            {
+            if smros_sched_best_priority_candidate_body!(
+                self.threads[idx].state == ThreadState::Ready,
+                self.schedule_info[idx].priority,
+                best_priority,
+                self.thread_allowed_on_cpu(idx, cpu_id),
+                idx == current,
+                idx != 0
+            ) {
                 let ticks = self.threads[idx].total_ticks;
                 let weight = self.schedule_info[idx].weight;
                 if smros_sched_fair_better_body!(
@@ -2008,8 +2020,16 @@ impl Scheduler {
         let tick_count = self.tick_count;
         let mut advance_deadline = false;
         let mut force_preempt = false;
+        let charged_priority = if current.0 < MAX_THREADS {
+            self.schedule_info[current.0].priority
+        } else {
+            0
+        };
         if let Some(tcb) = self.get_thread_mut(current) {
-            tcb.time_slice = smros_sched_time_slice_after_elapsed_body!(tcb.time_slice, elapsed);
+            let (priority, time_slice) =
+                smros_sched_tick_charge_body!(charged_priority, tcb.time_slice, elapsed);
+            let _ = priority;
+            tcb.time_slice = time_slice;
             let add = elapsed.min(u32::MAX as u64) as u32;
             tcb.total_ticks = tcb.total_ticks.saturating_add(add);
             if current.0 != 0 && policy == SchedulePolicy::Edf && tcb.time_slice == 0 {

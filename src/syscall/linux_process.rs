@@ -16,6 +16,7 @@ use super::linux_task::{
 };
 use super::{linux_task, SysError};
 
+include!("process_lifecycle_logic_shared.rs");
 include!("linux_process_logic_shared.rs");
 include!("linux_fork_logic_shared.rs");
 include!("linux_runtime_lock_shared.rs");

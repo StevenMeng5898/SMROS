@@ -8,6 +8,7 @@ include!("../../../src/kernel_objects/futex_logic_shared.rs");
 include!("../../../src/kernel_objects/port_logic_shared.rs");
 include!("../../../src/kernel_objects/socket_logic_shared.rs");
 include!("../../../src/kernel_objects/log_logic_shared.rs");
+include!("../../../src/kernel_objects/scheduler_queue_logic_shared.rs");
 include!("../../../src/kernel_objects/scheduler_logic_shared.rs");
 include!("../../../src/kernel_objects/hypervisor_logic_shared.rs");
 include!("../../../src/kernel_objects/campaign_watch_logic_shared.rs");
@@ -3333,6 +3334,220 @@ fn verified_credit_after_elapsed(credit: i32, elapsed: u64) -> (out: i32)
         credit > 0 && elapsed < credit as u64 ==> out == credit - elapsed as i32,
 {
     smros_sched_credit_after_elapsed_body!(credit, elapsed)
+}
+
+fn sched_ready_word_index(index: u64) -> (out: u64)
+    ensures
+        out == index / 64,
+{
+    smros_sched_ready_word_index_body!(index)
+}
+
+fn sched_ready_bit_mask(index: u64) -> (out: u64)
+    ensures
+        out == (1u64 << (index % 64)),
+{
+    smros_sched_ready_bit_mask_body!(index)
+}
+
+fn sched_ready_bit_is_set(word: u64, mask: u64) -> (out: bool)
+    ensures
+        out == (word & mask != 0),
+{
+    smros_sched_ready_bit_is_set_body!(word, mask)
+}
+
+fn sched_ready_word_after(word: u64, index: u64, ready: bool) -> (out: u64)
+    requires
+        index < 64,
+    ensures
+        ready ==> (out & (1u64 << index)) == (1u64 << index),
+        !ready ==> (out & (1u64 << index)) == 0,
+        (out & !(1u64 << index)) == (word & !(1u64 << index)),
+{
+    let mask = smros_sched_ready_bit_mask_body!(index);
+    let out = smros_sched_ready_word_after_body!(word, mask, ready);
+    assert(ready ==> (out & (1u64 << index)) == (1u64 << index)) by (bit_vector)
+        requires
+            index < 64,
+            mask == (1u64 << (index % 64)),
+            ready ==> out == (word | mask),
+            !ready ==> out == (word & !mask),
+    ;
+    assert(!ready ==> (out & (1u64 << index)) == 0) by (bit_vector)
+        requires
+            index < 64,
+            mask == (1u64 << (index % 64)),
+            ready ==> out == (word | mask),
+            !ready ==> out == (word & !mask),
+    ;
+    assert((out & !(1u64 << index)) == (word & !(1u64 << index))) by (bit_vector)
+        requires
+            index < 64,
+            mask == (1u64 << (index % 64)),
+            ready ==> out == (word | mask),
+            !ready ==> out == (word & !mask),
+    ;
+    out
+}
+
+fn sched_ready_count_after(count: u16, was_ready: bool, ready: bool) -> (out: u16)
+    ensures
+        was_ready == ready ==> out == count,
+        !was_ready && ready && count < 0xffff ==> out == count + 1,
+        !was_ready && ready && count == 0xffff ==> out == 0xffff,
+        was_ready && !ready && count > 0 ==> out == (count - 1) as u16,
+        was_ready && !ready && count == 0 ==> out == 0,
+{
+    smros_sched_ready_count_after_body!(count, was_ready, ready)
+}
+
+fn sched_priority_count_ready(count: u16) -> (out: bool)
+    ensures
+        out == (count > 0),
+{
+    smros_sched_priority_count_ready_body!(count)
+}
+
+fn sched_best_priority_candidate(
+    ready: bool,
+    priority: u8,
+    best_priority: u8,
+    allowed: bool,
+    is_current: bool,
+    idx_nonzero: bool,
+) -> (out: bool)
+    ensures
+        out ==> ready && allowed && !is_current && idx_nonzero && priority == best_priority,
+        ready && allowed && !is_current && idx_nonzero && priority == best_priority ==> out,
+{
+    smros_sched_best_priority_candidate_body!(
+        ready,
+        priority,
+        best_priority,
+        allowed,
+        is_current,
+        idx_nonzero
+    )
+}
+
+fn sched_tick_charge(priority: u8, time_slice: u32, elapsed: u64) -> (out: (u8, u32))
+    ensures
+        out.0 == priority,
+        out.1 <= time_slice,
+        elapsed == 0 || time_slice == 0 ==> out.1 == time_slice,
+        elapsed > 0 && (time_slice as u64) > 0 && elapsed >= (time_slice as u64) ==> out.1 == 0,
+        elapsed > 0 && (time_slice as u64) > 0 && elapsed < (time_slice as u64)
+            ==> out.1 == time_slice - (elapsed as u32),
+{
+    smros_sched_tick_charge_body!(priority, time_slice, elapsed)
+}
+
+fn sched_retire_record_accepted(
+    cpu_id: u64,
+    cpu_count: u64,
+    thread: u64,
+    reclaimable_bit: u64,
+) -> (out: bool)
+    ensures
+        out == (cpu_id < cpu_count && thread != 0 && (thread & reclaimable_bit) == 0),
+{
+    smros_sched_retire_record_accepted_body!(cpu_id, cpu_count, thread, reclaimable_bit)
+}
+
+fn sched_retire_confirm_accepted(
+    pending: u64,
+    empty: u64,
+    reclaimable_bit: u64,
+    current: u64,
+) -> (out: bool)
+    ensures
+        out == (pending != empty && (pending & reclaimable_bit) == 0 && pending != current),
+{
+    smros_sched_retire_confirm_accepted_body!(pending, empty, reclaimable_bit, current)
+}
+
+fn sched_retire_take_thread(reclaimable: u64, empty: u64, reclaimable_bit: u64) -> (out: Option<u64>)
+    ensures
+        (reclaimable == empty || (reclaimable & reclaimable_bit) == 0) ==> out == Option::<u64>::None,
+        reclaimable != empty && (reclaimable & reclaimable_bit) != 0
+            ==> out == Some(reclaimable & !reclaimable_bit),
+{
+    smros_sched_retire_take_thread_body!(reclaimable, empty, reclaimable_bit)
+}
+
+fn sched_retired_slot_reuse(
+    is_terminated: bool,
+    slot: u64,
+    current: u64,
+    retired_is_slot: bool,
+    has_stack_pointer: bool,
+    has_stack_size: bool,
+) -> (out: u8)
+    ensures
+        !is_terminated || slot == 0 || slot == current || !retired_is_slot
+            || has_stack_pointer != has_stack_size ==> out == 0,
+        is_terminated && slot != 0 && slot != current && retired_is_slot
+            && has_stack_pointer && has_stack_size ==> out == 2,
+        is_terminated && slot != 0 && slot != current && retired_is_slot
+            && !has_stack_pointer && !has_stack_size ==> out == 1,
+{
+    smros_sched_retired_slot_reuse_body!(
+        is_terminated,
+        slot,
+        current,
+        retired_is_slot,
+        has_stack_pointer,
+        has_stack_size,
+        0u8,
+        1u8,
+        2u8
+    )
+}
+
+fn sched_highest_ready_priority(priorities: &Vec<u8>, ready: &Vec<bool>) -> (out: Option<u8>)
+    requires
+        priorities.len() == ready.len(),
+        priorities.len() <= 8,
+    ensures
+        match out {
+            Some(best) => exists|i: int|
+                0 <= i < priorities.len() && ready@[i] && priorities@[i] == best,
+            None => forall|i: int| 0 <= i < priorities.len() ==> !ready@[i],
+        },
+        match out {
+            Some(best) => forall|j: int|
+                0 <= j < priorities.len() && ready@[j] ==> priorities@[j] <= best,
+            None => true,
+        },
+{
+    let mut found = false;
+    let mut best: u8 = 0;
+    let mut index: usize = 0;
+    while index < priorities.len()
+        invariant
+            index <= priorities.len(),
+            priorities.len() == ready.len(),
+            priorities.len() <= 8,
+            found ==> exists|i: int| 0 <= i < index && ready@[i] && priorities@[i] == best,
+            !found ==> forall|i: int| 0 <= i < index ==> !ready@[i],
+            found ==> forall|j: int| 0 <= j < index && ready@[j] ==> priorities@[j] <= best,
+        decreases priorities.len() - index,
+    {
+        if ready[index] {
+            let priority = priorities[index];
+            if smros_sched_priority_better_body!(priority, found, best) {
+                best = priority;
+                found = true;
+            }
+        }
+        index = index + 1;
+    }
+    if found {
+        Some(best)
+    } else {
+        None
+    }
 }
 
 } // verus!

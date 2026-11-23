@@ -1378,56 +1378,41 @@ pub(crate) enum LinuxAuditedStub {
 /// Classification of the syscall-table stubs that previously returned `Ok(0)`
 /// with no effect. `None` means the number is not one of those stubs.
 pub(crate) fn linux_audited_stub(syscall_num: u32) -> Option<LinuxAuditedStub> {
-    use LinuxAuditedStub::{FailClosed, Harmless, Personality};
-    const EPERM: i32 = LINUX_ERRNO_EPERM;
-    const ENOSYS: i32 = LINUX_ERRNO_ENOSYS;
-    Some(match syscall_num {
-        // Linux AIO has no context table. A zero return is a fake context id.
-        0 | 1 | 2 | 3 | 4 | 292 => FailClosed(ENOSYS),
-        18 => FailClosed(ENOSYS), // lookup_dcookie
-        30 => FailClosed(EPERM),  // ioprio_set
-        31 => Harmless,           // ioprio_get, default class
-        42 => FailClosed(ENOSYS), // nfsservctl
-        58 => FailClosed(EPERM),  // vhangup
-        60 => FailClosed(ENOSYS), // quotactl
-        89 => FailClosed(EPERM),  // acct
-        92 => Personality,
-        104 | 105 | 106 | 273 | 294 => FailClosed(ENOSYS), // kexec/module load
-        116 => FailClosed(EPERM),                          // syslog / klogctl
-        117 => FailClosed(EPERM),                          // ptrace
-        128 => Harmless,                                   // restart_syscall
-        142 => FailClosed(EPERM),                          // reboot
-        // 170, 171, 266 are real handlers: settimeofday, adjtimex, clock_adjtime.
-        217 | 218 | 219 => FailClosed(ENOSYS), // keyring
-        224 | 225 => FailClosed(EPERM),        // swapon, swapoff
-        234 => FailClosed(ENOSYS),             // remap_file_pages
-        // No CONFIG_NUMA. Linux returns ENOSYS for the query as well as the writes.
-        235 | 236 | 237 => FailClosed(ENOSYS),
-        238 | 239 => FailClosed(EPERM),  // migrate_pages, move_pages
-        241 => FailClosed(ENOSYS),       // perf_event_open
-        262 | 263 => FailClosed(EPERM),  // fanotify
-        264 | 265 => FailClosed(ENOSYS), // name_to_handle_at, open_by_handle_at
-        // 267 syncfs and 269 sendmmsg are real handlers.
-        270 | 271 => FailClosed(ENOSYS), // process_vm_readv/writev
-        272 => FailClosed(EPERM),        // kcmp
-        274 => FailClosed(EPERM),        // sched_setattr
-        // 275 sched_getattr is a real query.
-        280 => FailClosed(ENOSYS),             // bpf
-        281 => FailClosed(ENOSYS),             // execveat
-        282 => FailClosed(ENOSYS),             // userfaultfd
-        284 => Harmless,                       // mlock2
-        288 | 289 | 290 => FailClosed(ENOSYS), // pkey
-        // glibc/musl treat ENOSYS as "rseq unavailable" and keep starting.
-        293 => FailClosed(ENOSYS),
-        424 => FailClosed(EPERM),              // pidfd_send_signal
-        425 | 426 | 427 => FailClosed(ENOSYS), // io_uring
-        428 | 429 | 430 | 431 | 432 | 433 | 442 => FailClosed(ENOSYS), // new mount API
-        434 => FailClosed(ENOSYS),             // pidfd_open
-        438 => FailClosed(EPERM),              // pidfd_getfd
-        440 => FailClosed(EPERM),              // process_madvise
-        444 | 445 | 446 => FailClosed(ENOSYS), // landlock
-        _ => return None,
-    })
+    // Class codes are defined by smros_linux_audited_stub_class_body.
+    match smros_linux_audited_stub_class_body!(syscall_num) {
+        1 => Some(LinuxAuditedStub::FailClosed(LINUX_ERRNO_ENOSYS)),
+        2 => Some(LinuxAuditedStub::FailClosed(LINUX_ERRNO_EPERM)),
+        3 => Some(LinuxAuditedStub::Harmless),
+        4 => Some(LinuxAuditedStub::Personality),
+        _ => None,
+    }
+}
+
+/// Errno for the audited-stub result path. `None` means harmless success.
+/// A number that is not in the stub table is ENOSYS, which is what
+/// `linux_audited_stub_result` returned for `None`.
+pub(crate) fn linux_audited_stub_errno(syscall_num: u32) -> Option<i32> {
+    let class = smros_linux_audited_stub_class_body!(syscall_num);
+    smros_linux_stub_errno_body!(
+        class,
+        LINUX_ERRNO_ENOSYS,
+        LINUX_ERRNO_EPERM,
+        LINUX_ERRNO_EINVAL
+    )
+}
+
+/// Dispatcher class for the lifecycle and scheduler numbers, the audited
+/// stubs, and everything else. See `smros_linux_handler_class_body`.
+pub(crate) fn linux_syscall_handler_class(syscall_num: u32) -> u8 {
+    smros_linux_handler_class_body!(syscall_num, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8)
+}
+
+pub(crate) fn linux_unhandled_errno(known: bool) -> i32 {
+    smros_linux_unhandled_syscall_errno_body!(known, LINUX_ERRNO_ENOSYS)
+}
+
+pub(crate) fn zircon_unhandled_rejected(known: bool) -> bool {
+    smros_zircon_unhandled_rejected_body!(known)
 }
 
 /// What `adjtimex(2)` does with `timex.modes` when `CAP_SYS_TIME` is absent.

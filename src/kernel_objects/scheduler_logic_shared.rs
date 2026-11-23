@@ -268,18 +268,17 @@ pub(crate) fn scheduler_retired_slot_reuse_action(
     has_stack_pointer: bool,
     has_stack_size: bool,
 ) -> SchedulerSlotReuse {
-    if !is_terminated
-        || slot == 0
-        || slot == current_thread
-        || retired_thread != Some(slot)
-        || has_stack_pointer != has_stack_size
-    {
-        SchedulerSlotReuse::Unavailable
-    } else if has_stack_pointer {
+    smros_sched_retired_slot_reuse_body!(
+        is_terminated,
+        slot,
+        current_thread,
+        retired_thread == Some(slot),
+        has_stack_pointer,
+        has_stack_size,
+        SchedulerSlotReuse::Unavailable,
+        SchedulerSlotReuse::ResetOnly,
         SchedulerSlotReuse::DeallocateAndReuse
-    } else {
-        SchedulerSlotReuse::ResetOnly
-    }
+    )
 }
 
 const DEFERRED_RETIREMENT_CAPACITY: usize = 1024;
@@ -303,7 +302,12 @@ impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
     }
 
     pub(crate) fn record_before_switch(&self, cpu_id: usize, thread: usize) -> bool {
-        if cpu_id >= CPU_COUNT || thread == 0 || thread & Self::RECLAIMABLE_BIT != 0 {
+        if !smros_sched_retire_record_accepted_body!(
+            cpu_id,
+            CPU_COUNT,
+            thread,
+            Self::RECLAIMABLE_BIT
+        ) {
             return false;
         }
         self.retired_by_cpu[cpu_id].iter().any(|slot| {
@@ -323,10 +327,12 @@ impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
         };
         retirements.iter().any(|slot| {
             let pending = slot.load(core::sync::atomic::Ordering::Acquire);
-            if pending == Self::EMPTY
-                || pending & Self::RECLAIMABLE_BIT != 0
-                || pending == current_thread
-            {
+            if !smros_sched_retire_confirm_accepted_body!(
+                pending,
+                Self::EMPTY,
+                Self::RECLAIMABLE_BIT,
+                current_thread
+            ) {
                 return false;
             }
             slot.compare_exchange(
@@ -343,9 +349,13 @@ impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
         let retirements = self.retired_by_cpu.get(cpu_id)?;
         retirements.iter().find_map(|slot| {
             let reclaimable = slot.load(core::sync::atomic::Ordering::Acquire);
-            if reclaimable == Self::EMPTY || reclaimable & Self::RECLAIMABLE_BIT == 0 {
+            let Some(thread) = smros_sched_retire_take_thread_body!(
+                reclaimable,
+                Self::EMPTY,
+                Self::RECLAIMABLE_BIT
+            ) else {
                 return None;
-            }
+            };
             slot.compare_exchange(
                 reclaimable,
                 Self::EMPTY,
@@ -353,7 +363,7 @@ impl<const CPU_COUNT: usize> DeferredThreadRetirements<CPU_COUNT> {
                 core::sync::atomic::Ordering::Acquire,
             )
             .ok()
-            .map(|encoded| encoded & !Self::RECLAIMABLE_BIT)
+            .map(|_| thread)
         })
     }
 

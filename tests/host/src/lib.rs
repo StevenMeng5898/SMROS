@@ -785,6 +785,10 @@ mod linux_record_lock_logic {
 mod syscall_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/syscall_dispatch_logic_shared.rs"
+    ));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/syscall_logic_shared.rs"
     ));
     include!(concat!(
@@ -2169,6 +2173,10 @@ mod linux_mqueue_logic {
 mod linux_task_logic {
     extern crate alloc;
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/process_lifecycle_logic_shared.rs"
+    ));
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_task_logic_shared.rs"
@@ -4612,6 +4620,10 @@ mod linux_task_logic {
 mod linux_process_logic {
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/process_lifecycle_logic_shared.rs"
+    ));
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_process_logic_shared.rs"
     ));
 
@@ -6002,6 +6014,10 @@ mod linux_process_memory_logic {
         SharedMemory,
     }
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/process_lifecycle_logic_shared.rs"
+    ));
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/linux_process_logic_shared.rs"
@@ -8717,6 +8733,10 @@ mod fifo_logic {
 }
 
 mod scheduler_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/kernel_objects/scheduler_queue_logic_shared.rs"
+    ));
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/kernel_objects/scheduler_logic_shared.rs"

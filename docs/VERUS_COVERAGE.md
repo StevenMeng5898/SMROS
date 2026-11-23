@@ -19,6 +19,19 @@ with a non-empty spec in `verification/logs/verus-*.log`.
 - 超出范围: not part of the kernel TCB for this Verus audit.
 - 未覆盖: present in the tree and not yet given one of the other labels. This inventory has none.
 
+## Inventory counts
+
+Counted from the classified `src/*.rs` and `src/*.S` entries below.
+
+- 已证明: 17
+- 待证明: 110
+- 公理或可信计算基: 28
+- 规范假设: 0 file entries. The handle-generation wrap clause under `handle_namespace_logic_shared.rs` stays 规范假设 and is not a source file.
+- 超出范围: 1 source file (`src/user_level/apps/epoll_coro.rs`). `third_party/posixtest/**` and `target/posix/**` are 超出范围 and are not kernel sources.
+- 未覆盖: 0
+
+The three files added for scheduling, lifecycle, and syscall dispatch are 已证明. The 待证明 count did not drop, because the live scheduler, process table, task table, and syscall `match` stay 待证明.
+
 ## Coverage Model
 
 - Verified shared logic: pure helper macro bodies included from `src/` into a
@@ -195,9 +208,13 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/kernel_objects/scheduler.rs`
   - 待证明
+    Live ready bitmap, priority counts, and `pick_*` loops. The bit update, count step, best-priority candidate test, and tick charge they call are proved in `scheduler_queue_logic_shared.rs`.
 - `src/kernel_objects/scheduler_logic_shared.rs`
   - 待证明
-    Scheduler arithmetic macros expand inside specified harness functions. `record_before_switch`, `confirm_after_switch`, `take_reclaimable`, and `scheduler_retired_slot_reuse_action` are absent from func-details.
+    Scheduler arithmetic macros expand inside specified harness functions. `record_before_switch`, `confirm_after_switch`, and `take_reclaimable` still perform the atomic CAS. Their accept predicates, and `scheduler_retired_slot_reuse_action`, are proved in `scheduler_queue_logic_shared.rs`.
+- `src/kernel_objects/scheduler_queue_logic_shared.rs`
+  - 已证明
+    Ready-bit word and mask, the single-bit update that leaves other bits alone, the saturating ready-count step, the best-priority candidate test, tick charge (priority unchanged, slice does not grow), retirement accept/confirm/take, and retired-slot reuse. `sched_highest_ready_priority` proves that a scan using `smros_sched_priority_better_body` returns a ready priority and no ready priority is higher. The atomic slots and the `Scheduler` struct stay in the files above.
 - `src/kernel_objects/socket.rs`
   - 待证明
 - `src/kernel_objects/socket_logic.rs`
@@ -247,7 +264,7 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/linux_process_logic_shared.rs`
   - 待证明
-    Process-table and wait functions in this file are absent from `verification/logs/verus-syscall.log` func-details.
+    The process table, wait scan, and reparent loops are absent from func-details. Reserve, publish, fork publish, rollback, begin/abort exit, exit, and reap call the proved edges in `process_lifecycle_logic_shared.rs`.
 - `src/syscall/linux_process_memory.rs`
   - 待证明
 - `src/syscall/linux_process_memory_logic_shared.rs`
@@ -279,25 +296,33 @@ work, and the 16 patches under `third_party/posixtest/patches/` stay as they are
   - 待证明
 - `src/syscall/linux_task_logic_shared.rs`
   - 待证明
-    Task, signal, and sleep functions in this file are absent from func-details. A few macros have harness wrappers; that is not the whole file.
+    Task, signal, and sleep functions in this file are absent from func-details. Reserve, publish, block, wake, exit, and retire call the proved edges in `process_lifecycle_logic_shared.rs`. `smros_linux_task_publish_transition_allowed_body` remains a harness smoke of the same Starting -> Runnable edge.
 - `src/syscall/mod.rs`
   - 待证明
 - `src/syscall/syscall.rs`
   - 待证明
+    The handler `match` is not compiled by Verus. Its default arms call `linux_unhandled_errno` and `zircon_unhandled_rejected`, and the audited-stub arm calls `linux_audited_stub_errno`. Those three are proved in `syscall_dispatch_logic_shared.rs`.
 - `src/syscall/syscall_bridge.rs`
   - 待证明
 - `src/syscall/syscall_bridge_shared.rs`
   - 待证明
     Register and errno macros expand inside specified syscall functions. `smros_saved_regs_ptr_from_el0_sp_body` builds a raw pointer and is only smoked outside `verus!`.
+- `src/syscall/process_lifecycle_logic_shared.rs`
+  - 已证明
+    Process edges Empty/Reserved/Publishing/Running/Exiting/Zombie and task edges Empty/Starting/Runnable/Blocked/Exited. Each proved function's postcondition names the successor and refuses every other source state. `process_wait_reaps_once` shows a zombie reap yields Empty and a second reap of Empty is refused. `task_retire_reclaims_once` is the same for Exited. The table that stores those tokens stays 待证明.
 - `src/syscall/syscall_dispatch.rs`
   - 待证明
+    Assembly entry and the register spill. Number classification is proved in `syscall_dispatch_logic_shared.rs`.
 - `src/syscall/syscall_handler.rs`
   - 待证明
 - `src/syscall/syscall_logic.rs`
   - 待证明
+- `src/syscall/syscall_dispatch_logic_shared.rs`
+  - 已证明
+    Audited-stub class (fail-closed ENOSYS, fail-closed EPERM, harmless, personality), stub errno (`None` only for harmless; every other class is an error), the critical handler numbers for exit/wait/clone/futex/sched/fork, the handler class that keeps those numbers off the fail-closed class, and unhandled Linux/Zircon results. Unhandled Linux is ENOSYS whether or not the number is in the known interface. Unhandled Zircon is rejected. The giant `match` in `syscall.rs` stays 待证明.
 - `src/syscall/syscall_logic_shared.rs`
   - 待证明
-    Dozens of plain helpers (`linux_exit_status`, clock-id predicates, epoll reject, and others) are absent from func-details. Macro wrappers in the harness do not cover the file.
+    Dozens of plain helpers (`linux_exit_status`, clock-id predicates, epoll reject, and others) are absent from func-details. `linux_audited_stub`, `linux_audited_stub_errno`, `linux_syscall_handler_class`, `linux_unhandled_errno`, and `zircon_unhandled_rejected` are wrappers around the proved macros in `syscall_dispatch_logic_shared.rs`.
 - `src/syscall/uaccess.rs`
   - 待证明
     Per-thread SPSR slot and EL0 detection. The range predicate is proven in uaccess_logic_shared.rs.

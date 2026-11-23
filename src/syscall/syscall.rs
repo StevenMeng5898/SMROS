@@ -17189,14 +17189,11 @@ fn sys_personality(persona: usize) -> SysResult {
 /// return 0. An uncertain entry would too, but none remain. An unclassified
 /// number in this path is ENOSYS.
 fn linux_audited_stub_result(syscall_num: u32) -> SysResult {
-    match syscall_logic::linux_audited_stub(syscall_num) {
-        Some(syscall_logic::LinuxAuditedStub::FailClosed(errno)) => linux_errno_result(errno),
-        // personality(2) is dispatched with its argument. Reaching here means
-        // the persona was not checked, so refuse it.
-        Some(syscall_logic::LinuxAuditedStub::Personality) => Err(SysError::EINVAL),
-        Some(syscall_logic::LinuxAuditedStub::Harmless)
-        | Some(syscall_logic::LinuxAuditedStub::Uncertain) => Ok(0),
-        None => Err(SysError::ENOSYS),
+    match syscall_logic::linux_audited_stub_errno(syscall_num) {
+        Some(errno) => linux_errno_result(errno),
+        // Harmless stubs are the only success path. Personality is EINVAL
+        // from the proved classifier, and every other class is an error.
+        None => Ok(0),
     }
 }
 
@@ -17459,11 +17456,17 @@ pub fn dispatch_linux_syscall(syscall_num: u32, args: [usize; 6]) -> SysResult {
         num if syscall_logic::linux_audited_stub(num).is_some() => linux_audited_stub_result(num),
         num if syscall_logic::linux_syscall_interface_known(num) => {
             warn!("Unimplemented Linux syscall interface: {}", syscall_num);
-            Err(SysError::ENOSYS)
+            let class = syscall_logic::linux_syscall_handler_class(num);
+            debug_assert_ne!(class, 1);
+            let _ = class;
+            linux_errno_result(syscall_logic::linux_unhandled_errno(true))
         }
         _ => {
             warn!("Unimplemented Linux syscall: {}", syscall_num);
-            Err(SysError::ENOSYS)
+            let class = syscall_logic::linux_syscall_handler_class(syscall_num);
+            debug_assert_ne!(class, 1);
+            let _ = class;
+            linux_errno_result(syscall_logic::linux_unhandled_errno(false))
         }
     };
     result
@@ -18275,11 +18278,19 @@ pub fn dispatch_zircon_syscall(syscall_num: u32, args: [usize; 8]) -> ZxResult<u
         }
         num if syscall_logic::zircon_syscall_interface_known(num) => {
             warn!("Unsupported Zircon syscall interface: {}", syscall_num);
-            Err(ZxError::ErrNotSupported)
+            if syscall_logic::zircon_unhandled_rejected(true) {
+                Err(ZxError::ErrNotSupported)
+            } else {
+                Ok(0)
+            }
         }
         _ => {
             warn!("Unimplemented Zircon syscall: {}", syscall_num);
-            Err(ZxError::ErrNotSupported)
+            if syscall_logic::zircon_unhandled_rejected(false) {
+                Err(ZxError::ErrNotSupported)
+            } else {
+                Ok(0)
+            }
         }
     }
 }

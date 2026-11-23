@@ -1189,9 +1189,8 @@ fn aarch64_memory_uses_one_vm_logic_module_without_broad_dead_code_suppression()
         );
     }
     assert!(shared.contains("smros_ll_pfn_index_body!(pfn, self.base_pfn, self.total_pages)"));
-    assert!(shared.contains(
-        "smros_ll_pfn_address_body!(pfn, self.base_pfn, self.total_pages, page_size)"
-    ));
+    assert!(shared
+        .contains("smros_ll_pfn_address_body!(pfn, self.base_pfn, self.total_pages, page_size)"));
     assert!(shared.contains("smros_ll_bitmap_mask_body!(bit_index)"));
 }
 
@@ -1518,6 +1517,10 @@ mod kernel_object_logic {
 }
 
 mod syscall_logic {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/syscall/syscall_dispatch_logic_shared.rs"
+    ));
     include!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/syscall/syscall_logic_shared.rs"
@@ -4096,13 +4099,17 @@ fn scheduler_reclaims_thread_stacks_only_after_a_confirmed_context_switch() {
     let shared =
         std::fs::read_to_string(repository.join("src/kernel_objects/scheduler_logic_shared.rs"))
             .expect("read shared scheduler lifecycle logic");
+    let queue = std::fs::read_to_string(
+        repository.join("src/kernel_objects/scheduler_queue_logic_shared.rs"),
+    )
+    .expect("read proved scheduler queue decisions");
 
     assert!(shared.contains("struct DeferredThreadRetirements"));
     assert!(shared.contains("record_before_switch"));
     assert!(shared.contains("confirm_after_switch"));
     assert!(shared.contains("take_reclaimable"));
     assert!(shared.contains("DeallocateAndReuse"));
-    assert!(shared.contains("has_stack_pointer != has_stack_size"));
+    assert!(queue.contains("$has_stack_pointer != $has_stack_size"));
 
     for function in ["pub fn schedule()", "pub fn schedule_on_cpu(cpu_id: usize)"] {
         let start = scheduler.find(function).expect("context switch function");

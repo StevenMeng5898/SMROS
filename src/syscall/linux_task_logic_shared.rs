@@ -140,6 +140,7 @@ pub(crate) fn linux_tid_to_user_value(tid: usize) -> Option<u32> {
     <u32 as core::convert::TryFrom<usize>>::try_from(tid).ok()
 }
 
+#[allow(unused_macros)]
 macro_rules! smros_linux_task_publish_transition_allowed_body {
     ($from:expr, $to:expr, $starting:expr, $runnable:expr) => {{
         $from == $starting && $to == $runnable
@@ -1807,6 +1808,13 @@ impl<const N: usize> LinuxTaskTable<N> {
             .tasks
             .iter()
             .position(|task| task.state == LinuxTaskState::Empty)?;
+        let Some(state) = smros_task_reserve_body!(
+            self.tasks[slot].state,
+            LinuxTaskState::Empty,
+            LinuxTaskState::Starting
+        ) else {
+            return None;
+        };
         let Some((tid, following_tid)) = linux_task_tid_allocation(self.next_tid) else {
             self.exhausted = true;
             return None;
@@ -1825,7 +1833,7 @@ impl<const N: usize> LinuxTaskTable<N> {
             tid: reservation.tid,
             tgid,
             scheduler_thread,
-            state: LinuxTaskState::Starting,
+            state,
             block_reason: LinuxBlockReason::None,
         };
         self.signal_states[slot].reset_in_place();
@@ -1891,17 +1899,18 @@ impl<const N: usize> LinuxTaskTable<N> {
         let Some(task) = self.tasks.get_mut(reservation.slot) else {
             return false;
         };
-        if !smros_linux_task_publish_transition_allowed_body!(
+        let Some(next) = smros_task_publish_body!(
             task.state,
-            LinuxTaskState::Runnable,
+            task.tid,
+            task.scheduler_thread,
+            reservation.tid,
+            reservation.scheduler_thread,
             LinuxTaskState::Starting,
             LinuxTaskState::Runnable
-        ) || task.tid != reservation.tid
-            || task.scheduler_thread != reservation.scheduler_thread
-        {
+        ) else {
             return false;
-        }
-        task.state = LinuxTaskState::Runnable;
+        };
+        task.state = next;
         true
     }
 
@@ -2552,16 +2561,18 @@ impl<const N: usize> LinuxTaskTable<N> {
         scheduler_thread: usize,
         reason: LinuxBlockReason,
     ) -> bool {
-        if reason == LinuxBlockReason::None {
-            return false;
-        }
         let Some(task) = self.task_for_transition(tid, scheduler_thread) else {
             return false;
         };
-        if task.state != LinuxTaskState::Runnable {
+        let Some(next) = smros_task_block_body!(
+            task.state,
+            LinuxTaskState::Runnable,
+            LinuxTaskState::Blocked,
+            reason == LinuxBlockReason::None
+        ) else {
             return false;
-        }
-        task.state = LinuxTaskState::Blocked;
+        };
+        task.state = next;
         task.block_reason = reason;
         true
     }
@@ -2570,10 +2581,14 @@ impl<const N: usize> LinuxTaskTable<N> {
         let Some(task) = self.task_for_transition(tid, scheduler_thread) else {
             return false;
         };
-        if task.state != LinuxTaskState::Blocked {
+        let Some(next) = smros_task_wake_body!(
+            task.state,
+            LinuxTaskState::Blocked,
+            LinuxTaskState::Runnable
+        ) else {
             return false;
-        }
-        task.state = LinuxTaskState::Runnable;
+        };
+        task.state = next;
         task.block_reason = LinuxBlockReason::None;
         true
     }
@@ -2598,7 +2613,15 @@ impl<const N: usize> LinuxTaskTable<N> {
     ) -> Option<usize> {
         let slot = self.task_slot(tid, scheduler_thread)?;
         let task = &mut self.tasks[slot];
-        task.state = LinuxTaskState::Exited;
+        let Some(next) = smros_task_exit_body!(
+            task.state,
+            LinuxTaskState::Runnable,
+            LinuxTaskState::Blocked,
+            LinuxTaskState::Exited
+        ) else {
+            return None;
+        };
+        task.state = next;
         task.block_reason = LinuxBlockReason::None;
         self.signal_states[slot].reset_in_place();
         self.sleep_waits[slot] = None;
@@ -2630,9 +2653,13 @@ impl<const N: usize> LinuxTaskTable<N> {
         let Some(slot) = self.task_slot_index(tid, scheduler_thread) else {
             return false;
         };
-        if self.tasks[slot].state != LinuxTaskState::Exited {
+        let Some(_next) = smros_task_retire_body!(
+            self.tasks[slot].state,
+            LinuxTaskState::Exited,
+            LinuxTaskState::Empty
+        ) else {
             return false;
-        }
+        };
         self.tasks[slot] = LinuxTaskCore::EMPTY;
         self.signal_states[slot].reset_in_place();
         self.sleep_waits[slot] = None;

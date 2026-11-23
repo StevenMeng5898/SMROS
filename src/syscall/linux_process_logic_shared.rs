@@ -420,15 +420,20 @@ impl<const N: usize> LinuxProcessTable<N> {
             .iter()
             .position(|process| process.state == LinuxProcessState::Empty)
             .ok_or(LinuxProcessError::Capacity)?;
-        if !(LINUX_ROOT_PID + 1..=LINUX_MAX_PID).contains(&pid)
-            || self
-                .processes
-                .iter()
-                .any(|process| process.state != LinuxProcessState::Empty && process.pid == pid)
-        {
+        let pid_in_range = (LINUX_ROOT_PID + 1..= LINUX_MAX_PID).contains(&pid);
+        let duplicate = self
+            .processes
+            .iter()
+            .any(|process| process.state != LinuxProcessState::Empty && process.pid == pid);
+        let Some(state) = smros_process_reserve_body!(
+            parent.state == LinuxProcessState::Running,
+            self.processes[slot].state == LinuxProcessState::Empty,
+            pid_in_range,
+            duplicate,
+            LinuxProcessState::Reserved
+        ) else {
             return Err(LinuxProcessError::Exhausted);
-        }
-
+        };
         if pid == LINUX_MAX_PID {
             self.exhausted = true;
         } else if pid >= self.next_pid {
@@ -439,7 +444,7 @@ impl<const N: usize> LinuxProcessTable<N> {
             parent_pid,
             process_group: parent.process_group,
             root_scheduler_thread: scheduler_thread,
-            state: LinuxProcessState::Reserved,
+            state,
             stopped: false,
             wait_status: 0,
             exit_signal,
@@ -456,13 +461,18 @@ impl<const N: usize> LinuxProcessTable<N> {
         let Some(process) = self.processes.get_mut(reservation.slot) else {
             return false;
         };
-        if process.state != LinuxProcessState::Reserved
-            || process.pid != reservation.pid
-            || process.parent_pid != reservation.parent_pid
-        {
+        let Some(next) = smros_process_publish_body!(
+            process.state,
+            process.pid,
+            process.parent_pid,
+            reservation.pid,
+            reservation.parent_pid,
+            LinuxProcessState::Reserved,
+            LinuxProcessState::Running
+        ) else {
             return false;
-        }
-        process.state = LinuxProcessState::Running;
+        };
+        process.state = next;
         true
     }
 
@@ -470,13 +480,18 @@ impl<const N: usize> LinuxProcessTable<N> {
         let Some(process) = self.processes.get_mut(reservation.slot) else {
             return false;
         };
-        if process.state != LinuxProcessState::Reserved
-            || process.pid != reservation.pid
-            || process.parent_pid != reservation.parent_pid
-        {
+        let Some(next) = smros_process_publish_fork_body!(
+            process.state,
+            process.pid,
+            process.parent_pid,
+            reservation.pid,
+            reservation.parent_pid,
+            LinuxProcessState::Reserved,
+            LinuxProcessState::Publishing
+        ) else {
             return false;
-        }
-        process.state = LinuxProcessState::Publishing;
+        };
+        process.state = next;
         true
     }
 
@@ -484,13 +499,18 @@ impl<const N: usize> LinuxProcessTable<N> {
         let Some(process) = self.processes.get_mut(reservation.slot) else {
             return false;
         };
-        if process.state != LinuxProcessState::Publishing
-            || process.pid != reservation.pid
-            || process.parent_pid != reservation.parent_pid
-        {
+        let Some(next) = smros_process_complete_fork_body!(
+            process.state,
+            process.pid,
+            process.parent_pid,
+            reservation.pid,
+            reservation.parent_pid,
+            LinuxProcessState::Publishing,
+            LinuxProcessState::Running
+        ) else {
             return false;
-        }
-        process.state = LinuxProcessState::Running;
+        };
+        process.state = next;
         true
     }
 
@@ -498,14 +518,18 @@ impl<const N: usize> LinuxProcessTable<N> {
         let Some(process) = self.processes.get_mut(reservation.slot) else {
             return false;
         };
-        if !matches!(
+        let Some(_next) = smros_process_rollback_fork_body!(
             process.state,
-            LinuxProcessState::Reserved | LinuxProcessState::Publishing
-        ) || process.pid != reservation.pid
-            || process.parent_pid != reservation.parent_pid
-        {
+            process.pid,
+            process.parent_pid,
+            reservation.pid,
+            reservation.parent_pid,
+            LinuxProcessState::Reserved,
+            LinuxProcessState::Publishing,
+            LinuxProcessState::Empty
+        ) else {
             return false;
-        }
+        };
         *process = LinuxProcessCore::EMPTY;
         true
     }
@@ -514,12 +538,17 @@ impl<const N: usize> LinuxProcessTable<N> {
         let Some(process) = self.processes.get_mut(reservation.slot) else {
             return false;
         };
-        if process.state != LinuxProcessState::Reserved
-            || process.pid != reservation.pid
-            || process.parent_pid != reservation.parent_pid
-        {
+        let Some(_next) = smros_process_rollback_body!(
+            process.state,
+            process.pid,
+            process.parent_pid,
+            reservation.pid,
+            reservation.parent_pid,
+            LinuxProcessState::Reserved,
+            LinuxProcessState::Empty
+        ) else {
             return false;
-        }
+        };
         *process = LinuxProcessCore::EMPTY;
         true
     }
@@ -546,7 +575,14 @@ impl<const N: usize> LinuxProcessTable<N> {
         else {
             return false;
         };
-        process.state = LinuxProcessState::Exiting;
+        let Some(next) = smros_process_begin_exit_body!(
+            process.state,
+            LinuxProcessState::Running,
+            LinuxProcessState::Exiting
+        ) else {
+            return false;
+        };
+        process.state = next;
         true
     }
 
@@ -558,7 +594,14 @@ impl<const N: usize> LinuxProcessTable<N> {
         else {
             return false;
         };
-        process.state = LinuxProcessState::Running;
+        let Some(next) = smros_process_abort_exit_body!(
+            process.state,
+            LinuxProcessState::Exiting,
+            LinuxProcessState::Running
+        ) else {
+            return false;
+        };
+        process.state = next;
         true
     }
 
@@ -572,7 +615,15 @@ impl<const N: usize> LinuxProcessTable<N> {
         }) else {
             return false;
         };
-        process.state = LinuxProcessState::Zombie;
+        let Some(next) = smros_process_exit_body!(
+            process.state,
+            LinuxProcessState::Running,
+            LinuxProcessState::Exiting,
+            LinuxProcessState::Zombie
+        ) else {
+            return false;
+        };
+        process.state = next;
         process.stopped = false;
         process.wait_status = wait_status;
         true
@@ -790,6 +841,17 @@ impl<const N: usize> LinuxProcessTable<N> {
                 && process.pid == pid
         })?;
         let reaped = self.processes[slot];
+        let Some(_next) = smros_process_reap_body!(
+            reaped.state,
+            reaped.parent_pid,
+            reaped.pid,
+            parent_pid,
+            pid,
+            LinuxProcessState::Zombie,
+            LinuxProcessState::Empty
+        ) else {
+            return None;
+        };
         self.processes[slot] = LinuxProcessCore::EMPTY;
         Some(reaped)
     }

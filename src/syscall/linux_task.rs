@@ -6,6 +6,7 @@ use crate::kernel_objects::scheduler;
 
 use super::SysError;
 
+include!("process_lifecycle_logic_shared.rs");
 include!("linux_task_logic_shared.rs");
 
 include!("linux_runtime_lock_shared.rs");

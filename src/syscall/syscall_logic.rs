@@ -1,3 +1,4 @@
+include!("syscall_dispatch_logic_shared.rs");
 include!("syscall_logic_shared.rs");
 
 pub(crate) const ZIRCON_SYSCALL_BASE: u64 = 1000;
