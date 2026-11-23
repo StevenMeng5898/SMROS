@@ -8532,9 +8532,9 @@ fn linux_hybrid_relative_sleep_until(
     linux_high_resolution_relative_sleep_until(deadline_nanoseconds, rem)
 }
 
-fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
+fn linux_signal_wait_deadline(timeout: usize) -> Result<(Option<u64>, Option<u64>), SysError> {
     if timeout == 0 {
-        return Ok(None);
+        return Ok((None, None));
     }
     let timeout_size = core::mem::size_of::<LinuxTimespec>();
     if !linux_signal_user_range_readable(timeout, timeout_size) {
@@ -8546,14 +8546,28 @@ fn linux_signal_wait_deadline(timeout: usize) -> Result<Option<u64>, SysError> {
     let mut nanoseconds = [0u8; core::mem::size_of::<i64>()];
     seconds.copy_from_slice(&bytes[..core::mem::size_of::<i64>()]);
     nanoseconds.copy_from_slice(&bytes[core::mem::size_of::<i64>()..]);
-    linux_task::linux_signal_timespec_to_ticks_ceil(
+    let seconds = i64::from_ne_bytes(seconds);
+    let nanoseconds = i64::from_ne_bytes(nanoseconds);
+    let ticks = linux_task::linux_signal_timespec_to_ticks_ceil(
         crate::kernel_lowlevel::timer::get_tick_count(),
-        i64::from_ne_bytes(seconds),
-        i64::from_ne_bytes(nanoseconds),
+        seconds,
+        nanoseconds,
         LINUX_SIGNAL_TICK_NANOS,
     )
-    .map(Some)
-    .ok_or(SysError::EINVAL)
+    .ok_or(SysError::EINVAL)?;
+    let requested = linux_task::linux_sleep_timespec_nanoseconds(seconds, nanoseconds)
+        .ok_or(SysError::EINVAL)?;
+    // The tick deadline includes a phase guard so the coarse path cannot
+    // return before the requested interval. A relative timeout also arms the
+    // precision compare at exactly that interval. `sigtimedwait/1-1` measures
+    // the wait with `time()`, whose resolution is one second, so an extra
+    // 10ms tick fails whenever the call starts in the last fraction of a second.
+    let precision = if requested == 0 {
+        None
+    } else {
+        Some(monotonic_nanos().saturating_add(requested))
+    };
+    Ok((Some(ticks), precision))
 }
 
 fn copy_linux_signal_wait_info(
@@ -11398,7 +11412,7 @@ pub fn sys_rt_sigtimedwait(
         return Err(SysError::EFAULT);
     }
     let wait_mask = linux_read_u64_user(set)? & !linux_uncatchable_signal_mask();
-    let deadline = linux_signal_wait_deadline(timeout)?;
+    let (deadline, precision_deadline) = linux_signal_wait_deadline(timeout)?;
 
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     let task_pending = match linux_task::peek_current_matching_signal(wait_mask) {
@@ -11429,7 +11443,8 @@ pub fn sys_rt_sigtimedwait(
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::EAGAIN);
     }
-    let wait = LinuxSignalWait::timed(wait_mask, deadline, info);
+    let mut wait = LinuxSignalWait::timed(wait_mask, deadline, info);
+    wait.precision_deadline_nanoseconds = precision_deadline;
     let installed = match linux_task::install_current_signal_wait(wait, None) {
         Ok(installed) => installed,
         Err(error) => {
@@ -11445,6 +11460,9 @@ pub fn sys_rt_sigtimedwait(
         let _ = linux_task::cancel_current_signal_wait();
         crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
         return Err(SysError::EAGAIN);
+    }
+    if let Some(precision_deadline) = precision_deadline {
+        crate::kernel_lowlevel::timer::arm_at_nanoseconds(precision_deadline);
     }
 
     scheduler::schedule();

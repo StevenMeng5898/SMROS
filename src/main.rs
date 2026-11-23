@@ -680,9 +680,11 @@ fn process_timer_work() -> bool {
     // CPU's compare interrupt. The shared task table makes this idempotent.
     let precision_woke_task = crate::syscall::linux_task::on_precision_timer(now_nanoseconds);
     let next_sleep_deadline = crate::syscall::linux_task::next_precision_sleep_deadline();
+    let next_signal_deadline = crate::syscall::linux_task::next_precision_signal_deadline();
     let next_posix_timer_deadline = crate::syscall::next_linux_posix_timer_deadline();
     if let Some(deadline) = next_sleep_deadline
         .into_iter()
+        .chain(next_signal_deadline)
         .chain(next_posix_timer_deadline)
         .min()
     {

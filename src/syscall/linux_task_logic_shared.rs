@@ -1127,6 +1127,10 @@ pub(crate) enum LinuxSignalWaitOutcome {
 pub(crate) struct LinuxSignalWait {
     pub wait_mask: u64,
     pub deadline: Option<u64>,
+    /// Absolute monotonic nanoseconds. The tick deadline stays conservative so
+    /// a missed precision interrupt cannot return early; this field wakes the
+    /// waiter on the hardware compare instead of one extra 10ms tick.
+    pub precision_deadline_nanoseconds: Option<u64>,
     pub output_address: usize,
     pub previous_mask: Option<u64>,
     pub outcome: LinuxSignalWaitOutcome,
@@ -1144,6 +1148,7 @@ impl LinuxSignalWait {
         Self {
             wait_mask,
             deadline,
+            precision_deadline_nanoseconds: None,
             output_address,
             previous_mask: None,
             outcome: LinuxSignalWaitOutcome::Waiting,
@@ -1157,6 +1162,7 @@ impl LinuxSignalWait {
         Self {
             wait_mask,
             deadline: None,
+            precision_deadline_nanoseconds: None,
             output_address: 0,
             previous_mask: Some(previous_mask),
             outcome: LinuxSignalWaitOutcome::Waiting,
@@ -1587,6 +1593,22 @@ impl LinuxTaskSignalState {
         if wait.previous_mask.is_some()
             || wait.outcome != LinuxSignalWaitOutcome::Waiting
             || !wait.deadline.is_some_and(|deadline| deadline <= now)
+        {
+            return false;
+        }
+        wait.outcome = LinuxSignalWaitOutcome::TimedOut;
+        true
+    }
+
+    pub(crate) fn expire_signal_wait_precise(&mut self, now_nanoseconds: u64) -> bool {
+        let Some(wait) = self.signal_wait.as_mut() else {
+            return false;
+        };
+        if wait.previous_mask.is_some()
+            || wait.outcome != LinuxSignalWaitOutcome::Waiting
+            || !wait
+                .precision_deadline_nanoseconds
+                .is_some_and(|deadline| deadline <= now_nanoseconds)
         {
             return false;
         }
@@ -2232,17 +2254,58 @@ impl<const N: usize> LinuxTaskTable<N> {
         &mut self,
         now: u64,
     ) -> Option<(usize, usize, LinuxBlockReason)> {
+        self.expire_one_signal_wait_if(now, false)
+    }
+
+    pub(crate) fn expire_one_signal_wait_precise(
+        &mut self,
+        now_nanoseconds: u64,
+    ) -> Option<(usize, usize, LinuxBlockReason)> {
+        self.expire_one_signal_wait_if(now_nanoseconds, true)
+    }
+
+    fn expire_one_signal_wait_if(
+        &mut self,
+        now: u64,
+        precise: bool,
+    ) -> Option<(usize, usize, LinuxBlockReason)> {
         for index in 0..N {
             let task = self.tasks[index];
-            let signal_state = &mut self.signal_states[index];
-            if task.state == LinuxTaskState::Blocked
-                && task.block_reason == LinuxBlockReason::SignalWait
-                && signal_state.expire_signal_wait(now)
+            if task.state != LinuxTaskState::Blocked
+                || task.block_reason != LinuxBlockReason::SignalWait
             {
+                continue;
+            }
+            let signal_state = &mut self.signal_states[index];
+            let expired = if precise {
+                signal_state.expire_signal_wait_precise(now)
+            } else {
+                signal_state.expire_signal_wait(now)
+            };
+            if expired {
                 return Some((task.tid, task.scheduler_thread, task.block_reason));
             }
         }
         None
+    }
+
+    pub(crate) fn next_precision_signal_deadline(&self) -> Option<u64> {
+        self.tasks
+            .iter()
+            .zip(self.signal_states.iter())
+            .filter_map(|(task, signal_state)| {
+                if task.state != LinuxTaskState::Blocked
+                    || task.block_reason != LinuxBlockReason::SignalWait
+                {
+                    return None;
+                }
+                let wait = signal_state.signal_wait.as_ref()?;
+                if wait.outcome != LinuxSignalWaitOutcome::Waiting {
+                    return None;
+                }
+                wait.precision_deadline_nanoseconds
+            })
+            .min()
     }
 
     pub(crate) fn install_sleep(

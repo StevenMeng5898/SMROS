@@ -1262,6 +1262,23 @@ pub(crate) fn on_timer_tick(now: u64) {
 
 pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
     let mut woke_task = false;
+    while let Some(identity) = with_runtime(|runtime| {
+        runtime
+            .tasks
+            .expire_one_signal_wait_precise(now_nanoseconds)
+    }) {
+        let (tid, scheduler_thread, reason) = identity;
+        if wake_blocked(tid, scheduler_thread, reason) {
+            woke_task = true;
+        } else {
+            let _ = with_runtime(|runtime| {
+                runtime
+                    .tasks
+                    .signal_state_mut(tid, scheduler_thread)
+                    .and_then(|state| state.take_signal_wait_outcome())
+            });
+        }
+    }
     loop {
         let expiry = with_runtime(|runtime| {
             let gates = runtime.timer_notify_gates;
@@ -1295,6 +1312,10 @@ pub(crate) fn on_precision_timer(now_nanoseconds: u64) -> bool {
 
 pub(crate) fn next_precision_sleep_deadline() -> Option<u64> {
     with_runtime(|runtime| runtime.tasks.next_precision_sleep_deadline())
+}
+
+pub(crate) fn next_precision_signal_deadline() -> Option<u64> {
+    with_runtime(|runtime| runtime.tasks.next_precision_signal_deadline())
 }
 
 pub(crate) fn reset() {
