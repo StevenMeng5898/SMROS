@@ -1,0 +1,11 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3452,7 +3452,7 @@
+     ensures
+         out == (pending != empty && (pending & reclaimable_bit) == 0 && pending != current),
+ {
+-    smros_sched_retire_confirm_accepted_body!(pending, empty, reclaimable_bit, current)
++    false
+ }
+ 
+ fn sched_retire_take_thread(reclaimable: u64, empty: u64, reclaimable_bit: u64) -> (out: Option<u64>)

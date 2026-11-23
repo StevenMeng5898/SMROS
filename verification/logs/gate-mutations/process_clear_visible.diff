@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2984,7 +2984,7 @@
+         state == 3 || state == 4 || state == 5 ==> out == Some(0u8),
+         state != 3 && state != 4 && state != 5 ==> out == Option::<u8>::None,
+ {
+-    smros_process_clear_visible_body!(state, 3u8, 4u8, 5u8, 0u8)
++    None
+ }
+ 
+ fn task_install_runnable(state: u8) -> (out: Option<u8>)

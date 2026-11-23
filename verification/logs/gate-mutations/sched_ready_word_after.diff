@@ -1,0 +1,34 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3365,30 +3365,7 @@
+         !ready ==> (out & (1u64 << index)) == 0,
+         (out & !(1u64 << index)) == (word & !(1u64 << index)),
+ {
+-    let mask = smros_sched_ready_bit_mask_body!(index);
+-    let out = smros_sched_ready_word_after_body!(word, mask, ready);
+-    assert(ready ==> (out & (1u64 << index)) == (1u64 << index)) by (bit_vector)
+-        requires
+-            index < 64,
+-            mask == (1u64 << (index % 64)),
+-            ready ==> out == (word | mask),
+-            !ready ==> out == (word & !mask),
+-    ;
+-    assert(!ready ==> (out & (1u64 << index)) == 0) by (bit_vector)
+-        requires
+-            index < 64,
+-            mask == (1u64 << (index % 64)),
+-            ready ==> out == (word | mask),
+-            !ready ==> out == (word & !mask),
+-    ;
+-    assert((out & !(1u64 << index)) == (word & !(1u64 << index))) by (bit_vector)
+-        requires
+-            index < 64,
+-            mask == (1u64 << (index % 64)),
+-            ready ==> out == (word | mask),
+-            !ready ==> out == (word & !mask),
+-    ;
+-    out
++    0
+ }
+ 
+ fn sched_ready_count_after(count: u16, was_ready: bool, ready: bool) -> (out: u16)

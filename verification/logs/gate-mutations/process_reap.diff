@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2890,7 +2890,7 @@
+         state == 5 && parent == want_parent && pid == want_pid ==> out == Some(0u8),
+         !(state == 5 && parent == want_parent && pid == want_pid) ==> out == Option::<u8>::None,
+         {
+-    smros_process_reap_body!(state, parent, pid, want_parent, want_pid, 5u8, 0u8)
++    None
+ }
+ 
+ fn process_wait_reaps_once(parent: u64, pid: u64) -> (out: (Option<u8>, Option<u8>))

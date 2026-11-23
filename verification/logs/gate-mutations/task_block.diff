@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2924,7 +2924,7 @@
+         !reason_is_none && state == 2 ==> out == Some(3u8),
+         reason_is_none || state != 2 ==> out == Option::<u8>::None,
+         {
+-    smros_task_block_body!(state, 2u8, 3u8, reason_is_none)
++    None
+ }
+ 
+ fn task_wake(state: u8) -> (out: Option<u8>)

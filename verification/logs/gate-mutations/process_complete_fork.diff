@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2829,7 +2829,7 @@
+         state == 2 && pid == want_pid && parent == want_parent ==> out == Some(3u8),
+         !(state == 2 && pid == want_pid && parent == want_parent) ==> out == Option::<u8>::None,
+         {
+-    smros_process_complete_fork_body!(state, pid, parent, want_pid, want_parent, 2u8, 3u8)
++    None
+ }
+ 
+ fn process_rollback(

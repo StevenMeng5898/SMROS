@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2908,7 +2908,7 @@
+         state == 0 ==> out == Some(1u8),
+         state != 0 ==> out == Option::<u8>::None,
+         {
+-    smros_task_reserve_body!(state, 0u8, 1u8)
++    None
+ }
+ 
+ fn task_publish(state: u8, tid: u64, thread: u64, want_tid: u64, want_thread: u64) -> (out: Option<u8>)

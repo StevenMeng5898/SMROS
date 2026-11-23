@@ -1,0 +1,11 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3406,7 +3406,7 @@
+     ensures
+         out == (count > 0),
+ {
+-    smros_sched_priority_count_ready_body!(count)
++    false
+ }
+ 
+ fn sched_best_priority_candidate(

@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2992,7 +2992,7 @@
+         state == 0 ==> out == Some(2u8),
+         state != 0 ==> out == Option::<u8>::None,
+ {
+-    smros_task_install_runnable_body!(state, 0u8, 2u8)
++    None
+ }
+ 
+ fn task_rollback(state: u8) -> (out: Option<u8>)

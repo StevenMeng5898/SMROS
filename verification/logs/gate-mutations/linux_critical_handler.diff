@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -3053,7 +3053,7 @@
+     ensures
+         out == linux_critical_handler_spec(syscall_num as int),
+ {
+-    smros_linux_critical_handler_body!(syscall_num)
++    false
+ }
+ 
+ spec fn linux_handler_class_spec(n: int) -> int {

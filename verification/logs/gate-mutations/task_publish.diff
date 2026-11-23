@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2916,7 +2916,7 @@
+         state == 1 && tid == want_tid && thread == want_thread ==> out == Some(2u8),
+         !(state == 1 && tid == want_tid && thread == want_thread) ==> out == Option::<u8>::None,
+         {
+-    smros_task_publish_body!(state, tid, thread, want_tid, want_thread, 1u8, 2u8)
++    None
+ }
+ 
+ fn task_block(state: u8, reason_is_none: bool) -> (out: Option<u8>)

@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -3029,7 +3029,7 @@
+     ensures
+         out as int == linux_audited_stub_class_spec(syscall_num as int),
+ {
+-    smros_linux_audited_stub_class_body!(syscall_num)
++    0
+ }
+ 
+ fn linux_stub_errno(class: u8) -> (out: Option<i32>)

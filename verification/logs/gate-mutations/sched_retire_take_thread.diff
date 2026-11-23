@@ -1,0 +1,11 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3461,7 +3461,7 @@
+         reclaimable != empty && (reclaimable & reclaimable_bit) != 0
+             ==> out == Some(reclaimable & !reclaimable_bit),
+ {
+-    smros_sched_retire_take_thread_body!(reclaimable, empty, reclaimable_bit)
++    None
+ }
+ 
+ fn sched_retired_slot_reuse(

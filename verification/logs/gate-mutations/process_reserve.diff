@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2787,7 +2787,7 @@
+         parent_running && slot_empty && pid_in_range && !duplicate ==> out == Some(1u8),
+         !(parent_running && slot_empty && pid_in_range && !duplicate) ==> out == Option::<u8>::None,
+ {
+-    smros_process_reserve_body!(parent_running, slot_empty, pid_in_range, duplicate, 1u8)
++    None
+ }
+ 
+ fn process_publish(

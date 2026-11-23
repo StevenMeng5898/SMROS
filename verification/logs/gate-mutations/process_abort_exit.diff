@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2874,7 +2874,7 @@
+         state == 4 ==> out == Some(3u8),
+         state != 4 ==> out == Option::<u8>::None,
+         {
+-    smros_process_abort_exit_body!(state, 4u8, 3u8)
++    None
+ }
+ 
+ fn process_exit(state: u8) -> (out: Option<u8>)

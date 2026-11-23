@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2932,7 +2932,7 @@
+         state == 3 ==> out == Some(2u8),
+         state != 3 ==> out == Option::<u8>::None,
+         {
+-    smros_task_wake_body!(state, 3u8, 2u8)
++    None
+ }
+ 
+ fn task_exit(state: u8) -> (out: Option<u8>)

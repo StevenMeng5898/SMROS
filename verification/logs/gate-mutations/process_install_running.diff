@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2968,7 +2968,7 @@
+         state == 0 ==> out == Some(3u8),
+         state != 0 ==> out == Option::<u8>::None,
+ {
+-    smros_process_install_running_body!(state, 0u8, 3u8)
++    None
+ }
+ 
+ fn process_clear_occupied(state: u8) -> (out: Option<u8>)

@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2858,7 +2858,7 @@
+         !((state == 1 || state == 2) && pid == want_pid && parent == want_parent)
+             ==> out == Option::<u8>::None,
+         {
+-    smros_process_rollback_fork_body!(state, pid, parent, want_pid, want_parent, 1u8, 2u8, 0u8)
++    None
+ }
+ 
+ fn process_begin_exit(state: u8) -> (out: Option<u8>)

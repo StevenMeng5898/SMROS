@@ -1,0 +1,21 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3480,17 +3480,7 @@
+         is_terminated && slot != 0 && slot != current && retired_is_slot
+             && !has_stack_pointer && !has_stack_size ==> out == 1,
+ {
+-    smros_sched_retired_slot_reuse_body!(
+-        is_terminated,
+-        slot,
+-        current,
+-        retired_is_slot,
+-        has_stack_pointer,
+-        has_stack_size,
+-        0u8,
+-        1u8,
+-        2u8
+-    )
++    0
+ }
+ 
+ fn sched_highest_ready_priority(priorities: &Vec<u8>, ready: &Vec<bool>) -> (out: Option<u8>)

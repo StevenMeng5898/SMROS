@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2815,7 +2815,7 @@
+         state == 1 && pid == want_pid && parent == want_parent ==> out == Some(2u8),
+         !(state == 1 && pid == want_pid && parent == want_parent) ==> out == Option::<u8>::None,
+         {
+-    smros_process_publish_fork_body!(state, pid, parent, want_pid, want_parent, 1u8, 2u8)
++    None
+ }
+ 
+ fn process_complete_fork(

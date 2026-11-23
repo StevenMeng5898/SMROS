@@ -1,0 +1,11 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3440,7 +3440,7 @@
+     ensures
+         out == (cpu_id < cpu_count && thread != 0 && (thread & reclaimable_bit) == 0),
+ {
+-    smros_sched_retire_record_accepted_body!(cpu_id, cpu_count, thread, reclaimable_bit)
++    false
+ }
+ 
+ fn sched_retire_confirm_accepted(

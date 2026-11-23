@@ -1,0 +1,11 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3354,7 +3354,7 @@
+     ensures
+         out == (word & mask != 0),
+ {
+-    smros_sched_ready_bit_is_set_body!(word, mask)
++    false
+ }
+ 
+ fn sched_ready_word_after(word: u64, index: u64, ready: bool) -> (out: u64)

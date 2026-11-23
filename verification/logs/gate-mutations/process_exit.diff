@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2882,7 +2882,7 @@
+         state == 3 || state == 4 ==> out == Some(5u8),
+         state != 3 && state != 4 ==> out == Option::<u8>::None,
+         {
+-    smros_process_exit_body!(state, 3u8, 4u8, 5u8)
++    None
+ }
+ 
+ fn process_reap(state: u8, parent: u64, pid: u64, want_parent: u64, want_pid: u64) -> (out: Option<u8>)

@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -2940,7 +2940,7 @@
+         state == 2 || state == 3 ==> out == Some(4u8),
+         state != 2 && state != 3 ==> out == Option::<u8>::None,
+         {
+-    smros_task_exit_body!(state, 2u8, 3u8, 4u8)
++    None
+ }
+ 
+ fn task_retire(state: u8) -> (out: Option<u8>)

@@ -1,0 +1,11 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3347,7 +3347,7 @@
+     ensures
+         out == (1u64 << (index % 64)),
+ {
+-    smros_sched_ready_bit_mask_body!(index)
++    0
+ }
+ 
+ fn sched_ready_bit_is_set(word: u64, mask: u64) -> (out: bool)

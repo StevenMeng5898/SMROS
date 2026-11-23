@@ -1,0 +1,11 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -3399,7 +3399,7 @@
+         was_ready && !ready && count > 0 ==> out == (count - 1) as u16,
+         was_ready && !ready && count == 0 ==> out == 0,
+ {
+-    smros_sched_ready_count_after_body!(count, was_ready, ready)
++    0
+ }
+ 
+ fn sched_priority_count_ready(count: u16) -> (out: bool)

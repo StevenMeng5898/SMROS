@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -3039,7 +3039,7 @@
+         class == 4 ==> out == Some(22i32),
+         class != 2 && class != 3 && class != 4 ==> out == Some(38i32),
+ {
+-    smros_linux_stub_errno_body!(class, 38, 1, 22)
++    None
+ }
+ 
+ spec fn linux_critical_handler_spec(n: int) -> bool {

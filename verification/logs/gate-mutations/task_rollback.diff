@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -3000,7 +3000,7 @@
+         state == 1 || state == 2 ==> out == Some(0u8),
+         state != 1 && state != 2 ==> out == Option::<u8>::None,
+ {
+-    smros_task_rollback_body!(state, 1u8, 2u8, 0u8)
++    None
+ }
+ 
+ spec fn linux_audited_stub_class_spec(n: int) -> int {

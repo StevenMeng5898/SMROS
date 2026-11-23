@@ -1,0 +1,11 @@
+--- a/verification/syscall/src/lib.rs
++++ b/verification/syscall/src/lib.rs
+@@ -3077,7 +3077,7 @@
+     ensures
+         out as int == linux_handler_class_spec(syscall_num as int),
+ {
+-    smros_linux_handler_class_body!(syscall_num, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8)
++    0
+ }
+ 
+ fn verified_linux_unhandled_errno(known: bool) -> (out: i32)
