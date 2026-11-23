@@ -1,6 +1,7 @@
+# baseline aceff8d
 --- a/src/syscall/syscall_dispatch_logic_shared.rs
 +++ b/src/syscall/syscall_dispatch_logic_shared.rs
-@@ -80,7 +80,6 @@
+@@ -78,7 +78,6 @@
      ($syscall_num:expr) => {{
          $syscall_num == 93
              || $syscall_num == 94
