@@ -320,6 +320,7 @@ def classify_status(
     *,
     timed_out: bool = False,
     launch_error: str | None = None,
+    stdout: str = "",
 ) -> str:
     if launch_error is not None:
         return "launch-error"
@@ -327,13 +328,17 @@ def classify_status(
         return "timeout"
     if returncode is not None and returncode < 0:
         return "crash"
-    return {
+    status = {
         PTS_PASS: "pass",
         PTS_FAIL: "fail",
         PTS_UNRESOLVED: "unresolved",
         PTS_UNSUPPORTED: "unsupported",
         PTS_UNTESTED: "untested",
     }.get(returncode, "fail")
+    # A zero exit is not a pass when the test itself printed FAILED.
+    if status == "pass" and "FAILED" in stdout:
+        return "fail"
+    return status
 
 
 def _pts_status(
@@ -1416,7 +1421,10 @@ def run_runtime_attempt(
             launch_error=launch_error,
         ),
         status=classify_status(
-            returncode, timed_out=timed_out, launch_error=launch_error
+            returncode,
+            timed_out=timed_out,
+            launch_error=launch_error,
+            stdout=stdout.text,
         ),
         exit_code=exit_code,
         signal=signum,

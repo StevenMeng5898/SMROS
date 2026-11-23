@@ -32,6 +32,12 @@ Counted from the classified `src/*.rs` and `src/*.S` entries below.
 
 The three files for scheduling, lifecycle, and syscall dispatch stay 已证明. Counted rows are only macros in those files whose harness postcondition is the full spec or the successor state. Constant unhandled tails, `sched_highest_ready_priority`, and the constant-input reap-once lemmas are not coverage. `linux_critical_handler` and `linux_handler_class` are `dead_code`: the dispatcher does not call them. The audit still lists those two reference rows inside the 120, and they are not kernel critical coverage. Kernel critical coverage is the other 118 rows. The 待证明 count did not drop: the live scheduler, process table, task table, `stopped`, and the syscall `match` stay 待证明. `scheduler_queue_logic_shared.rs` dropped `smros_sched_tick_charge_body` (11 lines). The kernel-objects harness dropped the matching `sched_tick_charge` function (12 lines). The returned priority was never stored.
 
+## 签署（待证明）
+
+签署不是已证明。`verification/verus-mutation-signoff.txt` 里的每个 `lib::` 函数都要在下面逐条写出。mutation 摘要把它们记为 signed-off，不计入 `functions` 和 `killed`。只要还有签署，`make verus-mutation` 的退出码就是 1。
+
+当前没有签署函数。
+
 ## Coverage Model
 
 - Verified shared logic: pure helper macro bodies included from `src/` into a

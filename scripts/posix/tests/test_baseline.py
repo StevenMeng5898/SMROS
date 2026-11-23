@@ -477,6 +477,16 @@ class StatusTests(unittest.TestCase):
             {code: classify_status(code) for code in expected}, expected
         )
 
+    def test_stdout_failed_overrides_a_pass_exit(self) -> None:
+        self.assertEqual(
+            classify_status(
+                0,
+                stdout="Test FAILED: Did not receive segmentation fault\n",
+            ),
+            "fail",
+        )
+        self.assertEqual(classify_status(0, stdout="Test PASSED\n"), "pass")
+
     def test_signal_timeout_and_launch_error_take_precedence(self) -> None:
         self.assertEqual(classify_status(-signal.SIGSEGV), "crash")
         self.assertEqual(classify_status(-signal.SIGKILL, timed_out=True), "timeout")

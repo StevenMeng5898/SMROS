@@ -399,6 +399,9 @@ impl UserShell {
         self.print("╚═══════════════════════════════════════════════════════════╝\n");
         self.print("\n");
         self.print("Welcome to SMROS shell!\n");
+        self.print("smros_commit=");
+        self.print(env!("SMROS_GIT_COMMIT"));
+        self.print("\n");
         self.print("Type 'help' for available commands.\n\n");
     }
 

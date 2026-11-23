@@ -35,6 +35,11 @@ cross `gcc`/`nm`/`readelf`, matching `qemu-user` and `qemu-system-*`, and
 sudo apt-get install qemu-user gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 ```
 
+This branch runs the distro `qemu-aarch64` from the `qemu-user` package. That
+binary is dynamically linked, not a static build. Isolating the qemu binary
+and its sysroot belongs to `cursor/notify-gate-flake-verus-mutation-4c7b`;
+this branch does not add a second isolation setup.
+
 RISC-V64 uses `gcc-riscv64-linux-gnu` and `libc6-dev-riscv64-cross`.
 `POSIX_SYSROOT` defaults to `/usr/<arch>-linux-gnu` and overrides the qemu-user
 sysroot for any architecture.
