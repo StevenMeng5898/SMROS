@@ -152,7 +152,7 @@ the qemu-user host reference. They are not the guest kernel futex path.
 | `conformance/interfaces/aio_fsync/8-1.c` | crash, signal 1 | pass | timing |
 | `conformance/interfaces/mq_send/5-1.c` | fail, "didn't appear to complete", 7203 ms | pass, 4205 ms | timing |
 | `conformance/interfaces/mq_timedsend/5-1.c` | pass, 4199 ms | fail, "mq_send() didn't appear to complete", 7232 ms | timing |
-| `conformance/interfaces/pthread_cond_init/1-3.c` | pass | fail, "behave differently across processes", about 200 ms, no timeout token | scheduling-sensitive; closed in KNOWN_ISSUES |
+| `conformance/interfaces/pthread_cond_init/1-3.c` | pass | fail, "behave differently across processes", about 200 ms, no timeout token | out of scope — host glibc + qemu-user |
 | `conformance/interfaces/pthread_cond_init/4-1.c` | unresolved, child killed, EBADF, 6387 ms | timeout, signal 15, 33689 ms | address-space limit exhaustion, inferred |
 | `conformance/interfaces/pthread_mutex_init/5-1.c` | unresolved, child killed, 6460 ms | timeout, signal 15, 31367 ms | address-space limit exhaustion, inferred |
 
@@ -165,10 +165,16 @@ same sleep race and moved from fail to pass. `aio_fsync/8-1.c` moved from one
 SIGHUP crash to pass; it was not repeated because it did not leave pass.
 `pthread_cond_init/1-3.c` compares wakeup counts for a NULL condattr, a
 default condattr, and a process-shared reference. It is not a sleep timer.
-The staged binary does not print those counts. A `-DVERBOSE=2` rebuild of the
-existing source, without editing that source or the patches, was run 20 times
-on one binary. The counts and the close decision are in
-`docs/KNOWN_ISSUES.md`. `pthread_cond_init/4-1.c` and
+The staged campaign binary (`a1f87d30…`) does not print those counts. The
+`-DVERBOSE=2` binary (`8e0fdcdf…`) is a different counting probe, not a timing
+reproduction. Its 20 runs are evidence only that no side is 0 and that
+pass/fail is an exact-equality check: run 04 is 200/199/169 and passes, and
+run 15 is 200/199/197 and passes, while a shortfall of 1 to 7 fails. They do
+not show why a count differed. The entry is closed as out of scope for host
+glibc under qemu-user. The binding log is
+`verification/logs/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/`.
+`docs/KNOWN_ISSUES.md` records that this host baseline does not cover the
+compat library's `pthread_cond_*`. `pthread_cond_init/4-1.c` and
 `pthread_mutex_init/5-1.c` fork, lower `RLIMIT_AS`, and allocate until that
 address-space limit is exhausted. That reading is inferred: the saved stdout
 does not contain `ENOMEM`. Both archives are non-pass; the later run hit the

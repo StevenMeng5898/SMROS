@@ -100,6 +100,20 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --api getpid --
 PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --qemu-memory 1024M --resume
 ```
 
+## Host baseline and the compat library
+
+`make posix-baseline` runs the staged ELF under qemu-user against host glibc.
+`scripts/posix/baseline.py` sets `LD_LIBRARY_PATH=/lib:/usr/lib` and does not
+set `LD_PRELOAD`. `libsmros-posix-compat.so` can sit in the runtime snapshot
+without being the library that supplies `pthread_cond_*`. The raw
+`LD_DEBUG=bindings` log for `pthread_cond_init/1-3.c` is
+`verification/logs/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/ld-debug.stderr`.
+That log binds `pthread_cond_init`, `pthread_cond_wait`,
+`pthread_cond_signal`, `pthread_cond_broadcast`, and `pthread_cond_destroy` to
+`libc.so.6`. The host baseline does not cover the SMROS compat library's
+`pthread_cond_*` and must not be used as that coverage. SMROS's gate remains
+guest `posixtest`.
+
 ## Guest Live Selection Coverage
 
 The guest shell reports live selection coverage without changing structured
