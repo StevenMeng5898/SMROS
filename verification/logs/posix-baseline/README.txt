@@ -13,3 +13,8 @@ run-1365.ndjson is the 1365/235 campaign capture from
 target/posix/aarch64/linux-reference/results.ndjson, with the same
 reclassifier applied. 10-1 in that run is signal 11, status crash, pts_status
 empty, and the stdout is empty. It is not the 1358 pass row.
+
+run-1363.ndjson is the posix-baseline file written by the new classifier
+during the f4af8fc guest campaign (summary count 1363/237). pthread_create/10-1.c
+in that run exited by signal 11, so status is crash and stdout is empty.
+It is not the run-1358 row.
