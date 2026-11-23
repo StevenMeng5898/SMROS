@@ -28,17 +28,22 @@ is retried.
 The samples are monotonic time from arming the precision deadline until the
 sleeper runs again. That is the interval the probe compares with 200ms, apart
 from a few microseconds of syscall entry and exit. Every sample is in
-`verification/logs/notify-gate-sleep.txt`. The run was 50/50 pass, 0 retries,
-0 early wakes, and 0 failures. Percentiles are linear between sorted indexes
-`(n-1)*p`.
+`verification/logs/notify-gate-sleep.txt`. That file records the run that
+booted `ed2f346` (`git_head=ed2f3464e116b72bd12e59f8d3c7904eaec65a6f`,
+`utc_start=2026-11-23T09:00:55Z`). Final verdicts were 50/50 pass and 0 early
+wakes. One first-attempt nanosleep was 201478000 ns, so that run retried:
+`attempts=2 late=1 values=201478000,50443072,50165680`. The second attempt
+passed. No sample exceeded 300000000 ns. Nanosleep has 51 samples because the
+retried run contributes the late first attempt and the passing second
+attempt. Percentiles are linear between sorted indexes `(n-1)*p`.
 
-| sleep | min | median | p95 | max |
-| --- | ---: | ---: | ---: | ---: |
-| nanosleep | 50172576 | 85245608 | 158747254 | 179106496 |
-| clock_nanosleep | 50072192 | 51342432 | 129054676 | 138816928 |
+| sleep | n | min | median | p95 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| nanosleep | 51 | 50128272 | 84091424 | 172085160 | 201478000 |
+| clock_nanosleep | 50 | 50085520 | 50321360 | 95209047 | 130205072 |
 
-All values are nanoseconds. Nothing reached 200000000. The late-only retry
-was already in this kernel and did not fire.
+All values are nanoseconds. The passing attempts stay under 200000000. The
+one late sample is the case the retry rule exists for.
 
 Nanosleep is late more often than `clock_nanosleep` because it runs while the
 parent is still in the 1ms re-arm loop on the same boot. The parent and the
@@ -49,15 +54,15 @@ parent's timeslice is preempted. `clock_nanosleep` usually starts after that
 first wakeup and lands on 50ms. QEMU TCG adds the long tail: CNTPCT keeps
 moving while a vCPU is descheduled, and a compare that is already behind
 CNTPCT does not raise a new GICv3 edge until it is rewritten. A stalled vCPU
-therefore observes a sleep longer than the programmed 50ms. The longest
-nanosleep in the quiet 50-run sample was 188ms, under the 200ms line and
-under the 300ms hold.
+therefore observes a sleep longer than the programmed 50000000 ns. On
+this 50-run the longest nanosleep was 201478000 ns. That is past 200ms and
+short of the 300ms hold, so the guest retried once and then passed.
 
-That is a late-only flake, not a wrong result. The failure rate on this host
-was 0/50. An earlier hermes boot of the same PR #32 commit reported
-`nanosleep-late` once, and a later boot of that commit passed. Both facts
-match a tail that reaches the 200ms line only when the host or the parent's
-timer loop delays preemption.
+The final-verdict failure rate on this host was 0/50. One of the 50 runs was
+late on the first attempt. An earlier hermes boot of the same PR #32 commit
+reported `nanosleep-late` once, and a later boot of that commit passed. Both
+facts match a tail that reaches the 200ms line only when the host or the
+parent's timer loop delays preemption.
 
 ## Retry
 
@@ -78,5 +83,21 @@ window still fails on the first attempt.
   `verus-mutation-summary.txt` headers onto that code.
 - `6dff7d8` records host `ut`/`it`/`skt`, the five Verus harness totals, CBMC,
   and futex-stress. It does not change kernel or proof sources.
-- Later campaign logs are regenerated on the commit that contains these
-  corrections. Full serial is not stored.
+- `9db5d55` moves the mutated body to the real function body, requires both
+  Boolean and `Option` sides, and adds the early-wake exits plus the retry
+  predicate. `security_case_logic_shared.rs` gained the retry macro, and
+  `verification/services` proves it as `verified_notify_gate_allow_retry`.
+  `tests/host/src/lib.rs` gained the retry tests in the same commit.
+- `1f1e31d` publishes a campaign summary and also edits
+  `scripts/summarize-hermes-campaign.py`. It does not only add the script.
+- `ed2f346` proves `fifo_capacity_valid` with the nonlinear multiplication
+  lemma, strengthens the ring-index specs, and makes the mutation gate reject
+  one-sided integer and tuple specs. It edits `summarize-hermes-campaign.py`
+  again so every count line is kept. The 50-run above booted this commit.
+- A later commit whose diff is only `verification/logs/` republishes the host
+  Verus, CBMC, and futex logs for the documentation commit that contains this
+  table. The hermes serial is gzipped at
+  `verification/logs/hermes-campaign-serial.log.gz`.
+  `scripts/summarize-hermes-campaign.py` rebuilds
+  `verification/logs/hermes-campaign-summary.txt` from that gzip, including a
+  failing count line instead of dropping it.
