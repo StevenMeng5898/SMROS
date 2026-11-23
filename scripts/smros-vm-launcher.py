@@ -114,6 +114,27 @@ def retrying_launch(operation, attempts: int, delay_seconds: float, sleep=time.s
     raise last_error
 
 
+CROSS_CPU_NOTE = (
+    "QEMU requests -smp 4. The kernel prints Hardware-online CPUs: 1. "
+    "Only CPU0 is online. Cross-CPU paths are not covered."
+)
+
+
+def campaign_serial_preamble(argv: list[str]) -> str:
+    """Lines written at the start of a guest serial log before QEMU runs."""
+    return (
+        "qemu_argv=" + shlex.join(argv) + "\n"
+        "hardware_online_cpus=1\n"
+        + CROSS_CPU_NOTE
+        + "\n"
+    )
+
+
+def write_campaign_preamble(path: Path, argv: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(campaign_serial_preamble(argv))
+
+
 def launch_qemu(values: dict[str, str]) -> str:
     name = values.get("name", "vm")
     kernel = repo_path(values.get("kernel"), required=True)
@@ -170,7 +191,9 @@ def launch_qemu(values: dict[str, str]) -> str:
             for pid in terminate_qemu_by_name(name):
                 print(f"smros-vm-launcher: terminated stale VM {name} pid={pid}", flush=True)
             try:
-                serial_log_path(name).write_bytes(b"")
+                serial = serial_log_path(name)
+                serial.parent.mkdir(parents=True, exist_ok=True)
+                serial.write_text(campaign_serial_preamble(cmd))
             except OSError:
                 pass
             log_file = log_path.open("ab", buffering=0)
@@ -471,6 +494,18 @@ def baseline_reference_summary(job: str, output: str) -> str | None:
         f"_reference_nonpass={selected - passed}"
         f"_run_id={run_id}"
         f"_results_sha256={digest}"
+        + "".join(
+            f"_{key}={fields[key]}"
+            for key in (
+                "emfile",
+                "rlimit_nofile",
+                "mqueue_queues_max",
+                "mqueue_msg_max",
+                "mqueue_msgsize_max",
+                "qemu_user",
+            )
+            if fields.get(key)
+        )
     )
 
 
@@ -980,14 +1015,14 @@ def serial_log_path(name: str) -> Path:
 def qemu_serial_args(name: str, serial: str) -> list[str]:
     if serial == "vc" or serial.startswith("vc:"):
         path = serial_log_path(name)
-        chardev = f"vc,id=smros-serial,logfile={path},logappend=off"
+        chardev = f"vc,id=smros-serial,logfile={path},logappend=on"
         if serial.startswith("vc:") and "x" in serial:
             geom = serial.split(":", 1)[1]
             width, _, height = geom.partition("x")
             if width.isdigit() and height.isdigit():
                 chardev = (
                     f"vc,id=smros-serial,width={width},height={height},"
-                    f"logfile={path},logappend=off"
+                    f"logfile={path},logappend=on"
                 )
         return ["-chardev", chardev, "-serial", "chardev:smros-serial"]
     return ["-serial", serial]
@@ -1233,12 +1268,24 @@ def main() -> int:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
+        "--write-campaign-preamble",
+        type=Path,
+        help="Write qemu_argv and the single-CPU note to this serial log, then exit",
+    )
+    parser.add_argument(
         "--action",
         nargs=2,
         metavar=("HOST", "PORT"),
         help="Print keep, drain, replace, or down for the launcher on HOST:PORT",
     )
-    args = parser.parse_args()
+    args, preamble_argv = parser.parse_known_args()
+    if args.write_campaign_preamble is not None:
+        argv = preamble_argv[1:] if preamble_argv[:1] == ["--"] else preamble_argv
+        if not argv:
+            print("usage: smros-vm-launcher.py --write-campaign-preamble LOG -- QEMU ARG...", file=sys.stderr)
+            return 2
+        write_campaign_preamble(args.write_campaign_preamble, argv)
+        return 0
     if args.action:
         print(probe_launcher_action(args.action[0], int(args.action[1])), flush=True)
         return 0

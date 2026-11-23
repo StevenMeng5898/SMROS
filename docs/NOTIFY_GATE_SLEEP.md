@@ -109,11 +109,16 @@ The host header `git_head` is `git describe --always --dirty` of the tree that
 launched QEMU. The shell prints the same string as `smros_commit=`, baked in
 by `build.rs`. A dirty tree gets a `-dirty` suffix. `build.rs` watches the
 ref `git rev-parse --git-path` names, including a worktree whose `.git` is a
-file, so a new commit is picked up on the next build. The campaign summary
-fails when those two strings differ or either ends in `-dirty`. POSIX event
-`smros_commit` stays the full `git rev-parse HEAD` embedded by `posix-build`.
-The campaign that reported event `smros_commit=6cdcfe9` under host
-`git_head=86a6927` booted an image whose embedded stage had not been rebuilt.
+file, and it rewrites a stamp on every run so the next build recomputes
+`--dirty` even when the branch ref did not move. The campaign summary fails
+when those two strings differ or either ends in `-dirty`.
+
+POSIX event `smros_commit` is the full SHA recorded by `posix-build` and then
+embedded in the kernel image. It is allowed to be the booted commit or an
+ancestor of it, because a later kernel rebuild can leave the previous stage
+in place. The summary runs `git merge-base --is-ancestor` against `git_head`
+and rejects any other event commit. An event SHA of `3bd7e41` under boot
+`61d48f8` is that ancestor case, not a second kernel.
 
 - A later commit whose diff is only `verification/logs/` republishes the host
   Verus, CBMC, and futex logs for the documentation commit that contains this

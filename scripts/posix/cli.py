@@ -447,10 +447,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"baseline failed: {error}", file=sys.stderr)
             _print_exception_notes(error)
             return 1
+        hostenv = " ".join(f"{key}={value}" for key, value in result.hostenv)
         print(
             f"selected={len(result.attempts)} "
             f"passed={sum(attempt.status == 'pass' for attempt in result.attempts)} "
-            f"results={result.result_path}"
+            f"results={result.result_path} "
+            f"emfile={result.emfile} "
+            f"{hostenv} "
+            f"qemu_user={result.qemu_user}"
         )
         return 0 if result.all_passed else 1
     if arguments.command == "run-smros":

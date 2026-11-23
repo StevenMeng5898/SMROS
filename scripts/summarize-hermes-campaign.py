@@ -13,6 +13,7 @@ import gzip
 import hashlib
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -37,6 +38,30 @@ POSIX_FINAL = (
 SECTEST_FINAL = "SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0"
 # One late sample may be retried. A larger total fails the campaign.
 NOTIFY_GATE_LATE_MAX = 1
+
+
+def _event_commit_allowed(event_sha, git_head):
+    """POSIX event commits may be the booted commit or an ancestor of it.
+
+    The stage records a full SHA when posix-build runs. A later kernel rebuild
+    can boot a descendant without rewriting that stage. A commit that is not an
+    ancestor of the booted git_head is rejected.
+    """
+    head = git_head[: -len("-dirty")] if git_head.endswith("-dirty") else git_head
+    if not head or head == "missing":
+        return False
+    try:
+        ancestor = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", event_sha, head],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return ancestor.returncode == 0
 
 
 def _meta(text, key):
@@ -115,8 +140,30 @@ def _problems(kept, text):
     for line in summaries:
         if "overall=PASS" not in line:
             continue
-        if "posixtest=1600/1600" not in line or any(value != 0 for value in _fail_values(line)):
+        if "posixtest=1600/1600" not in line or "sectest=91/0/0/0" not in line or any(
+            value != 0 for value in _fail_values(line)
+        ):
             problems.append("summary-mismatch")
+            break
+    if any("overall=PASS" in line for line in summaries):
+        phase_ok = False
+        for line in kept:
+            if not line.startswith("Hermes phase sectest "):
+                continue
+            if "pass=91" in line and re.search(r"\bfail=0\b", line):
+                phase_ok = True
+        if SECTEST_FINAL not in kept or not phase_ok:
+            problems.append("sectest-mismatch")
+    if not any(
+        line.startswith("Host stage ")
+        and re.search(r"(?:^|_)run_id=[0-9a-f]{16,64}(?:_|$)", line)
+        and re.search(r"(?:^|_)results_sha256=[0-9a-f]{64}(?:_|$)", line)
+        for line in kept
+    ):
+        problems.append("missing-baseline-identity")
+    for sha in sorted(set(re.findall(r'"smros_commit":"([0-9a-f]{40})"', text))):
+        if not _event_commit_allowed(sha, _meta(text, "git_head")):
+            problems.append("posix-event-commit")
             break
     if _late_total(kept) > NOTIFY_GATE_LATE_MAX:
         problems.append("notify-gate-late")
@@ -185,8 +232,10 @@ def _passing_serial():
         f"{SECTEST_FINAL}\n"
         "Hermes phase guest phase=done pass=7 fail=0 unavailable=0\n"
         "Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0\n"
+        "Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0\n"
         "Hermes phase posix-baseline phase=done pass=1392 fail=208 unavailable=0\n"
-        "Hermes test-all summary posixtest=1600/1600 fail=0 overall=PASS\n"
+        "Host stage PASS reference_selected=1600_reference_passed=1392_reference_nonpass=208_run_id=0123456789abcdef_results_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+        "Hermes test-all summary posixtest=1600/1600 fail=0 sectest=91/0/0/0 overall=PASS\n"
         "Hermes test-all result: PASS\n"
     )
 
@@ -271,6 +320,24 @@ def main():
                 _passing_serial().replace("posixtest=1600/1600", "posixtest=1599"),
                 "summary-mismatch",
                 "posixtest=1599 overall=PASS",
+            ),
+            (
+                _passing_serial().replace("sectest=91/0/0/0", "sectest=90/1/0/0"),
+                "summary-mismatch",
+                "sectest=90/1",
+            ),
+            (
+                _passing_serial().replace("sectest=91/0/0/0", "sectest=80/0/0/0"),
+                "summary-mismatch",
+                "sectest=80/0",
+            ),
+            (
+                _passing_serial().replace(
+                    "Host stage PASS reference_selected=1600_reference_passed=1392_reference_nonpass=208_run_id=0123456789abcdef_results_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+                    "",
+                ),
+                "missing-baseline-identity",
+                "deleted Host stage line",
             ),
             (
                 _passing_serial().replace(
