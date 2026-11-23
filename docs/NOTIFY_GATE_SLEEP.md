@@ -139,6 +139,64 @@ The 31 status changes between the `cf68ddc` baseline (1365 pass) and the
 the text `Too many open files`. The counter now includes that text and
 `ENFILE`.
 
+The `751b308` qemu-user reference (`verification/logs/posix-baseline-results.ndjson.gz`,
+pass=1357) differs from the `500c948` reference (pass=1358) in seven attempts.
+`git diff 500c9486773717d901acb11636874d6d9a3512f2 751b308560119ceb3de3571cfaf90787cd8de44d`
+has no changes under `src/` or `scripts/posix/baseline.py`. None of the seven
+is a true regression, and none is an open product defect.
+
+| test | `500c948` | `751b308` campaign | class |
+| --- | --- | --- | --- |
+| `conformance/interfaces/aio_error/2-1.c` | pass | unresolved, exit 2, empty output, 199 ms | timing |
+| `conformance/interfaces/aio_fsync/8-1.c` | crash, signal 1 | pass | timing |
+| `conformance/interfaces/mq_send/5-1.c` | fail, "didn't appear to complete", 7203 ms | pass, 4205 ms | timing |
+| `conformance/interfaces/mq_timedsend/5-1.c` | pass, 4199 ms | fail, "mq_send() didn't appear to complete", 7232 ms | timing |
+| `conformance/interfaces/pthread_cond_init/1-3.c` | pass | fail, "behave differently across processes" | timing |
+| `conformance/interfaces/pthread_cond_init/4-1.c` | unresolved, child killed, EBADF, 6387 ms | timeout, signal 15, 33689 ms | host resource |
+| `conformance/interfaces/pthread_mutex_init/5-1.c` | unresolved, child killed, 6460 ms | timeout, signal 15, 31367 ms | host resource |
+
+`aio_error/2-1.c` returns unresolved when none of 128 `aio_write` calls is
+still `EINPROGRESS`. Three isolated reruns were pass, pass, unresolved.
+`mq_timedsend/5-1.c` passes only if the blocked send interrupts the parent
+inside `sleep(3)` after `mq_receive`. The campaign fail printed that the send
+did not complete; three isolated reruns all passed. `mq_send/5-1.c` is the
+same sleep race and moved from fail to pass. `aio_fsync/8-1.c` moved from one
+SIGHUP crash to pass; it was not repeated because it did not leave pass.
+`pthread_cond_init/1-3.c` compares two process-shared condvars after a sleep.
+Three isolated reruns were pass, fail, pass, and the fail used the same
+message as the campaign. `pthread_cond_init/4-1.c` and
+`pthread_mutex_init/5-1.c` fork, lower `RLIMIT_AS`, and allocate until memory
+is exhausted. Both archives are non-pass; the later run hit the harness
+timeout instead of recording a killed child.
+
+The three tests that left pass were repeated with `run_baseline` on
+`host_shared/posixtest` (manifest `smros_commit`
+`751b308560119ceb3de3571cfaf90787cd8de44d`), sysroot
+`/usr/aarch64-linux-gnu`, and qemu `/usr/bin/qemu-aarch64-static`. That is
+the campaign host stage's launch path, including the private `/dev/mqueue`
+mount. The CLI `baseline --test` entry point was not used: it requires
+`git rev-parse HEAD` to equal the staged `smros_commit`, and a later
+logs-only commit does not. Raw ndjson and `SHA256SUMS` are in
+`verification/logs/posix-baseline-status-rerun/`.
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -c '
+from pathlib import Path
+from scripts.posix.baseline import run_baseline
+from scripts.posix.cli import posix_stage_path
+run_baseline(
+    posix_stage_path("aarch64"),
+    Path("/usr/aarch64-linux-gnu"),
+    Path("out.ndjson"),
+    test_id="conformance/interfaces/aio_error/2-1.c",
+    qemu="/usr/bin/qemu-aarch64-static",
+)
+'
+```
+
+Replace `test_id` with `conformance/interfaces/mq_timedsend/5-1.c` or
+`conformance/interfaces/pthread_cond_init/1-3.c` for the other two.
+
 - A later commit whose diff is only `verification/logs/` republishes the host
   Verus, CBMC, and futex logs for the documentation commit that contains this
   table. The hermes serial, with `utc`, `git_head`, and `git_dirty` on the
