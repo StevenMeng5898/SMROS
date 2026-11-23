@@ -5,7 +5,7 @@ git_dirty=false
 functions=120
 killed=120
 signed_off=0
-vacuous=0
+note=Withdrawn as a coverage claim. This file is the f96a5e0 return-zero run. It does not say the specs are non-vacuous. The 1f1e31d gate replaces it.
 A matching body_sha256 skips Verus. Full prover output is not stored.
 function	harness	mutation	body_sha256	result
 lib::verified_kernel_budget_admit_heap	verus-kernel-lowlevel.log	return-zero	b37be8dd2c9746684a4ff18ca17b217c066f4faf63e5b940bbe1aeaae2d25354	killed

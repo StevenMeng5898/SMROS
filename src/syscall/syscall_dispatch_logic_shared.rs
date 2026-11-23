@@ -69,10 +69,12 @@ macro_rules! smros_linux_stub_errno_body {
 
 /// Exact set of dispatcher arms this proof names.
 ///
-/// Lifecycle: exit 93, exit_group 94, waitid 95, kill 129, clone 220, execve
-/// 221, wait4 260, clone3 435, fork 1000, vfork 1001. Scheduler: 118-127,
-/// setpriority 140, getpriority 141. Futex 98 stays because that arm is a real
-/// handler. This is not the whole `dispatch_linux_syscall` match.
+/// Lifecycle: exit 93, exit_group 94, waitid 95, kill 129, tkill 130, tgkill
+/// 131, clone 220, execve 221, wait4 260, clone3 435, fork 1000, vfork 1001.
+/// Scheduler: 118-127, setpriority 140, getpriority 141, sched_getattr 275.
+/// Futex 98 stays because that arm is a real handler. nanosleep 101 is a real
+/// handler and stays out of this set. This is not the whole
+/// `dispatch_linux_syscall` match.
 #[allow(unused_macros)]
 macro_rules! smros_linux_critical_handler_body {
     ($syscall_num:expr) => {{
@@ -91,11 +93,14 @@ macro_rules! smros_linux_critical_handler_body {
             || $syscall_num == 126
             || $syscall_num == 127
             || $syscall_num == 129
+            || $syscall_num == 130
+            || $syscall_num == 131
             || $syscall_num == 140
             || $syscall_num == 141
             || $syscall_num == 220
             || $syscall_num == 221
             || $syscall_num == 260
+            || $syscall_num == 275
             || $syscall_num == 435
             || $syscall_num == 1000
             || $syscall_num == 1001

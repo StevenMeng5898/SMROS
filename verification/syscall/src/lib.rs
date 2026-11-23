@@ -3045,8 +3045,8 @@ fn linux_stub_errno(class: u8) -> (out: Option<i32>)
 spec fn linux_critical_handler_spec(n: int) -> bool {
     n == 93 || n == 94 || n == 95 || n == 98 || n == 118 || n == 119 || n == 120 || n == 121
         || n == 122 || n == 123 || n == 124 || n == 125 || n == 126 || n == 127 || n == 129
-        || n == 140 || n == 141 || n == 220 || n == 221 || n == 260 || n == 435 || n == 1000
-        || n == 1001
+        || n == 130 || n == 131 || n == 140 || n == 141 || n == 220 || n == 221 || n == 260
+        || n == 275 || n == 435 || n == 1000 || n == 1001
 }
 
 fn linux_critical_handler(syscall_num: u32) -> (out: bool)
