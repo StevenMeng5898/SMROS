@@ -346,6 +346,7 @@ def _pts_status(
     *,
     timed_out: bool,
     launch_error: str | None,
+    stdout: str = "",
 ) -> str | None:
     if (
         returncode is None
@@ -354,7 +355,12 @@ def _pts_status(
         or launch_error is not None
     ):
         return None
-    return classify_status(returncode)
+    return classify_status(
+        returncode,
+        timed_out=timed_out,
+        launch_error=launch_error,
+        stdout=stdout,
+    )
 
 
 def filter_runnable_tests(
@@ -1419,6 +1425,7 @@ def run_runtime_attempt(
             returncode,
             timed_out=timed_out,
             launch_error=launch_error,
+            stdout=stdout.text,
         ),
         status=classify_status(
             returncode,
@@ -1536,6 +1543,7 @@ def _interrupted_attempt(
             returncode,
             timed_out=timed_out,
             launch_error=launch_error,
+            stdout=stdout.text,
         ),
         status="launch-error" if launch_error is not None else "interrupted",
         exit_code=exit_code,

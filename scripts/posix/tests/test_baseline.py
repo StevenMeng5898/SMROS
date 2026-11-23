@@ -23,6 +23,7 @@ from scripts.posix.baseline import (
     PLATFORM,
     BaselinePrerequisiteError,
     BaselineResult,
+    _pts_status,
     classify_status,
     filter_runnable_tests,
     run_baseline,
@@ -478,14 +479,18 @@ class StatusTests(unittest.TestCase):
         )
 
     def test_stdout_failed_overrides_a_pass_exit(self) -> None:
-        self.assertEqual(
-            classify_status(
-                0,
-                stdout="Test FAILED: Did not receive segmentation fault\n",
-            ),
-            "fail",
+        samples = (
+            (0, "Test FAILED: Did not receive segmentation fault\n", "fail"),
+            (0, "Test PASSED\n", "pass"),
+            (1, "", "fail"),
         )
-        self.assertEqual(classify_status(0, stdout="Test PASSED\n"), "pass")
+        for code, stdout, expected in samples:
+            status = classify_status(code, stdout=stdout)
+            pts = _pts_status(
+                code, timed_out=False, launch_error=None, stdout=stdout
+            )
+            self.assertEqual(status, expected)
+            self.assertEqual(pts, status)
 
     def test_signal_timeout_and_launch_error_take_precedence(self) -> None:
         self.assertEqual(classify_status(-signal.SIGSEGV), "crash")
