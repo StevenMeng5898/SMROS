@@ -24,6 +24,7 @@ COUNT_PREFIXES = (
     "Hermes phase ",
     "Hermes test-all summary ",
     "Hermes test-all result:",
+    "Host stage ",
     "CASE notify-gate-sleep ",
 )
 POSIX_FINAL = (

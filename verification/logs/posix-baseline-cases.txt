@@ -1,10 +1,11 @@
 ===== posix-baseline cases =====
-utc=2026-11-23T12:07:10Z
-git_head=3bd7e4162ab2481a3674f7844d40364516163e24
-smros_commit=3bd7e4162ab2481a3674f7844d40364516163e24
-selected=1600
-hermes_line=posix-baseline=1392/208/0
-status_counts={"crash": 25, "fail": 67, "pass": 1392, "timeout": 5, "unresolved": 95, "unsupported": 5, "untested": 11}
-The non-pass total is crash+fail+timeout+unresolved+unsupported+untested.
-The previous campaign on 86a6927 reported 1393/207. Its per-case file was not retained, so the one-case swing cannot be named from that run.
-This file is the per-case reference for 3bd7e41. posix-baseline-cases.tsv lists every test_id.
+utc=2026-11-23T13:53:37Z
+git_head=61d48f89614b255b4791298f92c45961c70ffd87
+git_describe=61d48f8
+run_id=2648649119f6af4d32aee104c5640673
+results_sha256=9dab9e9264bd8572072af0028025761086b5e7aff26b7af69b55774663a254ef
+smros_commit=61d48f89614b255b4791298f92c45961c70ffd87
+hermes_line=posix-baseline=1365/235/0
+status_counts={"crash": 25, "fail": 67, "pass": 1365, "timeout": 5, "unresolved": 122, "unsupported": 5, "untested": 11}
+changed_from_3bd7e41=37
+The host stage line in the campaign serial carries this run_id and results_sha256.
