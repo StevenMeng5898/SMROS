@@ -160,7 +160,21 @@ def mutants_for(rtype, body):
     if high is not None and high not in {zero, one}:
         mutants.append(("return-max", high))
     if rtype in INTEGERS:
-        mutants.append(("wrapping-add-one", "({\n" + body + "\n}).wrapping_add(1)"))
+        # zero and max are both required. Drop the extra wrapping mutant.
+        return [item for item in mutants if item[0] in {"return-zero", "return-max"}]
+    if rtype.startswith("(") and rtype.endswith(")"):
+        parts = split_commas(rtype[1:-1])
+        component_mutants = []
+        for index, part in enumerate(parts):
+            flipped = alt_expr(part, "max") or alt_expr(part, "one") or "1"
+            values = []
+            for other_index, other in enumerate(parts):
+                if other_index == index:
+                    values.append(flipped)
+                else:
+                    values.append(zero_expr(other) or "0")
+            component_mutants.append((f"component-{index}", "(" + ", ".join(values) + ")"))
+        return component_mutants
     return mutants
 
 
@@ -356,11 +370,34 @@ def run_verus(bin_path, source, function, env, timeout):
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            out = (exc.stdout or "") + (exc.stderr or "")
-            return 1, out + "\nerror: mutation run timed out\n"
+            out = _timeout_text(exc) + "\nerror: mutation run timed out\n"
+            return 1, out
         except OSError as exc:
             return 1, f"error: toolchain missing: {exc}\n"
     return result.returncode, result.stdout + result.stderr
+
+
+def _timeout_text(exc):
+    """TimeoutExpired.stdout is bytes even when text=True was requested."""
+    parts = []
+    for value in (exc.stdout, exc.stderr):
+        if value is None:
+            continue
+        if isinstance(value, bytes):
+            parts.append(value.decode("utf-8", "replace"))
+        else:
+            parts.append(str(value))
+    return "".join(parts)
+
+
+def included_shared_blobs(harness_path):
+    text = harness_path.read_text()
+    rels = re.findall(r'include!\("(?:\.\./)+([^"]+)"\)', text)
+    blobs = []
+    for rel in sorted(set(rels)):
+        path = ROOT / rel
+        blobs.append(path.read_bytes() if path.is_file() else b"missing:" + rel.encode())
+    return blobs
 
 
 def verus_env():
@@ -394,6 +431,18 @@ def load_functions():
             }
         )
     return rows
+
+
+def documented_signoffs():
+    text = (ROOT / "docs/VERUS_COVERAGE.md").read_text()
+    marker = "## 签署（待证明）"
+    start = text.find(marker)
+    if start < 0:
+        return None
+    rest = text[start + len(marker) :]
+    nxt = rest.find("\n## ")
+    section = rest if nxt < 0 else rest[:nxt]
+    return re.findall(r"`(lib::[A-Za-z0-9_]+)`", section)
 
 
 def load_signoff():
@@ -455,12 +504,11 @@ def cache_digest(parts):
 
 
 def function_cache_key(row, function_text, bin_path):
-    harness = HARNESS[row["harness"]].read_bytes()
-    origin = row.get("origin", "").split("::", 1)[0]
-    shared_path = ROOT / origin if origin else None
-    shared = shared_path.read_bytes() if shared_path and shared_path.is_file() else b""
+    harness_path = HARNESS[row["harness"]]
+    harness = harness_path.read_bytes()
+    shared = included_shared_blobs(harness_path)
     return cache_digest(
-        [harness, shared, tool_fingerprint(bin_path), f"rlimit={RLIMIT}", function_text]
+        [harness, *shared, tool_fingerprint(bin_path), f"rlimit={RLIMIT}", function_text]
     )
 
 
@@ -495,8 +543,8 @@ def write_summary(rows):
         f"killed={killed}",
         f"signed_off={signed}",
         f"vacuous={vacuous}",
-        "body_sha256 covers the whole fn, including ensures. cache_sha256 also covers the harness, the origin *_shared.rs, and the Verus version plus rlimit.",
-        "A cache hit requires cache_sha256. Changing only a spec fn changes the harness hash and re-verifies.",
+        "body_sha256 covers the whole fn, including ensures. cache_sha256 covers the harness, every *_shared.rs it includes, and the Verus version plus rlimit.",
+        "A cache hit still re-runs the unmutated baseline. Changing any included shared file, including futex, changes the key.",
         "Full prover output is not stored.",
         "function\tharness\tmutation\tbody_sha256\tcache_sha256\tresult",
     ]
@@ -624,6 +672,15 @@ def judge_mutants(rtype, kinds):
         if by_label.get("return-zero") == "killed" and some_killed:
             return "killed", "none+" + "+".join(some_killed), "option-both"
         return "one-sided", "option-one-sided", "Some and None were not both killed"
+    if rtype.startswith("(") and rtype.endswith(")"):
+        component_labels = [label for label, _kind in kinds if label.startswith("component-")]
+        if component_labels and all(by_label.get(label) == "killed" for label in component_labels):
+            return "killed", "+".join(component_labels), "tuple-components"
+        return "one-sided", "tuple-one-sided", "a tuple component mutant survived"
+    if rtype in INTEGERS:
+        if by_label.get("return-zero") == "killed" and by_label.get("return-max") == "killed":
+            return "killed", "return-zero+return-max", "int-both"
+        return "one-sided", "int-one-sided", "zero and max were not both killed"
     killed = [label for label, kind in kinds if kind == "killed"]
     if killed:
         return "killed", killed[0], killed[0]
@@ -644,9 +701,18 @@ def audit(argv):
         if not reason:
             status |= fail(f"sign-off is missing a justification: {qualified}")
     known = {row["qualified"] for row in load_functions()}
+    documented = documented_signoffs()
+    if documented is None:
+        status |= fail("docs/VERUS_COVERAGE.md is missing the 签署（待证明） section")
+        documented = []
     for qualified in signoff:
         if qualified not in known:
             status |= fail(f"sign-off names a function that is not 已证明: {qualified}")
+        if qualified not in documented:
+            status |= fail(f"sign-off is not listed as 待证明 in VERUS_COVERAGE.md: {qualified}")
+    for qualified in documented:
+        if qualified not in signoff:
+            status |= fail(f"VERUS_COVERAGE.md lists a sign-off that is not in the file: {qualified}")
     bin_path = None
     env = None
     finished = []
@@ -662,8 +728,6 @@ def audit(argv):
         signed = signoff.get(row["qualified"], "")
         cached = cache.get(key)
         if signed:
-            if not signed:
-                status |= fail(f"sign-off is missing a justification: {row['qualified']}")
             if bin_path is None:
                 bin_path = verus_bin()
                 env = verus_env()
@@ -680,7 +744,7 @@ def audit(argv):
                     "result": "signed-off",
                 }
             )
-            print(f"signed-off {row['qualified']}")
+            print(f"待证明 sign-off {row['qualified']}")
             continue
         if bin_path is None:
             bin_path = verus_bin()
@@ -695,6 +759,12 @@ def audit(argv):
             and cached["result"] == "killed"
             and cache_sha
         ):
+            base_code, base_out = run_verus(bin_path, path, row["name"], env, timeout=90)
+            if classify(base_code, base_out) != "survived":
+                status |= fail(f"cached function baseline did not verify: {row['qualified']}")
+                cached_result = "invalid"
+            else:
+                cached_result = "killed"
             finished.append(
                 {
                     "qualified": row["qualified"],
@@ -702,10 +772,10 @@ def audit(argv):
                     "mutation": cached["mutation"],
                     "digest": digest,
                     "cache": cache_sha,
-                    "result": "killed",
+                    "result": cached_result,
                 }
             )
-            print(f"cached {row['qualified']} mutation={cached['mutation']}")
+            print(f"cached {row['qualified']} mutation={cached['mutation']} baseline={cached_result}")
             continue
         proved = prove_function(row, bin_path, env)
         finished.append(
@@ -776,6 +846,33 @@ fn matched(n: u64) -> (out: Option<u64>)
         failures += 1
     else:
         print("spec fn edit changes cache_sha256 and must re-verify")
+    futex_same = cache_digest([b"harness", b"fifo", b"futex-old", b"verus", b"fn target"])
+    futex_new = cache_digest([b"harness", b"fifo", b"futex-new", b"verus", b"fn target"])
+    if futex_same == futex_new:
+        print("included futex shared file did not change the cache key", file=sys.stderr)
+        failures += 1
+    else:
+        print("futex shared edit changes cache_sha256")
+    int_one = judge_mutants("usize", [("return-zero", "survived"), ("return-max", "killed")])
+    int_both = judge_mutants("usize", [("return-zero", "killed"), ("return-max", "killed")])
+    if int_one[0] == "killed" or int_both[0] != "killed":
+        print("integer zero/max rule is wrong", file=sys.stderr)
+        failures += 1
+    else:
+        print("integer one-sided zero mutant: audit exit 1")
+    tuple_one = judge_mutants(
+        "(usize,usize)",
+        [("component-0", "killed"), ("component-1", "survived")],
+    )
+    tuple_both = judge_mutants(
+        "(usize,usize)",
+        [("component-0", "killed"), ("component-1", "killed")],
+    )
+    if tuple_one[0] == "killed" or tuple_both[0] != "killed":
+        print("tuple component rule is wrong", file=sys.stderr)
+        failures += 1
+    else:
+        print("tuple one-sided component: audit exit 1")
     invalid_cases = [
         (1, "error: aborting due to 1 previous error\nexpected `{`, found `!`\n", "syntax-bad mutation"),
         (1, "error: mutation run timed out\n", "timeout"),
@@ -910,6 +1007,30 @@ fn tight(flag: bool) -> (out: bool)
             failures += 1
         else:
             print("syntax-bad mutation: audit exit 1")
+        try:
+            code, output = run_verus(
+                bin_path,
+                ROOT / "verification/services/src/lib.rs",
+                "verified_notify_gate_allow_retry",
+                env,
+                timeout=0.05,
+            )
+        except Exception as exc:
+            print(f"timeout raised {type(exc).__name__}: {exc}", file=sys.stderr)
+            failures += 1
+        else:
+            if "Traceback" in output or classify(code, output) != "invalid" or gate_exit("invalid") != 1:
+                print(f"real timeout was {classify(code, output)} not invalid", file=sys.stderr)
+                failures += 1
+            else:
+                print("real timeout: audit exit 1")
+        try:
+            _timeout_text(
+                subprocess.TimeoutExpired(cmd="verus", timeout=0.05, output=b"partial")
+            )
+        except TypeError as exc:
+            print(f"timeout bytes join raised {exc}", file=sys.stderr)
+            failures += 1
     if failures:
         print("mutation self-test failed", file=sys.stderr)
         return 1

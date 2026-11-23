@@ -877,7 +877,7 @@ enum Judge {
     /// A privileged realtime set succeeds and is visible to `clock_gettime`.
     ClockPrivileged,
     /// Process A re-arms a near-deadline SIGEV_THREAD timer. Process B's
-    /// sleeps must last at least the requested 49999872 ns and finish inside
+    /// sleeps must last at least the requested 50000000 ns and finish inside
     /// 200ms. One late sample at or under 300ms may be retried once. A second
     /// late, a sample over 300ms, or an early wake fails without a retry.
     NotifyGateSleep,

@@ -6,7 +6,7 @@ armed, then forks. The child measures a 50ms `nanosleep` (`0x02FAF080` ns)
 and a 50ms `clock_nanosleep`. The parent keeps re-arming a 1ms deadline
 (`0x000F4240` ns) and does not return to `sigwait`, so its own gate stays
 armed, until 300ms have passed (`0x11E1A300` ns). The child exits 0 only when
-both sleeps last at least 49999872 ns and finish in under 200ms
+both sleeps last at least 50000000 ns and finish in under 200ms
 (`0x0BEBC200` ns). Exit 33 is `nanosleep-late`. Exit 35 is
 `clock-nanosleep-late`. Exit 36 is `nanosleep-early`. Exit 37 is
 `clock-nanosleep-early`. Other exits are setup or syscall failures.
@@ -19,7 +19,7 @@ case would fail late every time. A sleep that returns on its own deadline
 stays well under 200ms. Raising the bound would also let a real cross-process
 hold pass.
 
-The probe also rejects a sleep shorter than the requested 49999872 ns.
+The probe also rejects a sleep shorter than the requested 50000000 ns.
 `nanosleep-early` is exit 36 and `clock-nanosleep-early` is exit 37. Neither
 is retried.
 

@@ -1,7 +1,4 @@
-# Manual sign-off for a 已证明 function the mutation gate cannot check.
-# One function per line, tab-separated:
-#   lib::function_name<TAB>why a body mutation cannot be run
-# A justification is required. The audit fails for any 已证明 function that
-# has neither a killing mutation in verification/logs/verus-mutation-summary.txt
-# nor a line here. Do not use this file to accept a spec that survived mutation.
-lib::fifo_capacity_valid	ensures is only `out ==> bounds` (no converse, and the checked multiply is absent). false survives every input; true is killed. Equating out to fifo_capacity_valid_spec does not verify, so both bool constants cannot be killed without a new proof.
+# 签署不是已证明。每一行是一个待证明函数：
+#   lib::function_name<TAB>为什么不能靠突变杀死两侧
+# docs/VERUS_COVERAGE.md 的「签署（待证明）」必须逐条列出这里的函数。
+# 当前没有签署。

@@ -1245,10 +1245,14 @@ fn fifo_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usi
     ensures
         capacity == 0 ==> out == 0,
         capacity > 0 ==> out < capacity,
+        read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1,
 {
     assert(capacity > 0 ==> read_pos % capacity < capacity);
     assert(capacity > 0 ==> offset % capacity < capacity);
-    smros_fifo_ring_index_body!(read_pos, offset, capacity)
+    let out = smros_fifo_ring_index_body!(read_pos, offset, capacity);
+    assert(0usize % 2 == 0 && 1usize % 2 == 1) by (compute);
+    assert(read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1);
+    out
 }
 
 fn fifo_remaining_capacity(len: usize, capacity: usize) -> (out: usize)
@@ -1276,11 +1280,22 @@ fn fifo_capacity_valid(
     max_bytes: usize,
 ) -> (out: bool)
     ensures
-        out ==> elem_count != 0,
-        out ==> elem_size != 0,
-        out ==> elem_count <= max_count,
-        out ==> elem_size <= max_size,
+        out == fifo_capacity_valid_spec(
+            elem_count as int,
+            elem_size as int,
+            max_count as int,
+            max_size as int,
+            max_bytes as int,
+        ),
 {
+    // fifo_transfer_bytes_spec(elem_size, count) is called as
+    // (elem_count, elem_size), so its division test is
+    // elem_count <= usize::MAX / elem_size. That is the overflow check of
+    // elem_count.checked_mul(elem_size). The product form needs this lemma.
+    assert(elem_size > 0 ==> (
+        (elem_count as int) <= (usize::MAX as int) / (elem_size as int)
+            <==> (elem_count as int) * (elem_size as int) <= (usize::MAX as int)
+    )) by (nonlinear_arith);
     smros_fifo_capacity_valid_body!(elem_count, elem_size, max_count, max_size, max_bytes)
 }
 
@@ -1368,10 +1383,14 @@ fn socket_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: u
     ensures
         capacity == 0 ==> out == 0,
         capacity > 0 ==> out < capacity,
+        read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1,
 {
     assert(capacity > 0 ==> read_pos % capacity < capacity);
     assert(capacity > 0 ==> offset % capacity < capacity);
-    smros_socket_ring_index_body!(read_pos, offset, capacity)
+    let out = smros_socket_ring_index_body!(read_pos, offset, capacity);
+    assert(0usize % 2 == 0 && 1usize % 2 == 1) by (compute);
+    assert(read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1);
+    out
 }
 
 fn socket_remaining_capacity(len: usize, capacity: usize) -> (out: usize)

@@ -9,7 +9,7 @@
  *      13 owner chmod then non-owner EPERM
  *      14 SIGEV_THREAD notify-gate: process A re-arms a near deadline while
  *         process B's nanosleep and clock_nanosleep must return within 200ms
- *         and not before the requested 49999872 ns. Early wakes use 36 and 37
+ *         and not before the requested 50000000 ns. Early wakes use 36 and 37
  *         and are not retried.
  *   Path for op 13 is planted at 0x400. The fd is saved at 0x480.
  *   stat buffer is 0x500.
@@ -437,7 +437,7 @@ chmod_kept:
  * the kernel gate is armed, then forks. The child measures a 50ms nanosleep
  * and a 50ms clock_nanosleep. The parent keeps re-arming a 1ms deadline and
  * then wait4s without returning to sigwait, so the gate stays armed. Exit 0
- * only when both of the child's sleeps last at least the requested 49999872 ns
+ * only when both of the child's sleeps last at least the requested 50000000 ns
  * and finish in under 200ms.
  *
  * Data page:

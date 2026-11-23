@@ -1,83 +1,92 @@
 #!/usr/bin/env python3
 """Build verification/logs/campaign-summary.txt from a hermes serial log.
 
-The notify-gate line is copied from the guest's NOTIFY-GATE SUMMARY. A late
-count above zero is repeated in the summary so a hand-written zero cannot hide it.
+Every count line is kept verbatim, including failures. A missing family is
+written as `missing`. The header is taken from the serial log itself plus the
+sha256 of that file, so running the script again is byte-identical.
 """
 
+import hashlib
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+COUNT_PREFIXES = (
+    "NOTIFY-GATE SUMMARY ",
+    "posixtest: ",
+    "SECTEST SUMMARY ",
+    "Hermes phase ",
+    "Hermes test-all summary ",
+    "Hermes test-all result:",
+    "CASE notify-gate-sleep ",
+)
+REQUIRED = (
+    "NOTIFY-GATE SUMMARY ",
+    "posixtest: ",
+    "SECTEST SUMMARY ",
+    "Hermes test-all summary ",
+    "Hermes test-all result:",
+)
 
 
-def summarize(text):
-    notify = []
-    posix = []
-    sectest = []
-    hermes = []
-    for line in text.replace("\r", "").splitlines():
-        if line.startswith("NOTIFY-GATE SUMMARY "):
-            notify.append(line)
-        elif line.startswith("posixtest: progress tests=1600/1600"):
-            posix.append(line)
-        elif line.startswith("posixtest: completed"):
-            posix.append(line)
-        elif line.startswith("SECTEST SUMMARY pass=91 "):
-            sectest.append(line)
-        elif line.startswith("Hermes test-all summary ") or line.startswith(
-            "Hermes test-all result:"
-        ):
-            hermes.append(line)
-    lines = []
-    if notify:
-        lines.append(notify[0])
-        fields = dict(part.split("=", 1) for part in notify[0].split() if "=" in part)
-        late = int(fields.get("late", "0") or "0")
-        lines.append(
-            "notify-gate disclosure "
-            f"attempts={fields.get('attempts', '?')} late={late} values={fields.get('values', '')}"
-        )
-    else:
-        lines.append("notify-gate disclosure missing")
-    if posix:
-        lines.append(posix[0])
-        if "posixtest: completed" in posix:
-            lines.append("posixtest: completed")
-    if sectest:
-        lines.append(sectest[0])
-    if hermes:
-        lines.append(hermes[-2] if len(hermes) >= 2 else hermes[-1])
-        if hermes[-1].startswith("Hermes test-all result:"):
-            lines.append(hermes[-1])
-    return "\n".join(lines) + "\n"
+def _meta(text, key):
+    match = re.search(rf"^{key}=(.*)$", text, re.M)
+    return match.group(1) if match else "missing"
+
+
+def summarize(serial_text, serial_bytes):
+    text = serial_text.replace("\r", "")
+    kept = []
+    for line in text.splitlines():
+        if line.startswith(COUNT_PREFIXES):
+            kept.append(line)
+    for prefix in REQUIRED:
+        if not any(line.startswith(prefix) for line in kept):
+            kept.append(prefix.rstrip() + " missing")
+    header = [
+        f"utc={_meta(text, 'utc')}",
+        f"git_head={_meta(text, 'git_head')}",
+        f"git_dirty={_meta(text, 'git_dirty')}",
+        "serial_sha256=" + hashlib.sha256(serial_bytes).hexdigest(),
+    ]
+    return "\n".join(header + kept) + "\n"
 
 
 def main():
     if "--self-test" in sys.argv:
         injected = (
-            "NOTIFY-GATE SUMMARY attempts=2 late=1 values=250000000,51000000\n"
-            "CASE notify-gate-sleep RESULT PASS slept-on-time\n"
+            "utc=2026-01-01T00:00:00Z\n"
+            "git_head=abc\n"
+            "git_dirty=false\n"
+            "posixtest: progress tests=1600/1600 pass=1599 fail=1 unresolved=0 timeout=0\n"
+            "NOTIFY-GATE SUMMARY attempts=1 late=0 values=1\n"
+            "SECTEST SUMMARY pass=90 fail=1 xfail=0 xpass=0\n"
+            "Hermes test-all summary overall=FAIL\n"
+            "Hermes test-all result: FAIL\n"
         )
-        text = summarize(injected)
-        if "attempts=2" not in text or "late=1" not in text:
-            print("injected late summary missing attempt=2 late=1", file=sys.stderr)
+        raw = injected.encode()
+        text = summarize(injected, raw)
+        if "fail=1" not in text or "pass=90" not in text or "overall=FAIL" not in text:
+            print("injected failure count was dropped", file=sys.stderr)
             return 1
-        over = summarize(
-            "NOTIFY-GATE SUMMARY attempts=1 late=1 values=350000000\n"
-            "CASE notify-gate-sleep RESULT FAIL nanosleep-late\n"
-        )
-        if "attempts=1" not in over or "late=1" not in over or "350000000" not in over:
-            print("over-300ms summary was dropped", file=sys.stderr)
+        if "serial_sha256=" + hashlib.sha256(raw).hexdigest() not in text:
+            print("serial sha256 mismatch", file=sys.stderr)
+            return 1
+        if summarize(injected, raw) != text:
+            print("summarize is not deterministic", file=sys.stderr)
             return 1
         print("campaign summary self-test passed")
         return 0
     if len(sys.argv) != 2:
         print("usage: summarize-hermes-campaign.py SERIAL", file=sys.stderr)
         return 2
-    serial = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+    path = pathlib.Path(sys.argv[1])
+    raw = path.read_bytes()
+    text = raw.decode("utf-8", "replace")
     out = ROOT / "verification/logs/campaign-summary.txt"
-    out.write_text(summarize(serial))
+    rendered = summarize(text, raw)
+    out.write_text(rendered)
     print(out)
     return 0
 
