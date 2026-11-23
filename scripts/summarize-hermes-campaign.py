@@ -43,18 +43,36 @@ def _meta(text, key):
     return match.group(1) if match else "missing"
 
 
+FAIL_VALUE = re.compile(r"\bfail=(\d+)")
+LATE_VALUE = re.compile(r"\blate=(\d+)")
+
+
+def _fail_values(line):
+    """Word-bounded fail= counts. `xfail=0` does not match."""
+    return [int(match.group(1)) for match in FAIL_VALUE.finditer(line)]
+
+
 def _late_total(lines):
     total = 0
     for line in lines:
         if not line.startswith("NOTIFY-GATE SUMMARY "):
             continue
-        for part in line.split():
-            if part.startswith("late="):
-                total += int(part.split("=", 1)[1] or "0")
+        for match in LATE_VALUE.finditer(line):
+            total += int(match.group(1))
     return total
 
 
-def _problems(kept):
+def _campaign_late(lines):
+    for line in lines:
+        if not line.startswith("NOTIFY-GATE CAMPAIGN "):
+            continue
+        match = LATE_VALUE.search(line)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _problems(kept, text):
     """Missing finals, a failing count, or a contradiction. Empty means pass."""
     problems = []
     if POSIX_FINAL not in kept:
@@ -81,13 +99,37 @@ def _problems(kept):
         line.endswith("PASS") for line in results
     ):
         problems.append("contradiction")
-    if any(
-        line.startswith("SECTEST SUMMARY ") and "fail=" in line and "fail=0" not in line
-        for line in kept
-    ):
-        problems.append("sectest-fail")
+    for line in kept:
+        if line.startswith("SECTEST SUMMARY ") and any(value != 0 for value in _fail_values(line)):
+            problems.append("sectest-fail")
+            break
+    for line in kept:
+        # posix-baseline's fail count is the qemu-user reference miss total.
+        # The campaign stays PASS when that stage publishes every selected test.
+        if line.startswith("Hermes phase posix-baseline "):
+            continue
+        if line.startswith("Hermes phase ") and any(value != 0 for value in _fail_values(line)):
+            problems.append("phase-fail")
+            break
+    for line in summaries:
+        if "overall=PASS" not in line:
+            continue
+        if "posixtest=1600/1600" not in line or any(value != 0 for value in _fail_values(line)):
+            problems.append("summary-mismatch")
+            break
     if _late_total(kept) > NOTIFY_GATE_LATE_MAX:
         problems.append("notify-gate-late")
+    campaign_late = _campaign_late(kept)
+    if campaign_late is not None and campaign_late > NOTIFY_GATE_LATE_MAX:
+        problems.append("notify-gate-campaign-late")
+    commit = _meta(text, "smros_commit")
+    head = _meta(text, "git_head")
+    if commit == "missing" or head == "missing":
+        problems.append("missing-commit")
+    elif commit != head:
+        problems.append("commit-mismatch")
+    if commit.endswith("-dirty") or head.endswith("-dirty"):
+        problems.append("commit-dirty")
     return problems
 
 
@@ -97,7 +139,7 @@ def summarize(serial_text, serial_bytes):
     for line in text.splitlines():
         if line.startswith(COUNT_PREFIXES):
             kept.append(line)
-    problems = _problems(kept)
+    problems = _problems(kept, text)
     if "missing-posixtest-final" in problems:
         kept.append("posixtest final missing")
     if "missing-sectest-91" in problems:
@@ -135,10 +177,15 @@ def _passing_serial():
         "utc=2026-01-01T00:00:00Z\n"
         "git_head=abc\n"
         "git_dirty=false\n"
+        "smros_commit=abc\n"
         f"{POSIX_FINAL}\n"
         "NOTIFY-GATE SUMMARY attempts=1 late=0 values=1\n"
+        "NOTIFY-GATE CAMPAIGN late=0 threshold=1\n"
         f"{SECTEST_FINAL}\n"
-        "Hermes test-all summary overall=PASS\n"
+        "Hermes phase guest phase=done pass=7 fail=0 unavailable=0\n"
+        "Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0\n"
+        "Hermes phase posix-baseline phase=done pass=1392 fail=208 unavailable=0\n"
+        "Hermes test-all summary posixtest=1600/1600 fail=0 overall=PASS\n"
         "Hermes test-all result: PASS\n"
     )
 
@@ -200,6 +247,54 @@ def main():
         if "notify-gate-late" not in late_problems:
             print("cumulative late above the threshold was accepted", file=sys.stderr)
             return 1
+        xfail = _passing_serial() + "SECTEST SUMMARY pass=0 fail=1 xfail=0 xpass=0\n"
+        _text, xfail_problems = summarize(xfail, xfail.encode())
+        if "sectest-fail" not in xfail_problems:
+            print("fail=1 xfail=0 was accepted", file=sys.stderr)
+            return 1
+        checks = (
+            (
+                _passing_serial() + "Hermes phase guest phase=done pass=6 fail=1 unavailable=0\n",
+                "phase-fail",
+                "guest phase fail=1",
+            ),
+            (
+                _passing_serial().replace(
+                    "Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0",
+                    "Hermes phase posixtest phase=done selected=1600 pass=1599 fail=1 unresolved=0 timeout=0 launch_errors=0",
+                ),
+                "phase-fail",
+                "posixtest phase fail=1",
+            ),
+            (
+                _passing_serial().replace("posixtest=1600/1600", "posixtest=1599"),
+                "summary-mismatch",
+                "posixtest=1599 overall=PASS",
+            ),
+            (
+                _passing_serial().replace(
+                    "NOTIFY-GATE CAMPAIGN late=0 threshold=1",
+                    "NOTIFY-GATE CAMPAIGN late=5 threshold=1",
+                ),
+                "notify-gate-campaign-late",
+                "CAMPAIGN late=5",
+            ),
+            (
+                _passing_serial().replace("smros_commit=abc", "smros_commit=abc-dirty"),
+                "commit-dirty",
+                "dirty smros_commit",
+            ),
+            (
+                _passing_serial().replace("smros_commit=abc", "smros_commit=other"),
+                "commit-mismatch",
+                "smros_commit differs from git_head",
+            ),
+        )
+        for sample, needle, label in checks:
+            _text, found = summarize(sample, sample.encode())
+            if needle not in found:
+                print(f"{label} was accepted: {found}", file=sys.stderr)
+                return 1
         print("campaign summary self-test passed")
         return 0
     if len(sys.argv) != 2:

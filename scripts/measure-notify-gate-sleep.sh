@@ -38,18 +38,23 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$QEMU" \
-    -M virt,gic-version=4,virtualization=on \
-    -cpu cortex-a710 \
-    -smp 4 \
-    -m 2G \
-    -nographic \
-    -kernel "$KERNEL" \
-    -drive file="$DISK",if=none,format=raw,id=fxfs,cache=writethrough \
-    -device virtio-blk-device,drive=fxfs \
-    -netdev user,id=smrosnet \
-    -device virtio-net-device,netdev=smrosnet \
-    <"$fifo" >"$LOG" 2>&1 &
+qemu_argv=(
+    "$QEMU"
+    -M virt,gic-version=4,virtualization=on
+    -cpu cortex-a710
+    -smp 4
+    -m 2G
+    -nographic
+    -kernel "$KERNEL"
+    -drive "file=$DISK,if=none,format=raw,id=fxfs,cache=writethrough"
+    -device virtio-blk-device,drive=fxfs
+    -netdev user,id=smrosnet
+    -device virtio-net-device,netdev=smrosnet
+)
+printf 'qemu_argv='
+printf '%q ' "${qemu_argv[@]}"
+printf '\n'
+"${qemu_argv[@]}" <"$fifo" >"$LOG" 2>&1 &
 qemu_pid=$!
 
 deadline=$((SECONDS + TIMEOUT))
@@ -69,11 +74,13 @@ if ! grep -Fq "smros:/>" "$LOG"; then
 fi
 
 echo "utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "git_head=$(git -C "$ROOT" rev-parse HEAD)"
+echo "git_head=$(git -C "$ROOT" describe --always --dirty)"
 echo "runs=$RUNS"
 echo "boot_mode=one-qemu-sequential"
 echo "parallel=false"
 echo "qemu_smp=4"
+echo "hardware_online_cpus=1"
+echo "QEMU is started with -smp 4. The kernel brings up only CPU0 and prints Hardware-online CPUs: 1. Cross-CPU paths are not covered."
 echo "boot_prompt_seen=1"
 
 for run in $(seq 1 "$RUNS"); do

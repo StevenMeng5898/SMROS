@@ -30,8 +30,10 @@ sleeper runs again. That is the interval the probe compares with 200ms, apart
 from a few microseconds of syscall entry and exit. Every sample is in
 `verification/logs/notify-gate-sleep.txt`. That file records the run that
 booted `ed2f346` (`git_head=ed2f3464e116b72bd12e59f8d3c7904eaec65a6f`,
-`utc_start=2026-11-23T09:00:55Z`). It was one QEMU process with `-smp 4` and
-50 sequential `sectest` commands, not 50 boots and not a parallel run.
+`utc_start=2026-11-23T09:00:55Z`). It was one QEMU process whose command
+line requested `-smp 4`, then 50 sequential `sectest` commands, not 50 boots
+and not a parallel run. The kernel still prints `Hardware-online CPUs: 1`.
+Only CPU0 comes online. The `-smp 4` flag does not exercise a cross-CPU path.
 Final verdicts were 50/50 pass and 0 early
 wakes. One first-attempt nanosleep was 201478000 ns, so that run retried:
 `attempts=2 late=1 values=201478000,50443072,50165680`. The second attempt
@@ -98,17 +100,20 @@ window still fails on the first attempt.
   (`read_pos == 0 && offset == 1 && capacity == 2 ==> out == 1`). That point
   does not constrain wrap, a non-zero `read_pos`, or any other capacity.
   It edits `summarize-hermes-campaign.py` again so every count line is kept.
-  The 50-run above booted this commit. The run was one QEMU process
-  (`-smp 4`) and then 50 sequential `sectest notify-gate-sleep` commands in
-  that same shell. It was not 50 boots and it was not parallel, which is why
-  the clock time was about 41 seconds.
-The host header `git_head` is the commit that launched QEMU. The shell prints
-`smros_commit=` from `SMROS_GIT_COMMIT`, which `build.rs` sets to the commit
-compiled into that image. POSIX events use the same compiled commit, the one
-`posix-build` embedded. Those three match after a clean rebuild. They differ
-when an older image is booted from a later checkout. The campaign that
-reported `smros_commit=6cdcfe9` under host `git_head=86a6927` booted an image
-whose embedded stage had not been rebuilt.
+  The 50-run above booted this commit. The run was one QEMU process whose
+  command line requested `-smp 4`, then 50 sequential commands in that same
+  shell. It was not 50 boots and it was not parallel, which is why the clock
+  time was about 41 seconds. Only CPU0 was hardware-online.
+
+The host header `git_head` is `git describe --always --dirty` of the tree that
+launched QEMU. The shell prints the same string as `smros_commit=`, baked in
+by `build.rs`. A dirty tree gets a `-dirty` suffix. `build.rs` watches the
+ref `git rev-parse --git-path` names, including a worktree whose `.git` is a
+file, so a new commit is picked up on the next build. The campaign summary
+fails when those two strings differ or either ends in `-dirty`. POSIX event
+`smros_commit` stays the full `git rev-parse HEAD` embedded by `posix-build`.
+The campaign that reported event `smros_commit=6cdcfe9` under host
+`git_head=86a6927` booted an image whose embedded stage had not been rebuilt.
 
 - A later commit whose diff is only `verification/logs/` republishes the host
   Verus, CBMC, and futex logs for the documentation commit that contains this

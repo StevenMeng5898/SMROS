@@ -1398,18 +1398,48 @@ fn emit_host_share(
     link_host_share_archive(out_dir);
 }
 
-fn emit_compiled_commit(manifest_dir: &Path) {
-    println!("cargo:rerun-if-changed={}/.git/HEAD", manifest_dir.display());
-    let commit = Command::new("git")
+fn git_text(manifest_dir: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
         .arg("-C")
         .arg(manifest_dir)
-        .args(["rev-parse", "HEAD"])
+        .args(args)
         .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|text| text.trim().to_string())
-        .filter(|text| text.len() == 40 && text.chars().all(|character| character.is_ascii_hexdigit()))
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn watch_git_path(manifest_dir: &Path, git_path: &str) {
+    let path = Path::new(git_path);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        manifest_dir.join(path)
+    };
+    println!("cargo:rerun-if-changed={}", absolute.display());
+}
+
+fn emit_compiled_commit(manifest_dir: &Path) {
+    // `.git` may be a file in a worktree, and `.git/HEAD` stays `ref: refs/heads/...`
+    // when the branch advances. Watch the path git itself resolves.
+    if let Some(head) = git_text(manifest_dir, &["rev-parse", "--git-path", "HEAD"]) {
+        watch_git_path(manifest_dir, &head);
+    }
+    if let Some(symbolic) = git_text(manifest_dir, &["symbolic-ref", "-q", "HEAD"]) {
+        if let Some(ref_path) = git_text(manifest_dir, &["rev-parse", "--git-path", &symbolic]) {
+            watch_git_path(manifest_dir, &ref_path);
+        }
+    }
+    let commit = git_text(manifest_dir, &["describe", "--always", "--dirty"])
+        .filter(|text| !text.contains([' ', '\n', '\r']))
         .unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=SMROS_GIT_COMMIT={commit}");
 }

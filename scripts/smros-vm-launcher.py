@@ -460,11 +460,43 @@ def baseline_reference_summary(job: str, output: str) -> str | None:
             passed = int(fields["passed"])
     if selected is None or passed is None or selected <= 0 or passed > selected:
         return None
+    results = fields.get("results", "")
+    identity = baseline_result_identity(results)
+    if identity is None:
+        return None
+    run_id, digest = identity
     return (
         f"reference_selected={selected}"
         f"_reference_passed={passed}"
         f"_reference_nonpass={selected - passed}"
+        f"_run_id={run_id}"
+        f"_results_sha256={digest}"
     )
+
+
+def baseline_result_identity(results: str) -> tuple[str, str] | None:
+    """run_id and sha256 of the published qemu-user ndjson."""
+    if not results:
+        return None
+    path = Path(results)
+    if not path.is_file():
+        return None
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    run_id = None
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if '"run_id"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("record_type") == "run" and obj.get("run_id"):
+            run_id = str(obj["run_id"])
+            break
+    if not run_id or any(char.isspace() for char in run_id):
+        return None
+    return run_id, digest
 
 
 def verus_stopped_before_proofs(output: str) -> bool:

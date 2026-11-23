@@ -169,17 +169,23 @@ def mutants_for(rtype, body):
         component_mutants = []
         block = "{" + body.strip() + "}"
         for index, part in enumerate(parts):
-            fields = []
-            for other_index, other in enumerate(parts):
-                if other_index == index:
-                    if other.strip() == "bool":
-                        fields.append(f"!__o.{other_index}")
+            part = part.strip()
+            if part == "bool":
+                flips = [("not", f"!__o.{index}")]
+            else:
+                flips = [
+                    ("zero", zero_expr(part) or "0"),
+                    ("max", alt_expr(part, "max") or alt_expr(part, "one") or "1"),
+                ]
+            for suffix, flipped in flips:
+                fields = []
+                for other_index, _other in enumerate(parts):
+                    if other_index == index:
+                        fields.append(flipped)
                     else:
-                        fields.append(alt_expr(other, "max") or alt_expr(other, "one") or "1")
-                else:
-                    fields.append(f"__o.{other_index}")
-            expr = "let __o = " + block + "; (" + ", ".join(fields) + ")"
-            component_mutants.append((f"component-{index}", expr))
+                        fields.append(f"__o.{other_index}")
+                expr = "let __o = " + block + "; (" + ", ".join(fields) + ")"
+                component_mutants.append((f"component-{index}-{suffix}", expr))
         return component_mutants
     return mutants
 
@@ -524,7 +530,7 @@ def function_cache_key(row, function_text, bin_path):
             *shared,
             tool_fingerprint(bin_path),
             f"rlimit={RLIMIT}",
-            "tuple-mutant=keep-other-components",
+            "tuple-mutant=keep-other-components-zero-and-max",
             function_text,
         ]
     )
@@ -902,8 +908,10 @@ fn matched(n: u64) -> (out: Option<u64>)
     preserved = mutants_for("(usize, usize)", "\n    (7, x)\n")
     preserved_text = " ".join(expr for _label, expr in preserved)
     if (
-        len(preserved) != 2
+        len(preserved) != 4
+        or "let __o = {(7, x)}; (0, __o.1)" not in preserved_text
         or "let __o = {(7, x)}; (usize::MAX, __o.1)" not in preserved_text
+        or "let __o = {(7, x)}; (__o.0, 0)" not in preserved_text
         or "let __o = {(7, x)}; (__o.0, usize::MAX)" not in preserved_text
         or "(usize::MAX, 0)" in preserved_text
     ):
@@ -1000,6 +1008,14 @@ fn pair(x: usize) -> (out: (usize, usize))
 {
     (7, x)
 }
+
+fn bounded(x: usize) -> (out: (usize, usize))
+    ensures
+        out.0 <= 5,
+        out.1 == x,
+{
+    (0, x)
+}
 }
 """
     with tempfile.TemporaryDirectory(prefix="smros-verus-mutation-") as tmp:
@@ -1049,6 +1065,19 @@ fn pair(x: usize) -> (out: (usize, usize))
             failures += 1
         else:
             print("one-sided tuple out.1 == x: audit exit 1")
+        bound_span = function_span(source, "bounded")
+        bound_body = source[bound_span[1] + 1 : bound_span[2]]
+        bound_results = []
+        for label, expr in mutants_for("(usize, usize)", bound_body):
+            path.write_text(apply_mutant(source, bound_span[1], bound_span[2], expr))
+            code, output = run_verus(bin_path, path, "bounded", env, timeout=60)
+            bound_results.append((label, classify(code, output)))
+        bound_judge = judge_mutants("(usize, usize)", bound_results)
+        if bound_judge[0] != "one-sided" or gate_exit(1) != 1:
+            print(f"one-sided tuple (0, x) judged {bound_judge} from {bound_results}", file=sys.stderr)
+            failures += 1
+        else:
+            print("one-sided tuple out.0 <= 5: audit exit 1")
         implies = judge_mutants(
             "bool",
             [("return-zero", "survived"), ("return-one", "killed")],

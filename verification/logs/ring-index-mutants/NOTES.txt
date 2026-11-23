@@ -1,0 +1,10 @@
+git_head=e5cbb54c845e99ccd00cb1942303f555b360e88e
+Ring-index mutants against out == *_ring_index_spec. Each dies by postcondition not satisfied.
+R1 fifo_ring_index: return 0
+R2 fifo_ring_index: wrap branch returns 0
+R3 fifo_ring_index: return usize::MAX
+R4 fifo_ring_index: correct only when read_pos == 0
+R5 fifo_ring_index: ignores read_pos
+R6 fifo_ring_index: correct only when capacity == 2
+R7 socket_ring_index: returns capacity - 1 except the old witness point
+R8 socket_ring_index: ignores offset
