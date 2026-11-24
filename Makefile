@@ -107,7 +107,7 @@ script-check:
 
 # Fixed-protocol host launcher tests
 launcher-test:
-	@python3 scripts/test-smros-vm-launcher.py
+	@PYTHONDONTWRITEBYTECODE=1 python3 scripts/test-smros-vm-launcher.py
 
 # Structured AArch64 ELF layout checker tests
 linker-layout-test:

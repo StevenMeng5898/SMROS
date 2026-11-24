@@ -18,9 +18,12 @@ COMMIT="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unkno
 probe_launcher() {
 python3 - "$PROBE_HOST" "$PORT" "$REQUIRED_VERSION" "$SCRIPT_DIR/smros-vm-launcher.py" <<'PY'
 import importlib.util
+import os
 import socket
 import sys
 
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+sys.dont_write_bytecode = True
 host = sys.argv[1]
 port = int(sys.argv[2])
 required_version = int(sys.argv[3])
@@ -142,6 +145,7 @@ LAUNCHER_ENV=(
     LC_ALL=C
     LANG=C
     LANGUAGE=C
+    PYTHONDONTWRITEBYTECODE=1
 )
 echo "Starting SMROS VM launcher on $HOST:$PORT"
 if command -v setsid >/dev/null 2>&1; then

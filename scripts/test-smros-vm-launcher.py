@@ -314,6 +314,19 @@ class HermesHostTestProtocolTests(unittest.TestCase):
                 self.fail("follow-up host job did not finish")
         LAUNCHER.reset_jobs_for_tests()
 
+    def test_git_dirty_ignores_bytecode_artifacts(self) -> None:
+        captured: dict[str, list[str]] = {}
+
+        def fake_run(cmd, **_kwargs):
+            captured["cmd"] = list(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with mock.patch.object(LAUNCHER.subprocess, "run", side_effect=fake_run):
+            dirty = LAUNCHER.git_dirty()
+        self.assertIn(":(exclude,glob)**/__pycache__/**", captured["cmd"])
+        self.assertIn(":(exclude,glob)**/*.pyc", captured["cmd"])
+        self.assertFalse(dirty)
+
     def test_start_script_scrubs_make_env_and_restarts_only_from_the_host(self) -> None:
         starter = Path(__file__).with_name("start-smros-vm-launcher.sh").read_text()
         makefile = Path(__file__).resolve().parents[1].joinpath("Makefile").read_text()
@@ -322,6 +335,8 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertIn("-u MAKELEVEL", starter)
         self.assertIn("-u GNUMAKEFLAGS", starter)
         self.assertIn("LC_ALL=C", starter)
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", starter)
+        self.assertIn("sys.dont_write_bytecode = True", starter)
         self.assertIn("drain_host_jobs", starter)
         self.assertIn('launcher_action', starter)
         self.assertIn("vm-launcher-restart:", makefile)
