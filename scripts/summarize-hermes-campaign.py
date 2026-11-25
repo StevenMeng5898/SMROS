@@ -41,16 +41,23 @@ NOTIFY_GATE_LATE_MAX = 1
 
 
 # A later boot may keep an older POSIX stage only when the commits differ by
-# logs, docs, or the baseline host runners. The QEMU boot scripts are not in
-# this set: a lag that touches them is rejected unless the preamble records
-# their blob sha256 at git_head.
+# ignored logs, published evidence, docs, or the baseline host runners. The
+# QEMU boot scripts are not in this set: a lag that touches them is rejected
+# unless the preamble records their blob sha256 at git_head.
 _LAG_ALLOW_EXACT = {
     "scripts/posix/baseline.py",
     "scripts/posix/cli.py",
 }
 _LAG_ALLOW_PREFIX = (
     "verification/logs/",
+    "verification/evidence/",
     "docs/",
+)
+# Committed qemu-user reference for the 751b308 campaign. Runs write a fresh
+# ndjson under target/posix/ and never this directory.
+PUBLISHED_BASELINE = (
+    ROOT
+    / "verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d"
 )
 _BOOT_SCRIPTS = (
     "scripts/smros-vm-launcher.py",
@@ -99,7 +106,7 @@ def _boot_script_sha_ok(text, git_head, path):
 
 
 def _paths_allow_lag(paths, text, git_head):
-    """True when every lagged path is logs, docs, baseline/cli, or a re-run boot script."""
+    """True when every lagged path is logs, evidence, docs, baseline/cli, or a re-run boot script."""
     for path in paths:
         if not path:
             continue
@@ -131,12 +138,16 @@ def _event_commit_allowed(event_sha, git_head, text):
 
 
 def _published_results_sha256():
-    """Raw ndjson hash, and the hash recorded in cases.txt when that file exists."""
+    """Raw ndjson hash, and the hash recorded in cases.txt when that file exists.
+
+    Both live under verification/evidence/ and are optional. A checkout
+    without them skips the comparison instead of failing the summary.
+    """
     found = []
-    archive = ROOT / "verification/logs/posix-baseline-results.ndjson.gz"
+    archive = PUBLISHED_BASELINE / "posix-baseline-results.ndjson.gz"
     if archive.is_file():
         found.append(hashlib.sha256(gzip.decompress(archive.read_bytes())).hexdigest())
-    cases = ROOT / "verification/logs/posix-baseline-cases.txt"
+    cases = PUBLISHED_BASELINE / "posix-baseline-cases.txt"
     if cases.is_file():
         match = re.search(r"^results_sha256=([0-9a-f]{64})$", cases.read_text(), re.M)
         if match:
@@ -551,6 +562,10 @@ def main():
         print(f"launcher two-hash wrong-then-correct rc={wrong_then_correct}")
         if correct_then_wrong != 1 or wrong_then_correct != 1:
             print("contradictory script_sha256 lines were accepted", file=sys.stderr)
+            return 1
+        archive = PUBLISHED_BASELINE / "posix-baseline-results.ndjson.gz"
+        if archive.is_file() and not _published_results_sha256():
+            print("published baseline archive was not read", file=sys.stderr)
             return 1
         print("campaign summary self-test passed")
         return 0

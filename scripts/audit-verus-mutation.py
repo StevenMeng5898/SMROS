@@ -7,9 +7,15 @@ This script mutates each proved harness body and requires Verus to reject at
 least one mutation. A spec that survives every mutation is vacuous.
 
 Results are cached in verification/logs/verus-mutation-summary.txt by the hash
-of the harness function text. `--harness NAME` limits the run to one log.
-Functions that cannot be mutated automatically need a justified line in
-verification/verus-mutation-signoff.txt.
+of the harness function text. That cache is gitignored. `--harness NAME`
+limits the run to one log. Functions that cannot be mutated automatically
+need a justified line in verification/verus-mutation-signoff.txt.
+
+The function table is verification/logs/verus-functions.txt, which
+audit-verus-proofs.py rewrites and which is also gitignored. If that file
+is absent, the published table under verification/evidence/ is used only
+when every source hash it records still matches this tree. This script
+never writes verification/evidence/.
 """
 
 import hashlib
@@ -23,6 +29,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SUMMARY = ROOT / "verification/logs/verus-mutation-summary.txt"
 FUNCTIONS = ROOT / "verification/logs/verus-functions.txt"
+PUBLISHED_FUNCTIONS = (
+    ROOT
+    / "verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/verus-functions.txt"
+)
 SIGNOFF = ROOT / "verification/verus-mutation-signoff.txt"
 HARNESS = {
     "verus-syscall.log": ROOT / "verification/syscall/src/lib.rs",
@@ -424,9 +434,42 @@ def verus_env():
     return env
 
 
+def _recorded_hashes_match(path):
+    """True when every `sha256  relative/path` line in path matches this tree."""
+    if not path.is_file():
+        return False
+    saw = False
+    for line in path.read_text().splitlines():
+        if len(line) < 66 or line[64:66] != "  ":
+            continue
+        digest, rel = line.split("  ", 1)
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            continue
+        target = ROOT / rel
+        if not target.is_file():
+            return False
+        if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            return False
+        saw = True
+    return saw
+
+
+def function_table_path():
+    """Local table first. The published snapshot is a read-only fallback."""
+    if FUNCTIONS.is_file():
+        return FUNCTIONS
+    if _recorded_hashes_match(PUBLISHED_FUNCTIONS):
+        return PUBLISHED_FUNCTIONS
+    raise RuntimeError(
+        "verus-functions.txt is missing. make verus writes "
+        "verification/logs/verus-functions.txt, which is gitignored. "
+        "The published snapshot is used only when its source hashes still match."
+    )
+
+
 def load_functions():
     rows = []
-    lines = FUNCTIONS.read_text().splitlines()
+    lines = function_table_path().read_text().splitlines()
     try:
         start = lines.index("harness function mode success origin")
     except ValueError as exc:

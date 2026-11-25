@@ -364,7 +364,7 @@ cbmc-futex:
 		echo "utc=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 		echo "git_head=$$(git rev-parse HEAD)"; \
 		echo "git_dirty=$$(if git status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' | grep -q .; then echo true; else echo false; fi)"; \
-		echo "A later commit whose diff is only verification/logs/ publishes this run."; \
+		echo "This log stays in verification/logs/ and is not committed. A published copy is placed by hand under verification/evidence/<commit>/."; \
 		echo "command=cbmc --cover cover src/user_level/apps/pthread_mutex_futex.c --function cbmc_futex_word -DCBMC --unwind 1 --bounds-check --pointer-check --signed-overflow-check --unsigned-overflow-check"; \
 		cbmc --cover cover src/user_level/apps/pthread_mutex_futex.c \
 			--function cbmc_futex_word \
@@ -417,7 +417,7 @@ futex-stress:
 		echo "utc=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 		echo "git_head=$$(git rev-parse HEAD)"; \
 		echo "git_dirty=$$(if git status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' | grep -q .; then echo true; else echo false; fi)"; \
-		echo "A later commit whose diff is only verification/logs/ publishes this run."; \
+		echo "This log stays in verification/logs/ and is not committed. A published copy is placed by hand under verification/evidence/<commit>/."; \
 		fail=0; \
 		for threads in 3 4 6 8; do \
 			for run in $$(seq 1 20); do \

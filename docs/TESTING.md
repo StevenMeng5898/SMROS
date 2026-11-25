@@ -249,6 +249,16 @@ it as the existing `verus` stage.
 make verus
 ```
 
+Run logs are local and gitignored. `make futex-stress`, `make cbmc-futex`, and
+`make verus` write under `verification/logs/`. `make ut`, `make it`, and
+`make skt` write under `target/` (`target/host-tests/`,
+`target/smros-smoke-qemu.log`). `scripts/run-hermes-campaign.sh` writes
+`target/hermes-campaign-serial.log`. POSIX fetch, stage, build, and baseline
+write under `target/posix/`. None of those paths are committed. A published
+record of one commit lives under `verification/evidence/<commit>/`, and no
+run writes that tree. See `verification/logs/README.md` and
+`verification/evidence/README.md`.
+
 Run the fast local confidence suite:
 
 ```bash
