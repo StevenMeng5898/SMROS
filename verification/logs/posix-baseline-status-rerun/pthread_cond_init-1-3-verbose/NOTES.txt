@@ -1,0 +1,52 @@
+Twenty runs of one binary compiled with -DVERBOSE=2. The source file and the
+16 patches were not edited. SHA256SUMS covers the raw stdout and stderr of
+each run. Every stderr file is empty.
+
+Campaign staged binary, which does not contain the string "was awaken":
+a1f87d3014ca5d768688a6d4eaed6382fcb6086d7eec9115504f82c9e505ea6a
+
+This binary:
+8e0fdcdff19c7b369f156acecf4118dabe28974f60cab9cf9374201f5e58e61c
+
+Compile, from the existing patched tree, output left outside the repo:
+
+aarch64-linux-gnu-gcc -std=gnu99 -O2 -D_POSIX_C_SOURCE=200112L \
+  -D_XOPEN_SOURCE=600 -DVERBOSE=2 -pthread \
+  -I scripts/posix/runtime/include \
+  -I target/posix/src/85555325079ea362fa680bd2209c843cfe47e670/include \
+  target/posix/src/85555325079ea362fa680bd2209c843cfe47e670/conformance/interfaces/pthread_cond_init/1-3.c \
+  -o /tmp/pc13-verbose -lrt -lm
+
+This file is a counting probe. The binary above is not the campaign binary,
+so these runs are not a timing reproduction of the campaign failure.
+
+The raw LD_DEBUG=bindings log for the campaign binary is
+../pthread_cond_init-1-3-ld-debug/ld-debug.stderr.
+
+Printed order is reference, null attribute, default attribute. The numbers
+are the test's "times" (counter >> 1). Expected value is 200.
+
+01 pass 200 200 200
+02 fail 200 200 199
+03 pass 200 200 200
+04 pass 200 199 169
+05 fail 199 199 198
+06 pass 200 200 200
+07 fail 200 200 196
+08 fail 200 200 199
+09 pass 200 200 200
+10 pass 200 200 200
+11 fail 200 198 200
+12 pass 200 200 200
+13 fail 200 200 199
+14 pass 200 200 200
+15 pass 200 199 197
+16 pass 200 200 200
+17 pass 200 200 200
+18 fail 200 200 193
+19 pass 200 200 200
+20 pass 200 200 200
+
+No side is 0. Run 04 is 200/199/169 and passes. Run 15 is 200/199/197 and
+passes. Failures are short by 1 to 7. The pass/fail rule is exact equality
+with the reference. See docs/KNOWN_ISSUES.md.

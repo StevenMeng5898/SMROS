@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import secrets
 import selectors
 import shutil
@@ -69,6 +70,9 @@ class BaselineResult:
     attempts: tuple[RuntimeAttempt, ...]
     all_passed: bool
     result_path: Path
+    emfile: int = 0
+    hostenv: tuple[tuple[str, str], ...] = ()
+    qemu_user: str = ""
 
 
 @dataclass(frozen=True)
@@ -634,12 +638,49 @@ def _mirror_returncode(returncode: int) -> int:
     return returncode
 
 
+def _is_elf(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
+def _mqueue_isolated_argv(argv: Sequence[str]) -> list[str]:
+    """Run one ELF qemu-user against a private empty /dev/mqueue.
+
+    Non-ELF paths stay direct so a missing or invalid qemu remains a launch
+    error instead of a shell exit.
+    """
+    if os.environ.get("SMROS_POSIX_MQUEUE_ISOLATION", "1") == "0":
+        return list(argv)
+    if not argv or not _is_elf(str(argv[0])):
+        return list(argv)
+    unshare = shutil.which("unshare")
+    if unshare is None:
+        return list(argv)
+    return [
+        unshare,
+        "--user",
+        "--mount",
+        "--map-root-user",
+        "--",
+        "sh",
+        "-c",
+        "if mount -t tmpfs tmpfs /dev/mqueue; then rm -f /dev/mqueue/*; "
+        "else echo SMROS_MQUEUE_ISOLATION=failed >&2; fi; "
+        "unset PWD SHLVL; exec \"$@\"",
+        "smros-mqueue",
+        *list(argv),
+    ]
+
+
 def launch_runtime(argv: Sequence[str], control_descriptor: int) -> int:
     """Launch QEMU beneath the stable subreaper broker."""
 
     returncode = 125
     try:
-        process = subprocess.Popen(list(argv))
+        process = subprocess.Popen(_mqueue_isolated_argv(argv))
     except OSError as error:
         payload: dict[str, object] = {
             "errno": error.errno,
@@ -1838,7 +1879,38 @@ def _resolve_qemu(qemu: str | Path) -> Path:
         raise BaselinePrerequisiteError(
             f"qemu-aarch64 is not executable: {path}"
         )
+    name = Path(os.fspath(qemu)).name
+    # An explicit test binary path is not the host toolchain. Only the bare
+    # command names qemu-aarch64 and qemu-aarch64-static must resolve together.
+    if "/" not in os.fspath(qemu) and name in {"qemu-aarch64", "qemu-aarch64-static"}:
+        other = "qemu-aarch64-static" if name != "qemu-aarch64-static" else "qemu-aarch64"
+        other_found = shutil.which(other)
+        if other_found is not None:
+            other_path = Path(other_found).resolve()
+            if other_path != path:
+                raise BaselinePrerequisiteError(
+                    f"qemu-user binaries differ: {path} and {other_path}"
+                )
     return path
+
+
+def _host_mqueue_env() -> tuple[tuple[str, str], ...]:
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    rows = [("rlimit_nofile", str(soft)), ("rlimit_nofile_hard", str(hard))]
+    for probe_name in ("queues_max", "msg_max", "msgsize_max", "msg_default", "msgsize_default"):
+        probe = Path("/proc/sys/fs/mqueue") / probe_name
+        try:
+            rows.append((f"mqueue_{probe_name}", probe.read_text().strip()))
+        except OSError:
+            rows.append((f"mqueue_{probe_name}", "missing"))
+    return tuple(rows)
+
+
+def _emfile_count(attempt: RuntimeAttempt) -> int:
+    text = attempt.stdout + "\n" + attempt.stderr
+    return len(re.findall(r"\bEMFILE\b|\bENFILE\b|Too many open files", text))
 
 
 # posix-build compiles this preload and stages it. It is not a toolchain
@@ -2369,6 +2441,7 @@ def run_baseline(
     sysroot = Path(os.path.abspath(sysroot))
     result_path = Path(os.path.abspath(result_path))
     qemu_path = _resolve_qemu(qemu)
+    hostenv = _host_mqueue_env()
     identity = _load_stage_identity(stage)
     _validate_prerequisites(stage, sysroot, identity)
     verifier(stage)
@@ -2550,4 +2623,7 @@ def run_baseline(
             attempt.status == "pass" for attempt in frozen_attempts
         ),
         result_path=result_path,
+        emfile=sum(_emfile_count(attempt) for attempt in frozen_attempts),
+        hostenv=hostenv,
+        qemu_user=str(qemu_path),
     )

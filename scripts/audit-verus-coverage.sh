@@ -134,6 +134,10 @@ if ! python3 scripts/audit-verus-proofs.py --self-test; then
     status=1
 fi
 
+if ! python3 scripts/audit-verus-mutation.py --self-test; then
+    status=1
+fi
+
 if ! python3 scripts/audit-verus-proofs.py; then
     status=1
 fi

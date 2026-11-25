@@ -118,35 +118,90 @@ def split_top(expr, op):
     return parts
 
 
-def is_tautology(expr):
-    """Syntactic patterns only.
+def strip_parens(expr):
+    expr = expr.strip()
+    while expr.startswith("(") and matching_paren(expr) == len(expr) - 1:
+        expr = expr[1:-1].strip()
+    return expr
 
-    Catches true, x == x, x ==> x, x ==> true, x <= x, x >= x, and
-    x || !x in either order. A disjunction is tautological when any
-    disjunct is, and a conjunction when every conjunct is. This does
-    not decide general arithmetic or boolean equivalence.
+
+def matching_paren(expr):
+    depth = 0
+    for index, char in enumerate(expr):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return -1
+
+
+def is_tautology(expr):
+    """Reject specs that are true for every return value.
+
+    The patterns are still local, not a general decision procedure.
+    They cover the syntactic forms (true, x == x, x ==> x, x ==> true,
+    x <= x, x >= x, x || !x) plus two semantic shapes the older scan
+    accepted: an implication whose consequent is `x < x + 1`, and the
+    boolean identity `!(x && !x)`. A disjunction is tautological when
+    any disjunct is, and a conjunction when every conjunct is.
     """
     expr = re.sub(r"[\s,{}]+", " ", expr).strip()
+    expr = strip_parens(expr)
     if expr in {"", "true"}:
         return True
-    ors = split_top(expr, "||")
+    ors = [part.strip() for part in split_top(expr, "||")]
     if len(ors) > 1:
         if len(ors) == 2 and complementary(ors[0], ors[1]):
             return True
         return any(is_tautology(part) for part in ors)
-    ands = split_top(expr, "&&")
+    ands = [part.strip() for part in split_top(expr, "&&")]
     if len(ands) > 1:
         return all(is_tautology(part) for part in ands)
-    compact = re.sub(r"\s+", "", expr)
-    if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:==|==>|<=|>=)\1", compact):
+    imps = [part.strip() for part in split_top(expr, "==>")]
+    if len(imps) > 1:
+        consequent = "==>".join(imps[1:]).strip()
+        return is_tautology(consequent) or compact(imps[0]) == compact(consequent)
+    if expr.startswith("!"):
+        inner = strip_parens(expr[1:].strip())
+        if is_contradiction(inner):
+            return True
+    if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*) < \1 \+ [1-9][0-9]*", expr):
         return True
-    return re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)==>true", compact) is not None
+    squashed = compact(expr)
+    if re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)(?:==|==>|<=|>=)\1", squashed):
+        return True
+    return re.fullmatch(r"([A-Za-z_][A-Za-z0-9_]*)==>true", squashed) is not None
+
+
+def is_contradiction(expr):
+    expr = strip_parens(re.sub(r"[\s,{}]+", " ", expr).strip())
+    if expr in {"", "false"}:
+        return True
+    ands = [part.strip() for part in split_top(expr, "&&")]
+    if len(ands) > 1:
+        squashed = [compact(part) for part in ands]
+        for index, left in enumerate(squashed):
+            for right in squashed[index + 1 :]:
+                if complementary_compact(left, right):
+                    return True
+        return any(is_contradiction(part) for part in ands)
+    return False
+
+
+def compact(expr):
+    return re.sub(r"\s+", "", expr)
 
 
 def complementary(left, right):
-    a = re.sub(r"\s+", "", left)
-    b = re.sub(r"\s+", "", right)
-    return (a.startswith("!") and a[1:] == b) or (b.startswith("!") and b[1:] == a)
+    return complementary_compact(compact(left), compact(right))
+
+
+def complementary_compact(left, right):
+    return (left.startswith("!") and left[1:] == right) or (
+        right.startswith("!") and right[1:] == left
+    )
 
 
 def ensures_clauses(header):
@@ -454,6 +509,8 @@ def self_test():
         "fn checked_end() -> (out: bool)\n    ensures\n        out ==> true,\n{",
         "fn checked_end() -> (out: usize)\n    ensures\n        deadline <= deadline,\n{",
         "fn checked_end() -> (out: Option<usize>)\n    ensures\n        out.is_some(),\n{",
+        "fn checked_end(deadline: u64) -> (out: bool)\n    ensures\n        out ==> deadline < deadline + 1,\n{",
+        "fn checked_end() -> (out: bool)\n    ensures\n        !(out && !out),\n{",
     ]
     for header in tautologies:
         if useful_spec(header):

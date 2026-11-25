@@ -399,6 +399,9 @@ impl UserShell {
         self.print("╚═══════════════════════════════════════════════════════════╝\n");
         self.print("\n");
         self.print("Welcome to SMROS shell!\n");
+        self.print("smros_commit=");
+        self.print(env!("SMROS_GIT_COMMIT"));
+        self.print("\n");
         self.print("Type 'help' for available commands.\n\n");
     }
 
@@ -6200,6 +6203,7 @@ fn run_hermes_test_all_inner(
             (state.native_ok, state.suites)
         }
         None => {
+            crate::user_level::services::security_case::reset_notify_gate_campaign_late();
             let native_ok = run_hermes_agent_tests(ctx);
             let phases = run_hermes_opening_phases(ctx, &options);
             persist_hermes_resume_state(&HermesResumeState {
@@ -7053,6 +7057,17 @@ fn finish_hermes_test_all(
     append_mode_octal(report, shm_mode);
     report.push('\n');
 
+    let notify_late = crate::user_level::services::security_case::notify_gate_campaign_late();
+    let notify_late_ok = notify_late
+        <= crate::user_level::services::security_case::NOTIFY_GATE_CAMPAIGN_LATE_MAX;
+    ctx.serial.write_str("NOTIFY-GATE CAMPAIGN late=");
+    print_usize(&mut ctx.serial, notify_late);
+    ctx.serial.write_str(" threshold=");
+    print_usize(
+        &mut ctx.serial,
+        crate::user_level::services::security_case::NOTIFY_GATE_CAMPAIGN_LATE_MAX,
+    );
+    ctx.serial.write_str("\n");
     let overall = test_all_overall_pass(
         native_ok,
         op_timeouts,
@@ -7061,7 +7076,7 @@ fn finish_hermes_test_all(
         [host_passes[0], host_passes[1]],
         &suites,
         shm_mode_ok,
-    );
+    ) && notify_late_ok;
     let summary = hermes_test_all_summary_line(
         native_ok,
         random_completed,

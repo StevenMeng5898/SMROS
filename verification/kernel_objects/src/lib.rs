@@ -1241,13 +1241,35 @@ fn fifo_transfer_bytes(elem_size: usize, count: usize) -> (out: Option<usize>)
     smros_fifo_transfer_bytes_body!(elem_size, count)
 }
 
+proof fn lemma_ring_index_sum(b: int, o: int, c: int)
+    requires
+        0 < c,
+        0 <= b < c,
+        0 <= o < c,
+    ensures
+        (b + o) % c == if b + o >= c { b + o - c } else { b + o },
+{
+    if b + o >= c {
+        vstd::arithmetic::div_mod::lemma_mod_sub_multiples_vanish(b + o, c);
+        vstd::arithmetic::div_mod::lemma_small_mod((b + o - c) as nat, c as nat);
+    } else {
+        vstd::arithmetic::div_mod::lemma_small_mod((b + o) as nat, c as nat);
+    }
+}
+
 fn fifo_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
     ensures
-        capacity == 0 ==> out == 0,
-        capacity > 0 ==> out < capacity,
+        out as int == fifo_ring_index_spec(read_pos as int, offset as int, capacity as int),
 {
-    assert(capacity > 0 ==> read_pos % capacity < capacity);
-    assert(capacity > 0 ==> offset % capacity < capacity);
+    if capacity > 0 {
+        proof {
+            lemma_ring_index_sum(
+                (read_pos % capacity) as int,
+                (offset % capacity) as int,
+                capacity as int,
+            );
+        }
+    }
     smros_fifo_ring_index_body!(read_pos, offset, capacity)
 }
 
@@ -1276,11 +1298,22 @@ fn fifo_capacity_valid(
     max_bytes: usize,
 ) -> (out: bool)
     ensures
-        out ==> elem_count != 0,
-        out ==> elem_size != 0,
-        out ==> elem_count <= max_count,
-        out ==> elem_size <= max_size,
+        out == fifo_capacity_valid_spec(
+            elem_count as int,
+            elem_size as int,
+            max_count as int,
+            max_size as int,
+            max_bytes as int,
+        ),
 {
+    // fifo_transfer_bytes_spec(elem_size, count) is called as
+    // (elem_count, elem_size), so its division test is
+    // elem_count <= usize::MAX / elem_size. That is the overflow check of
+    // elem_count.checked_mul(elem_size). The product form needs this lemma.
+    assert(elem_size > 0 ==> (
+        (elem_count as int) <= (usize::MAX as int) / (elem_size as int)
+            <==> (elem_count as int) * (elem_size as int) <= (usize::MAX as int)
+    )) by (nonlinear_arith);
     smros_fifo_capacity_valid_body!(elem_count, elem_size, max_count, max_size, max_bytes)
 }
 
@@ -1366,11 +1399,17 @@ fn socket_mask_options(options: u32, mask: u32) -> (out: u32)
 
 fn socket_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
     ensures
-        capacity == 0 ==> out == 0,
-        capacity > 0 ==> out < capacity,
+        out as int == socket_ring_index_spec(read_pos as int, offset as int, capacity as int),
 {
-    assert(capacity > 0 ==> read_pos % capacity < capacity);
-    assert(capacity > 0 ==> offset % capacity < capacity);
+    if capacity > 0 {
+        proof {
+            lemma_ring_index_sum(
+                (read_pos % capacity) as int,
+                (offset % capacity) as int,
+                capacity as int,
+            );
+        }
+    }
     smros_socket_ring_index_body!(read_pos, offset, capacity)
 }
 

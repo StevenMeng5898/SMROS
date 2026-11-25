@@ -1,0 +1,24 @@
+--- a/verification/kernel_objects/src/lib.rs
++++ b/verification/kernel_objects/src/lib.rs
+@@ -1401,16 +1401,11 @@
+     ensures
+         out as int == socket_ring_index_spec(read_pos as int, offset as int, capacity as int),
+ {
+-    if capacity > 0 {
+-        proof {
+-            lemma_ring_index_sum(
+-                (read_pos % capacity) as int,
+-                (offset % capacity) as int,
+-                capacity as int,
+-            );
+-        }
+-    }
+-    smros_socket_ring_index_body!(read_pos, offset, capacity)
++    if capacity == 0 {
++        0
++    } else {
++        read_pos % capacity
++    }
+ }
+ 
+ fn socket_remaining_capacity(len: usize, capacity: usize) -> (out: usize)
