@@ -1,23 +1,366 @@
-===== campaign summary =====
-summary_written_utc=2026-11-23T19:59:14Z
-summary_written_utc_source=date -u when this summary file was rewritten; not a campaign time and not present in the serial log
-git_head=f4af8fc8739163c724f23e5bafa283ce7fe85d87
-git_head_source=serial POSIX event field smros_commit
-git_dirty_note=由启动行推断；因缺 dirty-stamp 推断不充分
-serial=verification/logs/campaign-serial.log
-serial_source=path of the committed serial log for this summary
-sha256=aaf16983c176b8f6d67696be9b8d49fa15a38fca9ac96eeb0bc456a388665d2b
-sha256_source=sha256sum verification/logs/campaign-serial.log
-smros_commit=f4af8fc
-smros_commit_source=serial boot line smros_commit=
-smros_commit_full=f4af8fc8739163c724f23e5bafa283ce7fe85d87
-smros_commit_full_source=serial POSIX event field smros_commit
-baseline_ndjson=verification/logs/posix-baseline/run-1363.ndjson
-baseline_ndjson_source=committed per-test file named by this summary
-baseline_ndjson_sha256=06a6e038d40230eb1a2a4e6869da307e0548ec409632b58610ffc47568c19554
-baseline_ndjson_sha256_source=sha256sum verification/logs/posix-baseline/run-1363.ndjson
+utc=2026-11-23T22:22:31Z
+campaign_commit=33a7957
+git_dirty=false
+serial_sha256=a1902ba6efd83dccfd65ad9374c9c28bc46841b69da1df463979209be4865686
+Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
+posixtest: selection tests=1600 apis=185 groups=9 interval=25 scope=selected
+posixtest: started
+posixtest: progress tests=3/1600 (0.18%) apis-complete=1/185 (0.54%) apis-pass=1/185 (0.54%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=3 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=5/1600 (0.31%) apis-complete=2/185 (1.08%) apis-pass=2/185 (1.08%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=5 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=15/1600 (0.93%) apis-complete=3/185 (1.62%) apis-pass=3/185 (1.62%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=15 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=18/1600 (1.12%) apis-complete=4/185 (2.16%) apis-pass=4/185 (2.16%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=18 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=25/1600 (1.56%) apis-complete=4/185 (2.16%) apis-pass=4/185 (2.16%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=25 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=28/1600 (1.75%) apis-complete=5/185 (2.70%) apis-pass=5/185 (2.70%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=28 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=37/1600 (2.31%) apis-complete=6/185 (3.24%) apis-pass=6/185 (3.24%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=37 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=40/1600 (2.50%) apis-complete=7/185 (3.78%) apis-pass=7/185 (3.78%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=40 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=41/1600 (2.56%) apis-complete=8/185 (4.32%) apis-pass=8/185 (4.32%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=41 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=50/1600 (3.12%) apis-complete=8/185 (4.32%) apis-pass=8/185 (4.32%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=50 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=51/1600 (3.18%) apis-complete=9/185 (4.86%) apis-pass=9/185 (4.86%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=51 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=52/1600 (3.25%) apis-complete=10/185 (5.40%) apis-pass=10/185 (5.40%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=52 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=54/1600 (3.37%) apis-complete=11/185 (5.94%) apis-pass=11/185 (5.94%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=54 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=56/1600 (3.50%) apis-complete=12/185 (6.48%) apis-pass=12/185 (6.48%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=56 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=63/1600 (3.93%) apis-complete=13/185 (7.02%) apis-pass=13/185 (7.02%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=63 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=71/1600 (4.43%) apis-complete=14/185 (7.56%) apis-pass=14/185 (7.56%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=71 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=75/1600 (4.68%) apis-complete=14/185 (7.56%) apis-pass=14/185 (7.56%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=75 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=83/1600 (5.18%) apis-complete=15/185 (8.10%) apis-pass=15/185 (8.10%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=83 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=98/1600 (6.12%) apis-complete=16/185 (8.64%) apis-pass=16/185 (8.64%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=98 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=99/1600 (6.18%) apis-complete=17/185 (9.18%) apis-pass=17/185 (9.18%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=99 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=100/1600 (6.25%) apis-complete=18/185 (9.72%) apis-pass=18/185 (9.72%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=100 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=119/1600 (7.43%) apis-complete=19/185 (10.27%) apis-pass=19/185 (10.27%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=119 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=122/1600 (7.62%) apis-complete=20/185 (10.81%) apis-pass=20/185 (10.81%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=122 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=123/1600 (7.68%) apis-complete=21/185 (11.35%) apis-pass=21/185 (11.35%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=123 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=125/1600 (7.81%) apis-complete=22/185 (11.89%) apis-pass=22/185 (11.89%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=125 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=130/1600 (8.12%) apis-complete=23/185 (12.43%) apis-pass=23/185 (12.43%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=130 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=137/1600 (8.56%) apis-complete=24/185 (12.97%) apis-pass=24/185 (12.97%) groups-complete=0/9 (0.00%) groups-pass=0/9 (0.00%) pass=137 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=141/1600 (8.81%) apis-complete=25/185 (13.51%) apis-pass=25/185 (13.51%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=141 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=142/1600 (8.87%) apis-complete=26/185 (14.05%) apis-pass=26/185 (14.05%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=142 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=143/1600 (8.93%) apis-complete=27/185 (14.59%) apis-pass=27/185 (14.59%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=143 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=147/1600 (9.18%) apis-complete=28/185 (15.13%) apis-pass=28/185 (15.13%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=147 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=150/1600 (9.37%) apis-complete=28/185 (15.13%) apis-pass=28/185 (15.13%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=150 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=153/1600 (9.56%) apis-complete=29/185 (15.67%) apis-pass=29/185 (15.67%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=153 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=175/1600 (10.93%) apis-complete=29/185 (15.67%) apis-pass=29/185 (15.67%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=175 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=186/1600 (11.62%) apis-complete=30/185 (16.21%) apis-pass=30/185 (16.21%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=186 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=192/1600 (12.00%) apis-complete=31/185 (16.75%) apis-pass=31/185 (16.75%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=192 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=197/1600 (12.31%) apis-complete=32/185 (17.29%) apis-pass=32/185 (17.29%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=197 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=200/1600 (12.50%) apis-complete=32/185 (17.29%) apis-pass=32/185 (17.29%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=200 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=204/1600 (12.75%) apis-complete=33/185 (17.83%) apis-pass=33/185 (17.83%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=204 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=225/1600 (14.06%) apis-complete=33/185 (17.83%) apis-pass=33/185 (17.83%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=225 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=232/1600 (14.50%) apis-complete=34/185 (18.37%) apis-pass=34/185 (18.37%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=232 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=242/1600 (15.12%) apis-complete=35/185 (18.91%) apis-pass=35/185 (18.91%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=242 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=250/1600 (15.62%) apis-complete=35/185 (18.91%) apis-pass=35/185 (18.91%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=250 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=260/1600 (16.25%) apis-complete=36/185 (19.45%) apis-pass=36/185 (19.45%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=260 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=264/1600 (16.50%) apis-complete=37/185 (20.00%) apis-pass=37/185 (20.00%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=264 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=275/1600 (17.18%) apis-complete=37/185 (20.00%) apis-pass=37/185 (20.00%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=275 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=283/1600 (17.68%) apis-complete=38/185 (20.54%) apis-pass=38/185 (20.54%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=283 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=300/1600 (18.75%) apis-complete=38/185 (20.54%) apis-pass=38/185 (20.54%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=300 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=308/1600 (19.25%) apis-complete=39/185 (21.08%) apis-pass=39/185 (21.08%) groups-complete=1/9 (11.11%) groups-pass=1/9 (11.11%) pass=308 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=313/1600 (19.56%) apis-complete=40/185 (21.62%) apis-pass=40/185 (21.62%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=313 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=316/1600 (19.75%) apis-complete=41/185 (22.16%) apis-pass=41/185 (22.16%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=316 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=317/1600 (19.81%) apis-complete=42/185 (22.70%) apis-pass=42/185 (22.70%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=317 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=324/1600 (20.25%) apis-complete=43/185 (23.24%) apis-pass=43/185 (23.24%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=324 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=325/1600 (20.31%) apis-complete=43/185 (23.24%) apis-pass=43/185 (23.24%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=325 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=336/1600 (21.00%) apis-complete=44/185 (23.78%) apis-pass=44/185 (23.78%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=336 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=343/1600 (21.43%) apis-complete=45/185 (24.32%) apis-pass=45/185 (24.32%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=343 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=346/1600 (21.62%) apis-complete=46/185 (24.86%) apis-pass=46/185 (24.86%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=346 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=348/1600 (21.75%) apis-complete=47/185 (25.40%) apis-pass=47/185 (25.40%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=348 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=349/1600 (21.81%) apis-complete=48/185 (25.94%) apis-pass=48/185 (25.94%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=349 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=350/1600 (21.87%) apis-complete=49/185 (26.48%) apis-pass=49/185 (26.48%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=350 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=351/1600 (21.93%) apis-complete=50/185 (27.02%) apis-pass=50/185 (27.02%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=351 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=352/1600 (22.00%) apis-complete=51/185 (27.56%) apis-pass=51/185 (27.56%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=352 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=353/1600 (22.06%) apis-complete=52/185 (28.10%) apis-pass=52/185 (28.10%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=353 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=354/1600 (22.12%) apis-complete=53/185 (28.64%) apis-pass=53/185 (28.64%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=354 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=358/1600 (22.37%) apis-complete=54/185 (29.18%) apis-pass=54/185 (29.18%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=358 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=362/1600 (22.62%) apis-complete=55/185 (29.72%) apis-pass=55/185 (29.72%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=362 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=368/1600 (23.00%) apis-complete=56/185 (30.27%) apis-pass=56/185 (30.27%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=368 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=374/1600 (23.37%) apis-complete=57/185 (30.81%) apis-pass=57/185 (30.81%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=374 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=375/1600 (23.43%) apis-complete=57/185 (30.81%) apis-pass=57/185 (30.81%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=375 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=377/1600 (23.56%) apis-complete=58/185 (31.35%) apis-pass=58/185 (31.35%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=377 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=379/1600 (23.68%) apis-complete=59/185 (31.89%) apis-pass=59/185 (31.89%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=379 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=384/1600 (24.00%) apis-complete=60/185 (32.43%) apis-pass=60/185 (32.43%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=384 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=387/1600 (24.18%) apis-complete=61/185 (32.97%) apis-pass=61/185 (32.97%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=387 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=389/1600 (24.31%) apis-complete=62/185 (33.51%) apis-pass=62/185 (33.51%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=389 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=392/1600 (24.50%) apis-complete=63/185 (34.05%) apis-pass=63/185 (34.05%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=392 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=397/1600 (24.81%) apis-complete=64/185 (34.59%) apis-pass=64/185 (34.59%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=397 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=398/1600 (24.87%) apis-complete=65/185 (35.13%) apis-pass=65/185 (35.13%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=398 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=400/1600 (25.00%) apis-complete=66/185 (35.67%) apis-pass=66/185 (35.67%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=400 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=402/1600 (25.12%) apis-complete=67/185 (36.21%) apis-pass=67/185 (36.21%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=402 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=404/1600 (25.25%) apis-complete=68/185 (36.75%) apis-pass=68/185 (36.75%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=404 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=414/1600 (25.87%) apis-complete=69/185 (37.29%) apis-pass=69/185 (37.29%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=414 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=417/1600 (26.06%) apis-complete=70/185 (37.83%) apis-pass=70/185 (37.83%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=417 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=420/1600 (26.25%) apis-complete=71/185 (38.37%) apis-pass=71/185 (38.37%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=420 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=425/1600 (26.56%) apis-complete=71/185 (38.37%) apis-pass=71/185 (38.37%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=425 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=427/1600 (26.68%) apis-complete=72/185 (38.91%) apis-pass=72/185 (38.91%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=427 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=431/1600 (26.93%) apis-complete=73/185 (39.45%) apis-pass=73/185 (39.45%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=431 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=439/1600 (27.43%) apis-complete=74/185 (40.00%) apis-pass=74/185 (40.00%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=439 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=445/1600 (27.81%) apis-complete=75/185 (40.54%) apis-pass=75/185 (40.54%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=445 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=450/1600 (28.12%) apis-complete=75/185 (40.54%) apis-pass=75/185 (40.54%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=450 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=457/1600 (28.56%) apis-complete=76/185 (41.08%) apis-pass=76/185 (41.08%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=457 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=463/1600 (28.93%) apis-complete=77/185 (41.62%) apis-pass=77/185 (41.62%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=463 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=467/1600 (29.18%) apis-complete=78/185 (42.16%) apis-pass=78/185 (42.16%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=467 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=469/1600 (29.31%) apis-complete=79/185 (42.70%) apis-pass=79/185 (42.70%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=469 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=472/1600 (29.50%) apis-complete=80/185 (43.24%) apis-pass=80/185 (43.24%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=472 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=474/1600 (29.62%) apis-complete=81/185 (43.78%) apis-pass=81/185 (43.78%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=474 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=475/1600 (29.68%) apis-complete=81/185 (43.78%) apis-pass=81/185 (43.78%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=475 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=478/1600 (29.87%) apis-complete=82/185 (44.32%) apis-pass=82/185 (44.32%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=478 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=481/1600 (30.06%) apis-complete=83/185 (44.86%) apis-pass=83/185 (44.86%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=481 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=500/1600 (31.25%) apis-complete=84/185 (45.40%) apis-pass=84/185 (45.40%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=500 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=508/1600 (31.75%) apis-complete=85/185 (45.94%) apis-pass=85/185 (45.94%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=508 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=511/1600 (31.93%) apis-complete=86/185 (46.48%) apis-pass=86/185 (46.48%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=511 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=521/1600 (32.56%) apis-complete=87/185 (47.02%) apis-pass=87/185 (47.02%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=521 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=523/1600 (32.68%) apis-complete=88/185 (47.56%) apis-pass=88/185 (47.56%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=523 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=525/1600 (32.81%) apis-complete=88/185 (47.56%) apis-pass=88/185 (47.56%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=525 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=527/1600 (32.93%) apis-complete=89/185 (48.10%) apis-pass=89/185 (48.10%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=527 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=529/1600 (33.06%) apis-complete=90/185 (48.64%) apis-pass=90/185 (48.64%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=529 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=538/1600 (33.62%) apis-complete=91/185 (49.18%) apis-pass=91/185 (49.18%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=538 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=543/1600 (33.93%) apis-complete=92/185 (49.72%) apis-pass=92/185 (49.72%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=543 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=546/1600 (34.12%) apis-complete=93/185 (50.27%) apis-pass=93/185 (50.27%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=546 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=550/1600 (34.37%) apis-complete=93/185 (50.27%) apis-pass=93/185 (50.27%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=550 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=553/1600 (34.56%) apis-complete=94/185 (50.81%) apis-pass=94/185 (50.81%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=553 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=560/1600 (35.00%) apis-complete=95/185 (51.35%) apis-pass=95/185 (51.35%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=560 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=561/1600 (35.06%) apis-complete=96/185 (51.89%) apis-pass=96/185 (51.89%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=561 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=569/1600 (35.56%) apis-complete=97/185 (52.43%) apis-pass=97/185 (52.43%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=569 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=574/1600 (35.87%) apis-complete=98/185 (52.97%) apis-pass=98/185 (52.97%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=574 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=575/1600 (35.93%) apis-complete=98/185 (52.97%) apis-pass=98/185 (52.97%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=575 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=580/1600 (36.25%) apis-complete=99/185 (53.51%) apis-pass=99/185 (53.51%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=580 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=587/1600 (36.68%) apis-complete=100/185 (54.05%) apis-pass=100/185 (54.05%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=587 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=592/1600 (37.00%) apis-complete=101/185 (54.59%) apis-pass=101/185 (54.59%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=592 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=596/1600 (37.25%) apis-complete=102/185 (55.13%) apis-pass=102/185 (55.13%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=596 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=599/1600 (37.43%) apis-complete=103/185 (55.67%) apis-pass=103/185 (55.67%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=599 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=600/1600 (37.50%) apis-complete=103/185 (55.67%) apis-pass=103/185 (55.67%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=601/1600 (37.56%) apis-complete=104/185 (56.21%) apis-pass=104/185 (56.21%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=601 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=605/1600 (37.81%) apis-complete=105/185 (56.75%) apis-pass=105/185 (56.75%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=605 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=611/1600 (38.18%) apis-complete=106/185 (57.29%) apis-pass=106/185 (57.29%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=611 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=613/1600 (38.31%) apis-complete=107/185 (57.83%) apis-pass=107/185 (57.83%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=613 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=616/1600 (38.50%) apis-complete=108/185 (58.37%) apis-pass=108/185 (58.37%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=616 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=619/1600 (38.68%) apis-complete=109/185 (58.91%) apis-pass=109/185 (58.91%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=619 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=625/1600 (39.06%) apis-complete=110/185 (59.45%) apis-pass=110/185 (59.45%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=625 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=632/1600 (39.50%) apis-complete=111/185 (60.00%) apis-pass=111/185 (60.00%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=632 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=639/1600 (39.93%) apis-complete=112/185 (60.54%) apis-pass=112/185 (60.54%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=639 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=641/1600 (40.06%) apis-complete=113/185 (61.08%) apis-pass=113/185 (61.08%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=641 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=645/1600 (40.31%) apis-complete=114/185 (61.62%) apis-pass=114/185 (61.62%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=645 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=650/1600 (40.62%) apis-complete=114/185 (61.62%) apis-pass=114/185 (61.62%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=650 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=651/1600 (40.68%) apis-complete=115/185 (62.16%) apis-pass=115/185 (62.16%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=651 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=657/1600 (41.06%) apis-complete=116/185 (62.70%) apis-pass=116/185 (62.70%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=657 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=663/1600 (41.43%) apis-complete=117/185 (63.24%) apis-pass=117/185 (63.24%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=663 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=664/1600 (41.50%) apis-complete=118/185 (63.78%) apis-pass=118/185 (63.78%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=664 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=666/1600 (41.62%) apis-complete=119/185 (64.32%) apis-pass=119/185 (64.32%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=666 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=671/1600 (41.93%) apis-complete=120/185 (64.86%) apis-pass=120/185 (64.86%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=671 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=674/1600 (42.12%) apis-complete=121/185 (65.40%) apis-pass=121/185 (65.40%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=674 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=675/1600 (42.18%) apis-complete=121/185 (65.40%) apis-pass=121/185 (65.40%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=675 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=676/1600 (42.25%) apis-complete=122/185 (65.94%) apis-pass=122/185 (65.94%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=676 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=679/1600 (42.43%) apis-complete=123/185 (66.48%) apis-pass=123/185 (66.48%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=679 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=681/1600 (42.56%) apis-complete=124/185 (67.02%) apis-pass=124/185 (67.02%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=681 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=682/1600 (42.62%) apis-complete=125/185 (67.56%) apis-pass=125/185 (67.56%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=682 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=683/1600 (42.68%) apis-complete=126/185 (68.10%) apis-pass=126/185 (68.10%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=683 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=687/1600 (42.93%) apis-complete=127/185 (68.64%) apis-pass=127/185 (68.64%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=687 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=690/1600 (43.12%) apis-complete=128/185 (69.18%) apis-pass=128/185 (69.18%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=690 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=694/1600 (43.37%) apis-complete=129/185 (69.72%) apis-pass=129/185 (69.72%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=694 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=695/1600 (43.43%) apis-complete=130/185 (70.27%) apis-pass=130/185 (70.27%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=695 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=697/1600 (43.56%) apis-complete=131/185 (70.81%) apis-pass=131/185 (70.81%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=697 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=700/1600 (43.75%) apis-complete=131/185 (70.81%) apis-pass=131/185 (70.81%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=700 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=711/1600 (44.43%) apis-complete=132/185 (71.35%) apis-pass=132/185 (71.35%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=711 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=713/1600 (44.56%) apis-complete=133/185 (71.89%) apis-pass=133/185 (71.89%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=713 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=717/1600 (44.81%) apis-complete=134/185 (72.43%) apis-pass=134/185 (72.43%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=717 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=721/1600 (45.06%) apis-complete=135/185 (72.97%) apis-pass=135/185 (72.97%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=721 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=723/1600 (45.18%) apis-complete=136/185 (73.51%) apis-pass=136/185 (73.51%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=723 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=725/1600 (45.31%) apis-complete=136/185 (73.51%) apis-pass=136/185 (73.51%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=725 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=726/1600 (45.37%) apis-complete=137/185 (74.05%) apis-pass=137/185 (74.05%) groups-complete=2/9 (22.22%) groups-pass=2/9 (22.22%) pass=726 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=728/1600 (45.50%) apis-complete=138/185 (74.59%) apis-pass=138/185 (74.59%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=728 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=735/1600 (45.93%) apis-complete=139/185 (75.13%) apis-pass=139/185 (75.13%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=735 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=740/1600 (46.25%) apis-complete=140/185 (75.67%) apis-pass=140/185 (75.67%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=740 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=745/1600 (46.56%) apis-complete=141/185 (76.21%) apis-pass=141/185 (76.21%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=745 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=750/1600 (46.87%) apis-complete=141/185 (76.21%) apis-pass=141/185 (76.21%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=750 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=751/1600 (46.93%) apis-complete=142/185 (76.75%) apis-pass=142/185 (76.75%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=751 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=756/1600 (47.25%) apis-complete=143/185 (77.29%) apis-pass=143/185 (77.29%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=756 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=760/1600 (47.50%) apis-complete=144/185 (77.83%) apis-pass=144/185 (77.83%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=760 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=775/1600 (48.43%) apis-complete=144/185 (77.83%) apis-pass=144/185 (77.83%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=775 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=783/1600 (48.93%) apis-complete=145/185 (78.37%) apis-pass=145/185 (78.37%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=783 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=800/1600 (50.00%) apis-complete=145/185 (78.37%) apis-pass=145/185 (78.37%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=800 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=804/1600 (50.25%) apis-complete=146/185 (78.91%) apis-pass=146/185 (78.91%) groups-complete=3/9 (33.33%) groups-pass=3/9 (33.33%) pass=804 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=806/1600 (50.37%) apis-complete=147/185 (79.45%) apis-pass=147/185 (79.45%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=806 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=810/1600 (50.62%) apis-complete=148/185 (80.00%) apis-pass=148/185 (80.00%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=810 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=812/1600 (50.75%) apis-complete=149/185 (80.54%) apis-pass=149/185 (80.54%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=812 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=817/1600 (51.06%) apis-complete=150/185 (81.08%) apis-pass=150/185 (81.08%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=817 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=825/1600 (51.56%) apis-complete=150/185 (81.08%) apis-pass=150/185 (81.08%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=825 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=827/1600 (51.68%) apis-complete=151/185 (81.62%) apis-pass=151/185 (81.62%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=827 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=839/1600 (52.43%) apis-complete=152/185 (82.16%) apis-pass=152/185 (82.16%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=839 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=846/1600 (52.87%) apis-complete=153/185 (82.70%) apis-pass=153/185 (82.70%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=846 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=850/1600 (53.12%) apis-complete=153/185 (82.70%) apis-pass=153/185 (82.70%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=850 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=857/1600 (53.56%) apis-complete=154/185 (83.24%) apis-pass=154/185 (83.24%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=857 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=867/1600 (54.18%) apis-complete=155/185 (83.78%) apis-pass=155/185 (83.78%) groups-complete=4/9 (44.44%) groups-pass=4/9 (44.44%) pass=867 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=875/1600 (54.68%) apis-complete=156/185 (84.32%) apis-pass=156/185 (84.32%) groups-complete=5/9 (55.55%) groups-pass=5/9 (55.55%) pass=875 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=900/1600 (56.25%) apis-complete=156/185 (84.32%) apis-pass=156/185 (84.32%) groups-complete=5/9 (55.55%) groups-pass=5/9 (55.55%) pass=900 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=904/1600 (56.50%) apis-complete=157/185 (84.86%) apis-pass=157/185 (84.86%) groups-complete=5/9 (55.55%) groups-pass=5/9 (55.55%) pass=904 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=914/1600 (57.12%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=914 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=925/1600 (57.81%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=925 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=950/1600 (59.37%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=950 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=975/1600 (60.93%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=975 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1000/1600 (62.50%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1000 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1025/1600 (64.06%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1025 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1050/1600 (65.62%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1050 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1075/1600 (67.18%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1075 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1100/1600 (68.75%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1100 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1125/1600 (70.31%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1125 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1150/1600 (71.87%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1150 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1175/1600 (73.43%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1175 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1200/1600 (75.00%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1200 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1225/1600 (76.56%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1225 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1250/1600 (78.12%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1250 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1275/1600 (79.68%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1275 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1300/1600 (81.25%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1300 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1325/1600 (82.81%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1325 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1350/1600 (84.37%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1350 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1375/1600 (85.93%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1375 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1400/1600 (87.50%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1400 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1425/1600 (89.06%) apis-complete=158/185 (85.40%) apis-pass=158/185 (85.40%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1425 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1440/1600 (90.00%) apis-complete=159/185 (85.94%) apis-pass=159/185 (85.94%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1440 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1442/1600 (90.12%) apis-complete=160/185 (86.48%) apis-pass=160/185 (86.48%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1442 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1450/1600 (90.62%) apis-complete=160/185 (86.48%) apis-pass=160/185 (86.48%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1450 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1453/1600 (90.81%) apis-complete=161/185 (87.02%) apis-pass=161/185 (87.02%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1453 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1456/1600 (91.00%) apis-complete=162/185 (87.56%) apis-pass=162/185 (87.56%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1456 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1458/1600 (91.12%) apis-complete=163/185 (88.10%) apis-pass=163/185 (88.10%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1458 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1460/1600 (91.25%) apis-complete=164/185 (88.64%) apis-pass=164/185 (88.64%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1460 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1462/1600 (91.37%) apis-complete=165/185 (89.18%) apis-pass=165/185 (89.18%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1462 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1466/1600 (91.62%) apis-complete=166/185 (89.72%) apis-pass=166/185 (89.72%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1466 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1468/1600 (91.75%) apis-complete=167/185 (90.27%) apis-pass=167/185 (90.27%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1468 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1474/1600 (92.12%) apis-complete=168/185 (90.81%) apis-pass=168/185 (90.81%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1474 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1475/1600 (92.18%) apis-complete=168/185 (90.81%) apis-pass=168/185 (90.81%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1475 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1479/1600 (92.43%) apis-complete=169/185 (91.35%) apis-pass=169/185 (91.35%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1479 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1483/1600 (92.68%) apis-complete=170/185 (91.89%) apis-pass=170/185 (91.89%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1483 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1494/1600 (93.37%) apis-complete=171/185 (92.43%) apis-pass=171/185 (92.43%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1494 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1500/1600 (93.75%) apis-complete=171/185 (92.43%) apis-pass=171/185 (92.43%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1500 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1507/1600 (94.18%) apis-complete=172/185 (92.97%) apis-pass=172/185 (92.97%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1507 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1509/1600 (94.31%) apis-complete=173/185 (93.51%) apis-pass=173/185 (93.51%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1509 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1519/1600 (94.93%) apis-complete=174/185 (94.05%) apis-pass=174/185 (94.05%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1519 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1523/1600 (95.18%) apis-complete=175/185 (94.59%) apis-pass=175/185 (94.59%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1523 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1525/1600 (95.31%) apis-complete=175/185 (94.59%) apis-pass=175/185 (94.59%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1525 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1528/1600 (95.50%) apis-complete=176/185 (95.13%) apis-pass=176/185 (95.13%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1528 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1536/1600 (96.00%) apis-complete=177/185 (95.67%) apis-pass=177/185 (95.67%) groups-complete=6/9 (66.66%) groups-pass=6/9 (66.66%) pass=1536 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1544/1600 (96.50%) apis-complete=178/185 (96.21%) apis-pass=178/185 (96.21%) groups-complete=7/9 (77.77%) groups-pass=7/9 (77.77%) pass=1544 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1547/1600 (96.68%) apis-complete=179/185 (96.75%) apis-pass=179/185 (96.75%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1547 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1548/1600 (96.75%) apis-complete=180/185 (97.29%) apis-pass=180/185 (97.29%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1548 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1550/1600 (96.87%) apis-complete=180/185 (97.29%) apis-pass=180/185 (97.29%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1550 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1559/1600 (97.43%) apis-complete=181/185 (97.83%) apis-pass=181/185 (97.83%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1559 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1563/1600 (97.68%) apis-complete=182/185 (98.37%) apis-pass=182/185 (98.37%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1563 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1570/1600 (98.12%) apis-complete=183/185 (98.91%) apis-pass=183/185 (98.91%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1570 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1575/1600 (98.43%) apis-complete=183/185 (98.91%) apis-pass=183/185 (98.91%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1575 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: progress tests=1580/1600 (98.75%) apis-complete=184/185 (99.45%) apis-pass=184/185 (99.45%) groups-complete=8/9 (88.88%) groups-pass=8/9 (88.88%) pass=1580 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
 posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
 posixtest: completed
+Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
+CASE notify-gate-sleep RESULT PASS slept-on-time
 SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
-Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1363/237/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
+SECTEST SUMMARY pass=1 fail=0 xfail=0 xpass=0
+SECTEST SUMMARY pass=1 fail=0 xfail=0 xpass=0
+Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0
+Hermes phase guest phase=done pass=7 fail=0 unavailable=0
+posixtest: selection tests=1 apis=1 groups=1 interval=25 scope=selected
+posixtest: started
+posixtest: progress tests=1/1 (100.00%) apis-complete=1/1 (100.00%) apis-pass=1/1 (100.00%) groups-complete=1/1 (100.00%) groups-pass=1/1 (100.00%) pass=1 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: completed
+posixtest: status running=no run_id=none filter=none current=none completed=0 selected=0 tests=0/0 (0.00%) apis-complete=0/0 (0.00%) apis-pass=0/0 (0.00%) groups-complete=0/0 (0.00%) groups-pass=0/0 (0.00%) passed=0 failed=0 unresolved=0 unsupported=0 untested=0 launch_errors=0 timeout=0 scope=selected
+posixtest: selection tests=1 apis=1 groups=1 interval=25 scope=selected
+posixtest: started
+posixtest: progress tests=1/1 (100.00%) apis-complete=1/1 (100.00%) apis-pass=1/1 (100.00%) groups-complete=1/1 (100.00%) groups-pass=1/1 (100.00%) pass=1 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: completed
+posixtest: status running=no run_id=none filter=none current=none completed=0 selected=0 tests=0/0 (0.00%) apis-complete=0/0 (0.00%) apis-pass=0/0 (0.00%) groups-complete=0/0 (0.00%) groups-pass=0/0 (0.00%) passed=0 failed=0 unresolved=0 unsupported=0 untested=0 launch_errors=0 timeout=0 scope=selected
+Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
+Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0
+Hermes phase guest phase=done pass=7 fail=0 unavailable=0
+Hermes phase el0 phase=pending pass=0 fail=0 unavailable=0
+Hermes phase skt phase=pending pass=0 fail=0 unavailable=0
+Hermes phase st phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-tool-test phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-fetch phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-audit phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-build phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-stage phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-baseline phase=pending pass=0 fail=0 unavailable=0
+Hermes phase launcher-test phase=pending pass=0 fail=0 unavailable=0
+Hermes phase verus phase=pending pass=0 fail=0 unavailable=0
+Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
+Hermes phase fuzzsc phase=pending pass=0 fail=0 unavailable=0
+Hermes phase cbmc-futex phase=pending pass=0 fail=0 unavailable=0
+Hermes phase futex-stress phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
+Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0
+Hermes phase guest phase=done pass=7 fail=0 unavailable=0
+Hermes phase el0 phase=pending pass=0 fail=0 unavailable=0
+Hermes phase skt phase=pending pass=0 fail=0 unavailable=0
+Hermes phase st phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-tool-test phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-fetch phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-audit phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-build phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-stage phase=pending pass=0 fail=0 unavailable=0
+Hermes phase posix-baseline phase=pending pass=0 fail=0 unavailable=0
+Hermes phase launcher-test phase=pending pass=0 fail=0 unavailable=0
+Hermes phase verus phase=pending pass=0 fail=0 unavailable=0
+Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
+Hermes phase fuzzsc phase=pending pass=0 fail=0 unavailable=0
+Hermes phase cbmc-futex phase=pending pass=0 fail=0 unavailable=0
+Hermes phase futex-stress phase=pending pass=0 fail=0 unavailable=0
+posixtest: selection tests=1 apis=1 groups=1 interval=25 scope=selected
+posixtest: started
+posixtest: progress tests=1/1 (100.00%) apis-complete=1/1 (100.00%) apis-pass=1/1 (100.00%) groups-complete=1/1 (100.00%) groups-pass=1/1 (100.00%) pass=1 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: completed
+posixtest: status running=no run_id=none filter=none current=none completed=0 selected=0 tests=0/0 (0.00%) apis-complete=0/0 (0.00%) apis-pass=0/0 (0.00%) groups-complete=0/0 (0.00%) groups-pass=0/0 (0.00%) passed=0 failed=0 unresolved=0 unsupported=0 untested=0 launch_errors=0 timeout=0 scope=selected
+posixtest: selection tests=1 apis=1 groups=1 interval=25 scope=selected
+posixtest: started
+posixtest: progress tests=1/1 (100.00%) apis-complete=1/1 (100.00%) apis-pass=1/1 (100.00%) groups-complete=1/1 (100.00%) groups-pass=1/1 (100.00%) pass=1 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: completed
+posixtest: selection tests=1 apis=1 groups=1 interval=25 scope=selected
+posixtest: started
+posixtest: progress tests=1/1 (100.00%) apis-complete=1/1 (100.00%) apis-pass=1/1 (100.00%) groups-complete=1/1 (100.00%) groups-pass=1/1 (100.00%) pass=1 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
+posixtest: completed
+posixtest: status running=no run_id=none filter=none current=none completed=0 selected=0 tests=0/0 (0.00%) apis-complete=0/0 (0.00%) apis-pass=0/0 (0.00%) groups-complete=0/0 (0.00%) groups-pass=0/0 (0.00%) passed=0 failed=0 unresolved=0 unsupported=0 untested=0 launch_errors=0 timeout=0 scope=selected
+Host stage PASS LOG_/agent/repos/SMROS/target/security/sec0-all.log
+Hermes phase el0 phase=done pass=1 fail=0 unavailable=0
+Host stage PASS Log:_/agent/repos/SMROS/target/hermes-tests/skt-serial.log
+Hermes phase skt phase=done pass=1 fail=0 unavailable=0
+Host stage PASS Log:_/agent/repos/SMROS/target/hermes-tests/st-serial.log
+Hermes phase st phase=done pass=1 fail=0 unavailable=0
+Host stage PASS test_fork_11_patch_ports_ltp_record_lock_assertion_without_weakening_(test_source.RepositoryPatchTests.test_fork_11_patch_ports_ltp_record_lock_assertion_withou
+Hermes phase posix-tool-test phase=done pass=1 fail=0 unavailable=0
+Host stage PASS no-output
+Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
+Host stage PASS discovered-c=1979_shell=176_stub=147_excluded=94_runtime=53_test=169_generator=0_helper=7
+Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
+Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119864289
+Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
+Host stage PASS discovered=1979_build-pass=1945_build-fail=34_link-pass=1682_link-fail=0_shell-unported=169_staged-bytes=119863714
+Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
+Host stage PASS reference_selected=1600_reference_passed=1359_reference_nonpass=241_run_id=e8ebaacdf6d8a36a097934a00dddfcc3_results_sha256=b56db7f3dbb18627b5db45ea6f31ae3447360bff4568b421d9fac7b3ac1dd970
+Hermes phase posix-baseline phase=done pass=1359 fail=241 unavailable=0
+Host stage PASS OK
+Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
+Host stage PASS mutation_gate_functions=120_killed=120_signed_off=0_status=0
+Hermes phase verus phase=done pass=1 fail=0 unavailable=0
+Host stage PASS model_broken_exit=1
+Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
+Host stage PASS futex-stress_passed_runs=80
+Hermes phase futex-stress phase=done pass=1 fail=0 unavailable=0
+Hermes phase fuzzsc phase=done pass=1 fail=0 unavailable=0
+Hermes phase shm-mode pass mode=040755
+Hermes phase posixtest phase=done selected=1600 pass=1600 fail=0 unresolved=0 timeout=0 launch_errors=0
+Hermes phase sectest phase=done pass=91 fail=0 xfail=0 xpass=0 ids=91/91 undef_pass=1 undef_fail=0 one_pass=1 one_fail=0
+Hermes phase guest phase=done pass=7 fail=0 unavailable=0
+Hermes phase el0 phase=done pass=1 fail=0 unavailable=0
+Hermes phase skt phase=done pass=1 fail=0 unavailable=0
+Hermes phase st phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-tool-test phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-fetch phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-audit phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-build phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-stage phase=done pass=1 fail=0 unavailable=0
+Hermes phase posix-baseline phase=done pass=1359 fail=241 unavailable=0
+Hermes phase launcher-test phase=done pass=1 fail=0 unavailable=0
+Hermes phase verus phase=done pass=1 fail=0 unavailable=0
+Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
+Hermes phase fuzzsc phase=done pass=1 fail=0 unavailable=0
+Hermes phase cbmc-futex phase=done pass=1 fail=0 unavailable=0
+Hermes phase futex-stress phase=done pass=1 fail=0 unavailable=0
+Hermes phase shm-mode pass mode=040755
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=7/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1359/241/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
 Hermes test-all result: PASS
+NOTIFY-GATE 豁免 0123 runs CASE notify-gate-sleep but does not print NOTIFY-GATE SUMMARY
