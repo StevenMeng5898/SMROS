@@ -438,6 +438,12 @@ def verus_toolchain_present() -> bool:
     return shutil.which("verus") is not None
 
 
+def cbmc_present() -> bool:
+    if (ROOT / ".tools" / "cbmc" / "current" / "cbmc").is_file():
+        return True
+    return shutil.which("cbmc") is not None
+
+
 def baseline_reference_summary(job: str, output: str) -> str | None:
     """A finished qemu-user reference is success even when some tests miss.
 
@@ -485,6 +491,12 @@ def verus_stopped_before_proofs(output: str) -> bool:
     return any(marker in output for marker in markers)
 
 
+def qemu_user_available() -> bool:
+    if shutil.which("qemu-aarch64"):
+        return True
+    return Path("/usr/bin/qemu-aarch64").is_file()
+
+
 def job_unavailable_reason(job: str) -> str | None:
     """Missing tools are UNAVAILABLE, never a silent pass."""
     if job == "verus" and not verus_toolchain_present():
@@ -494,8 +506,10 @@ def job_unavailable_reason(job: str) -> str | None:
             return "UNAVAILABLE_qemu"
         if not (ROOT / "kernel8.img").is_file():
             return "UNAVAILABLE_kernel"
-    if job == "posix-baseline" and shutil.which("qemu-aarch64") is None:
+    if job == "posix-baseline" and not qemu_user_available():
         return "UNAVAILABLE_qemu-user"
+    if job == "cbmc-futex" and not cbmc_present():
+        return "UNAVAILABLE_toolchain"
     return None
 
 
@@ -533,6 +547,12 @@ def test_job_environment() -> dict[str, str]:
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
     env["LANGUAGE"] = "C"
+    extra_path = [
+        str(ROOT / ".tools" / "cbmc" / "current"),
+        str(ROOT / ".tools" / "verus" / "current"),
+        env.get("PATH", ""),
+    ]
+    env["PATH"] = os.pathsep.join(part for part in extra_path if part)
     return env
 
 

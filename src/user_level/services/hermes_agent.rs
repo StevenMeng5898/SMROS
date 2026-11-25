@@ -36,6 +36,7 @@ const HERMES_PERSONALITY: &str = "pragmatic-smros-port";
 const HERMES_TOOL_SHELL: &str = "shell";
 const HERMES_TOOL_FXFS: &str = "fxfs";
 const HERMES_TOOL_SVC: &str = "svc";
+const HERMES_LOG_MAX_BYTES: usize = 16 * 1024;
 
 const HERMES_CONFIG: &str = "provider: gemma\nmodel: gemma/gemma-3n-e2b-smros\npersonality: pragmatic-smros-port\ntools:\n  - shell\n  - fxfs\n  - svc\nskills_dir: /data/hermes/skills\nmemory_dir: /data/hermes/memory\n";
 const HERMES_MEMORY: &str = "- SMROS port runs Hermes semantics through the native Gemma provider.\n- Upstream Python runtime is not yet available in SMROS.\n";
@@ -514,6 +515,7 @@ pub fn run_full_test() -> Result<HermesAgentTestReport, HermesAgentError> {
     let _persist_guard = fxfs::suspend_persist();
     let result = (|| {
         prepare_storage()?;
+        reset_test_logs()?;
 
         let config = load_config()?;
         let config_ok = config.provider == HERMES_PROVIDER_GEMMA
@@ -692,6 +694,30 @@ fn create_dir(path: &str) -> Result<(), HermesAgentError> {
     fxfs::create_dir(path)
         .map(|_| ())
         .map_err(|_| HermesAgentError::FxfsPrepare)
+}
+
+fn reset_test_logs() -> Result<(), HermesAgentError> {
+    fxfs::write_file(HERMES_SESSION_PATH, b"")
+        .map(|_| ())
+        .map_err(|_| HermesAgentError::FxfsPrepare)?;
+    fxfs::write_file(HERMES_TOOL_AUDIT_PATH, b"")
+        .map(|_| ())
+        .map_err(|_| HermesAgentError::FxfsPrepare)?;
+    fxfs::write_file(HERMES_MEMORY_PATH, HERMES_MEMORY.as_bytes())
+        .map(|_| ())
+        .map_err(|_| HermesAgentError::Memory)?;
+    Ok(())
+}
+
+fn rotate_log_if_needed(path: &str, extra: usize) -> Result<(), HermesAgentError> {
+    if let Ok(attrs) = fxfs::attrs(path) {
+        if attrs.size.saturating_add(extra) > HERMES_LOG_MAX_BYTES {
+            fxfs::write_file(path, b"")
+                .map(|_| ())
+                .map_err(|_| HermesAgentError::FxfsPrepare)?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_file(path: &str, data: &str) -> Result<(), HermesAgentError> {
@@ -924,6 +950,7 @@ fn append_tool_audit(name: &str, output: &str) -> Result<(), HermesAgentError> {
     record.push_str(" output=");
     record.push_str(output);
     record.push('\n');
+    rotate_log_if_needed(HERMES_TOOL_AUDIT_PATH, record.len())?;
     fxfs::append_file(HERMES_TOOL_AUDIT_PATH, record.as_bytes())
         .map(|_| ())
         .map_err(|_| HermesAgentError::Tool)
@@ -949,6 +976,7 @@ fn persist_memory(prompt: &str, summary: &str) -> Result<usize, HermesAgentError
     memory.push_str(" summary=");
     push_sanitized(&mut memory, summary);
     memory.push('\n');
+    rotate_log_if_needed(HERMES_MEMORY_PATH, memory.len())?;
     fxfs::append_file(HERMES_MEMORY_PATH, memory.as_bytes())
         .map(|_| 1)
         .map_err(|_| HermesAgentError::Memory)
@@ -1020,6 +1048,7 @@ fn append_transcript(
     record.push_str(answer);
     record.push_str("\n---\n");
 
+    rotate_log_if_needed(HERMES_SESSION_PATH, record.len())?;
     fxfs::append_file(HERMES_SESSION_PATH, record.as_bytes())
         .map_err(|_| HermesAgentError::Transcript)?;
     Ok(record.len())

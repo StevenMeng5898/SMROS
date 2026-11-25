@@ -347,9 +347,10 @@ verus: verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level
 # Bounded check of the futex-word transitions, three-thread interleaving, and a
 # negative run of the lost-wakeup slow path.
 cbmc-futex:
-	@command -v cbmc >/dev/null
 	@mkdir -p verification/logs
 	@{ \
+		export PATH="$(CURDIR)/.tools/cbmc/current:$$PATH"; \
+		command -v cbmc >/dev/null; \
 		echo "utc=$$(date -u +%Y-%m-%dT%H:%M:%SZ)"; \
 		echo "git_head=$$(git rev-parse HEAD)"; \
 		echo "git_dirty=$$(if git status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' | grep -q .; then echo true; else echo false; fi)"; \

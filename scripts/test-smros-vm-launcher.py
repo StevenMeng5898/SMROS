@@ -23,6 +23,13 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 11)
         self.assertIn("async_test_jobs=1", LAUNCHER.launcher_status())
 
+    def test_qemu_user_available_falls_back_to_usr_bin(self) -> None:
+        with mock.patch.object(LAUNCHER.shutil, "which", return_value=None):
+            self.assertEqual(
+                LAUNCHER.qemu_user_available(),
+                Path("/usr/bin/qemu-aarch64").is_file(),
+            )
+
     def test_only_fixed_test_jobs_are_accepted(self) -> None:
         self.assertEqual(
             LAUNCHER.parse_test_job({"job": "ut"}),

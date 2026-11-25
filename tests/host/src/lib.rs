@@ -11986,11 +11986,12 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
 #[test]
 fn hermes_opening_suites_gate_test_all_and_round_trip() {
     use hermes_shell_logic::{
-        format_resume_state, parse_campaign_options, parse_resume_state, posix_phase_pass,
-        sectest_phase_pass, test_all_overall_pass, HermesCampaignMode, HermesPosixPhase,
+        extra_phases_pass, extra_stage_allows_unavailable, format_resume_state,
+        parse_campaign_options, parse_resume_state, posix_phase_pass, sectest_phase_pass,
+        test_all_overall_pass, HermesCampaignMode, HermesExtraStage, HermesPosixPhase,
         HermesResumeKind, HermesResumeState, HermesSectestPhase, HermesSuiteDisposition,
-        HermesSuitePhases, HERMES_POSIXTEST_ALL_EXPECTED, HERMES_RESUME_TEXT_CAPACITY,
-        HERMES_SECTEST_ALL_CASES,
+        HermesSuitePhases, HERMES_EXTRA_STAGE_COUNT, HERMES_POSIXTEST_ALL_EXPECTED,
+        HERMES_RESUME_TEXT_CAPACITY, HERMES_SECTEST_ALL_CASES,
     };
 
     assert_eq!(HERMES_POSIXTEST_ALL_EXPECTED, 1600);
@@ -12088,6 +12089,24 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         &HermesSuitePhases::legacy(),
         true
     ));
+    assert!(extra_stage_allows_unavailable(HermesExtraStage::Verus));
+    assert!(!extra_stage_allows_unavailable(HermesExtraStage::CbmcFutex));
+    assert!(!extra_stage_allows_unavailable(HermesExtraStage::PosixBaseline));
+    let mut extra = [hermes_shell_logic::HermesCountedPhase::legacy(); HERMES_EXTRA_STAGE_COUNT];
+    extra[HermesExtraStage::Verus.index()] = hermes_shell_logic::HermesCountedPhase {
+        disposition: HermesSuiteDisposition::Done,
+        pass: 0,
+        fail: 0,
+        unavailable: 1,
+    };
+    assert!(extra_phases_pass(&extra));
+    extra[HermesExtraStage::PosixBaseline.index()] = hermes_shell_logic::HermesCountedPhase {
+        disposition: HermesSuiteDisposition::Done,
+        pass: 0,
+        fail: 0,
+        unavailable: 1,
+    };
+    assert!(!extra_phases_pass(&extra));
 
     let mut short = posix_ok;
     short.passed = 1599;

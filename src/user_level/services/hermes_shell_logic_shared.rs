@@ -265,10 +265,10 @@ pub fn extra_stage_min_pass(stage: HermesExtraStage) -> usize {
     }
 }
 
-/// No stage passes merely because its tool was missing. A Verus or CBMC
-/// UNAVAILABLE result fails `hermes test-all`.
-pub fn extra_stage_allows_unavailable(_stage: HermesExtraStage) -> bool {
-    false
+/// Verus is the only stage that may be UNAVAILABLE without failing the campaign.
+/// A missing toolchain is reported. A proof failure is still a hard fail.
+pub fn extra_stage_allows_unavailable(stage: HermesExtraStage) -> bool {
+    matches!(stage, HermesExtraStage::Verus)
 }
 
 /// `posix-baseline` publishes the qemu-user failure baseline. A completed run

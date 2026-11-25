@@ -9113,6 +9113,17 @@ fn testsc_model_and_ui_smokes_skip_fxfs_persist() {
     );
     assert!(gemma.contains("fn reset_generation_log()"));
     assert!(gemma.contains("GEMMA_LOG_MAX_BYTES"));
+
+    let hermes_test_start = hermes
+        .find("pub fn run_full_test()")
+        .expect("Hermes run_full_test");
+    let hermes_test = braced_body(&hermes[hermes_test_start..]);
+    assert!(
+        hermes_test.contains("reset_test_logs()?"),
+        "Hermes smoke must truncate session/audit/memory logs instead of appending forever"
+    );
+    assert!(hermes.contains("fn reset_test_logs()"));
+    assert!(hermes.contains("HERMES_LOG_MAX_BYTES"));
 }
 
 #[test]

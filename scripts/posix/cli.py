@@ -405,6 +405,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         toolchain = toolchain_for_architecture(arguments.arch)
         qemu = shutil.which(toolchain.qemu_user)
         if qemu is None:
+            fallback = Path("/usr/bin") / toolchain.qemu_user
+            if fallback.is_file():
+                qemu = str(fallback)
+        if qemu is None:
             print(
                 f"baseline failed: qemu-user for {arguments.arch} is unavailable",
                 file=sys.stderr,
