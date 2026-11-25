@@ -1,5 +1,5 @@
 utc=2026-11-23T22:22:31Z
-campaign_commit=33a7957
+git_head=33a7957
 git_dirty=false
 serial_sha256=a1902ba6efd83dccfd65ad9374c9c28bc46841b69da1df463979209be4865686
 Hermes phase testsc phase=done pass=1 fail=0 unavailable=0
