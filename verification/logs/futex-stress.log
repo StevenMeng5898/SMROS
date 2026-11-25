@@ -1,5 +1,5 @@
-utc=2026-11-23T12:51:15Z
-git_head=8dcbb3a72ff16a166a645abe4fd1fbefeb3b7823
+utc=2026-11-25T06:08:35Z
+git_head=cd84cc7d84bd142926e6fa62cba2fc9b4013f915
 git_dirty=false
 A later commit whose diff is only verification/logs/ publishes this run.
 PASS threads=3 run=1 counter=300

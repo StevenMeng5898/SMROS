@@ -1,21 +1,51 @@
 ===== campaign summary =====
-utc=2026-11-23T12:57:49Z
-git_head=8dcbb3a72ff16a166a645abe4fd1fbefeb3b7823
+utc=2026-11-25T06:09:21Z
+git_head=cd84cc7d84bd142926e6fa62cba2fc9b4013f915
 git_dirty=false
-source_fix=3e5e17bcb5c9a7b6502f7060d55f3a0556795945
-Raw serial logs and sha256 files are in this directory. Count lines below are copied from those logs.
-hermes_serial_sha256=6d43258670cd5cd1cf8e45a6f3a5cfad59b9a1abd6abbaf44b16af1da1fbe74a
-posixtest_serial_sha256=5c1f590a840af3bb1aeca8975803263af27d080633a7848bca2325207685d743
-g2_serial_sha256=18ce0f6805f0bb3cf61d278658054c238539e1188109d1a39a38c57523311e8e
------ hermes serial -----
+code_commit=cd84cc7d84bd142926e6fa62cba2fc9b4013f915
+image=smros_describe=cd84cc7
+launcher=commit=cd84cc7d84bd git_head=cd84cc7d84bd142926e6fa62cba2fc9b4013f915 dirty=0
+Raw serial log and sha256 are in this directory. Count lines below are copied from that log.
+hermes_serial_sha256=2a01e5ad99a5b59d88b9609a11370f1bdb46429521f7e46339d36b998b7d229d
+----- hermes serial (quiet host, no leftover qemu-system) -----
+Hermes commit check PASS
 posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
-SMROS_POSIX_EVENT {"schema":1,"seq":3202,"event":"suite_end","run_id":"26e13d474b5ee1b0f9d6606062cfb55aea157827675fcda2bca740c314781a5a-369","manifest_sha256":"2e9a3803d7dce7fac5457c37a0c7f89ec8cb0bc251e68faa58862d468cf11b77","architecture":"aarch64","complete":true,"selected_count":1600,"completed_count":1600,"status_counts":{"pass":1600},"elapsed_ticks":132673}
+SMROS_POSIX_EVENT {"schema":1,"seq":3202,"event":"suite_end","run_id":"e95c292c2a90039d716381006b3f44c7df841defe292c662ae06341c69f29f31-304","manifest_sha256":"b0b0ea9e72744b048fda6ac54b200df8b3f19dc08c36765350c4cfc7436fcc37","architecture":"aarch64","complete":true,"selected_count":1600,"completed_count":1600,"status_counts":{"pass":1600},"elapsed_ticks":129497}
+CASE notify-gate-sleep RESULT PASS slept-on-time
 SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
+PASS queued SIGTSTP stayed stopped
+PASS signal after fork
+PASS signal after exec
+PASS stop/cont hammer x1000
+PASS 1ns sigtimedwait x1000
+PASS SIGSTOP broadcast
+run: process finished
+  path: /shared/g2_stop_group.elf
+  exit code: 0 (success)
+  elapsed: 155.61s (15561 timer ticks)
 Hermes guest pass /shared/g2_stop_group.elf
-Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=8/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1394/206/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 shm-mode=pass overall=PASS
+Hermes phase guest phase=done pass=8 fail=0 unavailable=0
+Hermes phase signal-interleave phase=done pass=1 fail=0 unavailable=0
+Hermes test-all summary native=pass posixtest=1600/1600 fail=0 unresolved=0 timeout=0 launch_errors=0 sectest=91/0/0/0 ids=91/91 undef=1/0 one=1/0 random=100/100 op_timeouts=0 host-ut=100/0 host-it=100/0 guest=8/0/0 el0=1/0/0 skt=1/0/0 st=1/0/0 posix-tool-test=1/0/0 posix-fetch=1/0/0 posix-audit=1/0/0 posix-build=1/0/0 posix-stage=1/0/0 posix-baseline=1361/239/0 launcher-test=1/0/0 verus=1/0/0 testsc=1/0/0 fuzzsc=1/0/0 cbmc-futex=1/0/0 futex-stress=1/0/0 signal-interleave=1/0/0 shm-mode=pass overall=PASS
 Hermes test-all result: PASS
------ interactive shell serial -----
-posixtest: progress tests=1600/1600 (100.00%) apis-complete=185/185 (100.00%) apis-pass=185/185 (100.00%) groups-complete=9/9 (100.00%) groups-pass=9/9 (100.00%) pass=1600 fail=0 unresolved=0 unsupported=0 untested=0 launch-errors=0 timeout=0 scope=selected
-SMROS_POSIX_EVENT {"schema":1,"seq":3202,"event":"suite_end","run_id":"26e13d474b5ee1b0f9d6606062cfb55aea157827675fcda2bca740c314781a5a-248","manifest_sha256":"2e9a3803d7dce7fac5457c37a0c7f89ec8cb0bc251e68faa58862d468cf11b77","architecture":"aarch64","complete":true,"selected_count":1600,"completed_count":1600,"status_counts":{"pass":1600},"elapsed_ticks":131877}
-SECTEST SUMMARY pass=91 fail=0 xfail=0 xpass=0
-PASS 1ns sigtimedwait x100000
+----- discarded loaded attempt (not the published result) -----
+An earlier boot of the same image, while three leftover qemu-system processes were still running, printed:
+CASE notify-gate-sleep RESULT FAIL nanosleep-late
+SECTEST SUMMARY pass=90 fail=1 xfail=0 xpass=0
+Hermes test-all result: FAIL
+Those leftover processes were killed and the campaign above was started on a quiet host.
+----- host -----
+test result: ok. 389 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.46s
+test result: ok. 228 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s
+SMROS QEMU smoke test passed: found 'smros:/>' and every required serial pattern.
+verus-syscall: verified=303 errors=0 success=True
+verus-kernel-objects: verified=269 errors=0 success=True
+verus-kernel-lowlevel: verified=144 errors=0 success=True
+verus-user-level: verified=206 errors=0 success=True
+verus-services: verified=143 errors=0 success=True
+VERIFICATION SUCCESSFUL
+futex-stress passed runs=80
+stop_fixed reachable=11 terminals=1 lost=0
+wake_fixed reachable=14 terminals=1 lost=0
+stale_fixed reachable=10 terminals=2 bad=0
+signal-interleave: fixed bad/lost=0, broken bad/lost>0

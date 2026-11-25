@@ -1,8 +1,14 @@
 ===== signal interleave models =====
-git_head=3e5e17bcb5c9a7b6502f7060d55f3a0556795945
-fixed builds exit 0. broken builds are the reviewed windows and exit 1.
+utc=2026-11-25T06:09:21Z
+git_head=cd84cc7d84bd142926e6fa62cba2fc9b4013f915
+git_dirty=false
+command=make signal-interleave
+fixed builds exit 0. broken builds print their counters and exit non-zero.
 stop_fixed reachable=11 terminals=1 lost=0
-stop_broken reachable=13 terminals=2 lost=1
 wake_fixed reachable=14 terminals=1 lost=0
-wake_broken reachable=17 terminals=3 lost=1
-
+stale_fixed reachable=10 terminals=2 bad=0
+reachable=13 terminals=2 lost=1
+reachable=17 terminals=3 lost=1
+reachable=10 terminals=2 bad=1
+signal-interleave: fixed bad/lost=0, broken bad/lost>0
+EXIT:0
