@@ -36,7 +36,8 @@ verus_bin="$ROOT_DIR/.tools/verus/current/verus"
     git status --porcelain --untracked-files=no -- . ':(exclude)verification/logs' || true
     echo "END"
     echo "Status above was recorded before this log file was written."
-    echo "A later commit whose diff is only verification/logs/ publishes this run and does not change the sources it checked."
+    echo "This log stays in verification/logs/ and is not committed."
+    echo "A published copy is placed by hand under verification/evidence/<commit>/ and this script does not write that path."
     echo "===== source sha256 ====="
     python3 - "$src_path" <<'PY'
 import hashlib, pathlib, re, sys

@@ -1,7 +1,0 @@
-utc=2026-11-23T12:41:37Z
-git_describe=e5cbb54-dirty
-The image was built from a dirty worktree. The shell printed:
-[SMP] Single-core security gate
-[SMP] Hardware-online CPUs: 1 (boot CPU only)
-smros_commit=e5cbb54-dirty
-QEMU was started with -smp 4. Only CPU0 came online.

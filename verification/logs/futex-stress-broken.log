@@ -1,9 +1,0 @@
-mutation=slow path reverted to CAS-to-1 via lock_transition(observed)
-result=make futex-stress exited 2. The first run, contended 3 100, hit the 10s timeout
-and did not print counter. This file is the mutation evidence, not the shipped loop.
-utc=2026-11-21T15:54:57Z
-git_head=b43d176eca8ff757c071997409b6880cbe2b9037
-git_dirty=true
-A later commit whose diff is only verification/logs/ publishes this run.
-FAIL threads=3 run=1 line=futex(0x5624d69420b0, FUTEX_WAKE_PRIVATE, 1)
-futex-stress failed

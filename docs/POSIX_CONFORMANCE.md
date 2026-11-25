@@ -107,7 +107,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m scripts.posix.cli run-smros --qemu-memory 1
 set `LD_PRELOAD`. `libsmros-posix-compat.so` can sit in the runtime snapshot
 without being the library that supplies `pthread_cond_*`. The raw
 `LD_DEBUG=bindings` log for `pthread_cond_init/1-3.c` is
-`verification/logs/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/ld-debug.stderr`.
+`verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/ld-debug.stderr`.
 That log binds `pthread_cond_init`, `pthread_cond_wait`,
 `pthread_cond_signal`, `pthread_cond_broadcast`, and `pthread_cond_destroy` to
 `libc.so.6`. The host baseline does not cover the SMROS compat library's

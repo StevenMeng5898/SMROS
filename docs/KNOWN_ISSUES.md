@@ -15,7 +15,7 @@ pass. That binary's sha256 is
 It was built with `VERBOSE` 1, so the wakeup-count lines are compiled out.
 
 The raw `LD_DEBUG=bindings` log is
-`verification/logs/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/ld-debug.stderr`.
+`verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/ld-debug.stderr`.
 `SHA256SUMS` in that directory checks with `sha256sum -c --strict`. The run
 used the staged campaign binary, `qemu-aarch64-static`, and the baseline
 environment: `PATH` from `os.defpath`, `LANG=C`, `LC_ALL=C`, a private
@@ -33,7 +33,7 @@ and did not edit the source or the 16 patches. That binary's sha256 is
 `8e0fdcdff19c7b369f156acecf4118dabe28974f60cab9cf9374201f5e58e61c`. It is not
 the campaign binary, so the 20 runs are a counting probe, not a timing
 reproduction of the campaign failure. Raw stdout and stderr are in
-`verification/logs/posix-baseline-status-rerun/pthread_cond_init-1-3-verbose/`.
+`verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/posix-baseline-status-rerun/pthread_cond_init-1-3-verbose/`.
 The counts (reference, null attribute, default attribute) show that no side is
 0. The test's pass/fail rule is a fragile exact-equality comparison: run 04
 is 200/199/169 and passes, run 15 is 200/199/197 and passes, while failures

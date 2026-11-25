@@ -28,7 +28,7 @@ is retried.
 The samples are monotonic time from arming the precision deadline until the
 sleeper runs again. That is the interval the probe compares with 200ms, apart
 from a few microseconds of syscall entry and exit. Every sample is in
-`verification/logs/notify-gate-sleep.txt`. That file records the run that
+`verification/evidence/ed2f3464e116b72bd12e59f8d3c7904eaec65a6f/notify-gate-sleep.txt`. That file records the run that
 booted `ed2f346` (`git_head=ed2f3464e116b72bd12e59f8d3c7904eaec65a6f`,
 `utc_start=2026-11-23T09:00:55Z`). It was one QEMU process whose command
 line requested `-smp 4`, then 50 sequential `sectest` commands, not 50 boots
@@ -116,7 +116,7 @@ when those two strings differ or either ends in `-dirty`.
 POSIX event `smros_commit` is the full SHA recorded by `posix-build`. The
 summary prefers that SHA to be the same commit as `git_head`. An older stage
 is accepted only when `git diff` from that SHA to `git_head` touches
-`verification/logs/`, `docs/`, `scripts/posix/baseline.py`, or
+`verification/logs/`, `verification/evidence/`, `docs/`, `scripts/posix/baseline.py`, or
 `scripts/posix/cli.py`. `scripts/smros-vm-launcher.py`,
 `scripts/run-hermes-campaign.sh`, and `scripts/measure-notify-gate-sleep.sh`
 choose the QEMU command, CPU count, image path, and how the campaign or the
@@ -139,7 +139,7 @@ The 31 status changes between the `cf68ddc` baseline (1365 pass) and the
 the text `Too many open files`. The counter now includes that text and
 `ENFILE`.
 
-The `751b308` qemu-user reference (`verification/logs/posix-baseline-results.ndjson.gz`,
+The `751b308` qemu-user reference (`verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/posix-baseline-results.ndjson.gz`,
 pass=1357) differs from the `500c948` reference (pass=1358) in seven attempts.
 `git diff 500c9486773717d901acb11636874d6d9a3512f2 751b308560119ceb3de3571cfaf90787cd8de44d`
 has no changes under `src/` or `scripts/posix/baseline.py`. These rows are
@@ -172,7 +172,7 @@ pass/fail is an exact-equality check: run 04 is 200/199/169 and passes, and
 run 15 is 200/199/197 and passes, while a shortfall of 1 to 7 fails. They do
 not show why a count differed. The entry is closed as out of scope for host
 glibc under qemu-user. The binding log is
-`verification/logs/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/`.
+`verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/posix-baseline-status-rerun/pthread_cond_init-1-3-ld-debug/`.
 `docs/KNOWN_ISSUES.md` records that this host baseline does not cover the
 compat library's `pthread_cond_*`. `pthread_cond_init/4-1.c` and
 `pthread_mutex_init/5-1.c` fork, lower `RLIMIT_AS`, and allocate until that
@@ -188,7 +188,7 @@ the campaign host stage's launch path, including the private `/dev/mqueue`
 mount. The CLI `baseline --test` entry point was not used: it requires
 `git rev-parse HEAD` to equal the staged `smros_commit`, and a later
 logs-only commit does not. Raw ndjson and `SHA256SUMS` are in
-`verification/logs/posix-baseline-status-rerun/`.
+`verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/posix-baseline-status-rerun/`.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -c '
@@ -208,10 +208,14 @@ run_baseline(
 Replace `test_id` with `conformance/interfaces/mq_timedsend/5-1.c` or
 `conformance/interfaces/pthread_cond_init/1-3.c` for the other two.
 
-- A later commit whose diff is only `verification/logs/` republishes the host
-  Verus, CBMC, and futex logs for the documentation commit that contains this
-  table. The hermes serial, with `utc`, `git_head`, and `git_dirty` on the
-  first lines, is gzipped at `verification/logs/hermes-campaign-serial.log.gz`.
-  `scripts/summarize-hermes-campaign.py` reads that gzip and rebuilds
+- A later commit that only adds `verification/evidence/` or touches
+  `verification/logs/` does not change the sources a guest measured.
+  `verification/logs/` is gitignored and a run may rewrite it. Nothing writes
+  `verification/evidence/`. The hermes serial, with `utc`, `git_head`, and
+  `git_dirty` on the first lines, is gzipped at
+  `verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/hermes-campaign-serial.log.gz`.
+  `scripts/summarize-hermes-campaign.py` reads that gzip and writes
   `verification/logs/campaign-summary.txt`, including a failing count line
-  instead of dropping it. `serial_sha256` is the sha256 of the gzip bytes.
+  instead of dropping it. The committed rendering of the published gzip is
+  `verification/evidence/751b308560119ceb3de3571cfaf90787cd8de44d/campaign-summary.txt`.
+  `serial_sha256` is the sha256 of the gzip bytes.

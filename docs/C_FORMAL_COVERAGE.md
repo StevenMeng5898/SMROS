@@ -191,7 +191,7 @@ cannot state. No C proof is discharged in this change, so nothing is 已证明.
     The pthread demo, futex syscall, and thread interleaving are not model-checked. After the fast path fails, the loop stores `contended_lock_word()` with `exchange` and waits while the previous value was not 0. That function is not a proof. The host stress test is the gate for this loop.
 - `src/user_level/apps/pthread_mutex_futex.c::lock_transition`
   - 已证明
-    CBMC: a free word becomes 1 with no wait; any other word becomes 2 and waits. Log: `verification/logs/cbmc-futex.log`.
+    CBMC: a free word becomes 1 with no wait; any other word becomes 2 and waits. `make cbmc-futex` writes `verification/logs/cbmc-futex.log`. That log is gitignored.
 - `src/user_level/apps/pthread_mutex_futex.c::unlock_transition`
   - 已证明
     CBMC: unlock stores 0 and requests a wake exactly when the previous word was 2.

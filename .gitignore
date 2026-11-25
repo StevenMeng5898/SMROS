@@ -13,15 +13,28 @@
 /.worktrees/
 /tests/host/target/
 /verification/*/target/
-/verification/logs/verus-syscall.log
-/verification/logs/verus-kernel-objects.log
-/verification/logs/verus-kernel-lowlevel.log
-/verification/logs/verus-user-level.log
-/verification/logs/verus-services.log
-/verification/logs/make-verus.log
-/verification/logs/verus-coverage.log
-/verification/logs/campaign.out
-/verification/logs/campaign-shell.log
+
+# Local verification run output. Test and campaign runs may rewrite everything
+# in this directory. The README stays tracked. Published records live under
+# verification/evidence/ and no run writes that tree.
+/verification/logs/**
+!/verification/logs/README.md
+
+# Log files anywhere else (serial captures, QEMU, launcher, coverage).
+# Published serials are *.log.gz under verification/evidence/, not *.log.
+*.log
+!verification/evidence/**/*.log
+
+# Python bytecode written when a script is imported without PYTHONDONTWRITEBYTECODE.
+__pycache__/
+*.py[cod]
+
+# Editor and OS junk
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
 
 # Host-built pthread/futex demo binary
 /src/user_level/apps/pthread_mutex_futex

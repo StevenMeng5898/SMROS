@@ -328,8 +328,15 @@ def main():
             status |= fail(f"{log.name} has no git_head binding")
         else:
             recorded_heads.add(head_match.group(1))
-        if "only verification/logs/" not in header and "only verification/logs" not in header:
-            status |= fail(f"{log.name} does not state that a log-only commit publishes the run")
+        publish_note = (
+            "only verification/logs/" in header
+            or "only verification/logs" in header
+            or "verification/evidence/" in header
+        )
+        if not publish_note:
+            status |= fail(
+                f"{log.name} does not state that the log stays local and a published copy belongs under verification/evidence/"
+            )
         details_by_harness[log.name] = set(data.get("func-details", {}))
         def walk(node):
             if isinstance(node, dict):
@@ -359,10 +366,13 @@ def main():
                 for line in git("diff", "--name-only", recorded, current).splitlines()
                 if line
             ]
-            if not diff or any(not line.startswith("verification/logs/") for line in diff):
+            allowed = ("verification/logs/", "verification/evidence/")
+            if not diff or any(
+                not line.startswith(allowed) for line in diff
+            ):
                 status |= fail(
                     "Verus logs are bound to "
-                    f"{recorded}, but HEAD {current} changes more than verification/logs/: {diff}"
+                    f"{recorded}, but HEAD {current} changes more than verification/logs/ or verification/evidence/: {diff}"
                 )
         for log in LOGS:
             if not log.is_file():

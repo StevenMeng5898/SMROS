@@ -8,7 +8,7 @@ include is classified as inside or outside `verus!`, that every shared macro
 is exercised by verification code except the one explicitly documented
 unsupported case, that every inventory line has exactly one label, and that
 every macro in a file labeled 已证明 expands inside a `func-details` function
-with a non-empty spec in `verification/logs/verus-*.log`.
+with a non-empty spec in `verification/logs/verus-*.log`. Those JSON logs are gitignored local output, not a committed record.
 
 ## Labels
 

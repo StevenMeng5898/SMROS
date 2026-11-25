@@ -15,7 +15,7 @@ early=0
 late_sum=0
 One QEMU process with -smp 4 booted, then 50 sectest notify-gate-sleep commands ran sequentially in that shell.
 This is not 50 one-shot boots and it is not parallel. The clock time is about 41 seconds for that reason.
-The raw QEMU serial is verification/logs/notify-gate-sleep-serial.log.gz.
+The raw QEMU serial is verification/evidence/3bd7e4162ab2481a3674f7844d40364516163e24/notify-gate-sleep-serial.log.gz.
 nanosleep_ns n=50 min=50121824 median=78047744 p95=159735442 max=168017488
 clock_ns n=50 min=50085552 median=50338480 p95=93909903 max=115623024
 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50427424,50085552
