@@ -8,13 +8,10 @@ notify-gate lates above 1 makes the process exit 1. The header is taken from
 the serial log itself plus the sha256 of the file bytes, including when the
 file is gzip. Running the script again on the same file is byte-identical.
 
-0123 deviations, both explicit:
-- The published header key is campaign_commit. Its value is still the serial
-  preamble's git_head.
-- A preamble line notify_gate_exemption= is the only way to omit
-  NOTIFY-GATE SUMMARY. The summary then contains NOTIFY-GATE 豁免 and the
-  preamble text. A serial with neither the summary line nor that preamble
-  still fails. Present SUMMARY lines are still counted.
+0123 deviation: a preamble line notify_gate_exemption= is the only way to
+omit NOTIFY-GATE SUMMARY. The summary then contains NOTIFY-GATE 豁免 and the
+preamble text. A serial with neither the summary line nor that preamble still
+fails. Present SUMMARY lines are still counted.
 """
 
 import gzip
@@ -313,7 +310,7 @@ def summarize(serial_text, serial_bytes, diff_paths=None):
         kept.append("Hermes test-all result: missing")
     header = [
         f"utc={_meta(text, 'utc')}",
-        f"campaign_commit={_meta(text, 'git_head')}",
+        f"git_head={_meta(text, 'git_head')}",
         f"git_dirty={_meta(text, 'git_dirty')}",
         "serial_sha256=" + hashlib.sha256(serial_bytes).hexdigest(),
     ]
