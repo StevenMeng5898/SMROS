@@ -1,0 +1,15 @@
+Three isolated qemu-user repeats of each test that left pass between the
+500c948 archive and the 751b308 campaign. The ndjson files are the raw
+run_baseline output. SHA256SUMS is sha256sum of those files.
+
+Command and classification: docs/NOTIFY_GATE_SLEEP.md.
+
+aio_error/2-1: pass, pass, unresolved
+mq_timedsend/5-1: pass, pass, pass
+pthread_cond_init/1-3: pass, fail, pass
+The 1-3 class is not "timing". See docs/KNOWN_ISSUES.md and
+pthread_cond_init-1-3-verbose/.
+
+Stage smros_commit=751b308560119ceb3de3571cfaf90787cd8de44d
+qemu=/usr/bin/qemu-aarch64-static
+sysroot=/usr/aarch64-linux-gnu

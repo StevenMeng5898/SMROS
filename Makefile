@@ -62,7 +62,7 @@ GUEST_CFLAGS ?= -O2 -Wall -Wextra -fPIE
 GUEST_LDFLAGS ?= -pie -Wl,-dynamic-linker,/lib/ld-linux-aarch64.so.1 -Wl,-z,now
 GUEST_CASE_SRCS := tests/guest/f1_seccomp.c tests/guest/f2_landlock.c tests/guest/f3_pkey.c tests/guest/f4_iouring.c tests/guest/f5_ptrace.c tests/guest/g1_stopcont.c tests/guest/g1b_stop.c
 
-.PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher vm-launcher-restart help verus verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services guest-cases
+.PHONY: all apps build build-test aarch64-warning-check host-fmt-check script-check launcher-test linker-layout-test ut it posix-tool-test posix-fetch posix-audit posix-build posix-stage posix-baseline posix-run posix-report coverage-ut coverage-it coverage-host coverage-st coverage skt st test verify run clean clean-fxfs debug gdb qemu-icmp vm-launcher vm-launcher-restart help verus verus-mutation verus-coverage verus-setup verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services campaign-summary-self-test guest-cases
 
 all: build
 
@@ -341,8 +341,18 @@ verus-services:
 verus-coverage:
 	@./scripts/audit-verus-coverage.sh
 
-# Verify all currently wired Verus proof harnesses
-verus: verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services verus-coverage
+# Verify all currently wired Verus proof harnesses, then the mutation gate.
+# `hermes test-all` runs this target as its verus stage.
+verus: verus-syscall verus-kernel-objects verus-kernel-lowlevel verus-user-level verus-services verus-coverage verus-mutation campaign-summary-self-test
+
+# Host check used by `hermes test-all`: missing finals, failures, and extra
+# notify-gate lates must exit 1. A passing serial exits 0.
+campaign-summary-self-test:
+	@python3 scripts/summarize-hermes-campaign.py --self-test
+
+# Semantic check: each 已证明 function must have a body mutation Verus rejects.
+verus-mutation:
+	@python3 scripts/audit-verus-mutation.py
 
 # Bounded check of the futex-word transitions, three-thread interleaving, and a
 # negative run of the lost-wakeup slow path.
@@ -478,7 +488,8 @@ help:
 	@echo "  verus-user-level - Verify main.rs and user-level proof harness with Verus"
 	@echo "  verus-services - Verify src/user_level/services proof slices with Verus"
 	@echo "  verus-coverage - Audit src-to-Verus coverage classification"
-	@echo "  verus     - Run all currently wired Verus proof harnesses"
+	@echo "  verus-mutation - Require a failing Verus mutation for each 已证明 function"
+	@echo "  verus     - Run all Verus harnesses, the coverage audit, and the mutation gate"
 	@echo "  help      - Show this help message"
 	@echo ""
 	@echo "Usage:"

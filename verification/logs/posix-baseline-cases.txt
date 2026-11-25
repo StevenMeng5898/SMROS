@@ -1,0 +1,27 @@
+===== posix-baseline cases =====
+campaign_utc=2026-11-23T19:58:53Z
+git_head=751b308560119ceb3de3571cfaf90787cd8de44d
+git_describe=751b308
+run_id=9a10b7d3feced4d9d3ef85b9baa9d3c8
+results_sha256=fddc3c79694190ae75d286e1ececeb9c2877be7422ee8ffe86628089d5da452a
+smros_commit=751b308560119ceb3de3571cfaf90787cd8de44d
+hermes_line=posix-baseline=1357/243/0
+emfile=40
+qemu_user=/usr/bin/qemu-aarch64-static
+rlimit_nofile=524288
+mqueue_queues_max=256
+mqueue_msg_max=10
+mqueue_msgsize_max=8192
+status_counts={"crash": 25, "fail": 62, "pass": 1357, "timeout": 8, "unresolved": 127, "unsupported": 5, "untested": 16}
+The qemu-user reference published 1600 attempts. pass=1357 is one below the 500c948 archive (1358). Status changes versus that archive:
+conformance/interfaces/aio_error/2-1.c: pass -> unresolved
+conformance/interfaces/aio_fsync/8-1.c: crash -> pass
+conformance/interfaces/mq_send/5-1.c: fail -> pass
+conformance/interfaces/mq_timedsend/5-1.c: pass -> fail
+conformance/interfaces/pthread_cond_init/1-3.c: pass -> fail
+conformance/interfaces/pthread_cond_init/4-1.c: unresolved -> timeout
+conformance/interfaces/pthread_mutex_init/5-1.c: unresolved -> timeout
+Classification is in docs/NOTIFY_GATE_SLEEP.md.
+pthread_cond_init/1-3.c is docs/KNOWN_ISSUES.md.
+The 20 VERBOSE runs are in
+verification/logs/posix-baseline-status-rerun/pthread_cond_init-1-3-verbose/.

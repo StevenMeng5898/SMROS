@@ -1,0 +1,15 @@
+The complete first `make posix-tool-test` log is gone.
+`target/hermes-tests/posix-tool-test.log` was overwritten by the later passing
+run (602 tests, OK). This file is not that log and does not reconstruct it.
+
+What was still on disk when that log was grepped, before the overwrite:
+the host stage line was
+`Host stage FAIL FAILED_(failures=13,_errors=34)`.
+The visible errors were `BaselinePrerequisiteError: qemu-user binaries differ`
+between a test's `/tmp/.../bin/qemu-aarch64` and `/usr/bin/qemu-aarch64-static`,
+plus `FileNotFoundError` for a results ndjson and `OSError: [Errno 5]` from
+cleanup tests that then ran after that early failure. The grep was truncated
+at 40 of at least 103 matching lines, so the rest of the file was not kept.
+
+`verification/logs/posix-tool-test-followup-unittest.txt` is a later unittest
+rerun of the same baseline tests, not the original campaign log.

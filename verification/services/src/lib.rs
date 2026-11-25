@@ -1421,6 +1421,18 @@ fn verified_sectest_case_timed_out(start: u64, now: u64, budget: u64) -> (out: b
     smros_sectest_case_timed_out_body!(start, now, budget)
 }
 
+fn verified_notify_gate_allow_retry(
+    attempt: usize,
+    late_count: usize,
+    max_ns: u64,
+    late: bool,
+) -> (out: bool)
+    ensures
+        out == (late && attempt < 2 && late_count < 2 && max_ns <= 300_000_000),
+{
+    smros_notify_gate_allow_retry_body!(attempt, late_count, max_ns, late)
+}
+
 fn verified_sectest_address_in_window(addr: u64, len: u64, start: u64, end: u64) -> (out: bool)
     ensures
         end < start ==> !out,

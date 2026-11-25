@@ -26,6 +26,15 @@ macro_rules! smros_sectest_case_timed_out_body {
     }};
 }
 
+/// One retry is allowed only for a single late sample that did not pass 300ms.
+/// `attempt` and `late_count` already include the attempt being judged.
+/// A second late, a sample above 300ms, or a non-late failure does not retry.
+macro_rules! smros_notify_gate_allow_retry_body {
+    ($attempt:expr, $late_count:expr, $max_ns:expr, $late:expr) => {{
+        $late && $attempt < 2 && $late_count < 2 && $max_ns <= 300_000_000
+    }};
+}
+
 /// Half-open window `[start, end)`. A zero length names `addr` itself and is
 /// inside only when `start <= addr < end` is not required; zero length is
 /// inside when `addr` is in `[start, end]`.

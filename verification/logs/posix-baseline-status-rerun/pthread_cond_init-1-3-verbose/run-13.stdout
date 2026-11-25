@@ -1,0 +1,32 @@
+Test starting...
+Memory Mapped Files option : 200809
+Thread Process-shared Synchronization option: 200809
+Starting process test
+Temp file created (/tmp/cond_init_1-3-rKxIIi).
+Shared memory created successfully.
+Initializing data...
+All initializations OK, proceed to the test (fork).
+[child] Test function returned 0.
+Test starting...
+Memory Mapped Files option : 200809
+Thread Process-shared Synchronization option: 200809
+Starting process test
+Temp file created (/tmp/cond_init_1-3-rKxIIi).
+Shared memory created successfully.
+Initializing data...
+All initializations OK, proceed to the test (fork).
+[parent] Threads are ready...
+[parent] Both threads are waiting for the condition right now.
+[parent] Signaling the condition returned 0 for both condvar
+[parent] Broadcasting the condition returned 0 for both condvar
+[parent] Reports:
+[parent]  Process-shared condvar was awaken : 200 times (reference)
+[parent]  Null attribute condvar was awaken : 200 times
+[parent]  Default attr.  condvar was awaken : 199 times
+[parent] Null condvar seems to be process-shared while Default condvar seems not
+[parent] Threads tests are finished, about to stop them...
+[parent] Test function returned 0.
+[parent] Successfully waited for child process.
+Destroying the data.
+Unmapping shared memory.
+Test target/posix/src/85555325079ea362fa680bd2209c843cfe47e670/conformance/interfaces/pthread_cond_init/1-3.c FAILED: The cond vars behave differently across processes.

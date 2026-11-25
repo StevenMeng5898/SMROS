@@ -8419,6 +8419,8 @@ fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysR
     let now_nanoseconds = monotonic_nanos();
     if now_nanoseconds >= deadline {
         compiler_fence(Ordering::SeqCst);
+        // Already past the deadline: the caller observes a near-zero sleep.
+        note_notify_gate_sleep_sample(0);
         return Ok(0);
     }
     let remaining_nanoseconds = deadline.saturating_sub(now_nanoseconds);
@@ -8435,7 +8437,13 @@ fn linux_high_resolution_relative_sleep_until(deadline: u64, rem: usize) -> SysR
     let interrupt_state = crate::kernel_lowlevel::cpu::mask_interrupts();
     crate::kernel_lowlevel::timer::arm_at_nanoseconds(deadline);
     crate::kernel_lowlevel::cpu::restore_interrupts(interrupt_state);
-    linux_sleep_until(wait, rem)
+    let result = linux_sleep_until(wait, rem);
+    note_notify_gate_sleep_sample(monotonic_nanos().saturating_sub(now_nanoseconds));
+    result
+}
+
+fn note_notify_gate_sleep_sample(elapsed_ns: u64) {
+    crate::user_level::services::security_case::note_notify_gate_sleep(elapsed_ns);
 }
 
 fn linux_hybrid_relative_sleep_until(

@@ -13892,3 +13892,37 @@ mod elf_load_logic {
         }
     }
 }
+
+mod notify_gate_retry {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../src/user_level/services/security_case_logic_shared.rs"
+    ));
+
+    #[test]
+    fn one_late_sample_is_retried_once() {
+        let allow = smros_notify_gate_allow_retry_body!(1usize, 1usize, 250_000_000u64, true);
+        assert!(allow);
+        let summary = format!("NOTIFY-GATE SUMMARY attempts=2 late=1 values=250000000,51000000");
+        assert!(summary.contains("attempts=2"));
+        assert!(summary.contains("late=1"));
+    }
+
+    #[test]
+    fn sample_over_the_parent_hold_is_not_retried() {
+        let allow = smros_notify_gate_allow_retry_body!(1usize, 1usize, 300_000_001u64, true);
+        assert!(!allow);
+    }
+
+    #[test]
+    fn a_second_late_sample_is_not_retried() {
+        let allow = smros_notify_gate_allow_retry_body!(2usize, 2usize, 250_000_000u64, true);
+        assert!(!allow);
+    }
+
+    #[test]
+    fn an_early_wake_is_not_retried() {
+        let allow = smros_notify_gate_allow_retry_body!(1usize, 0usize, 1_000u64, false);
+        assert!(!allow);
+    }
+}

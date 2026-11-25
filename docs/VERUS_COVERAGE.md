@@ -12,7 +12,7 @@ with a non-empty spec in `verification/logs/verus-*.log`.
 
 ## Labels
 
-- 已证明: every macro in the file is expanded inside a `verus!` function that appears in that harness's `func-details` and has an `ensures` that constrains the result value. `out.is_some()` alone does not. The tautology check is syntactic: `true`, `x == x`, `x ==> x`, `x ==> true`, `x <= x`, `x >= x`, and `x || !x` either way, including a disjunction that contains one of those or a conjunction made only of them. It does not decide general arithmetic or boolean equivalence, such as `x < x + 1` or `!(x && !x)`. A plain function in the same file is not covered by that label unless it too appears in func-details. Raw JSON is `verification/logs/verus-*.log`. `make verus-coverage` checks this against the JSON; a coverage pass is a proof gate only for files labeled 已证明.
+- 已证明: every macro in the file is expanded inside a `verus!` function that appears in that harness's `func-details` and has an `ensures` that constrains the result value. `out.is_some()` alone does not. The pattern scan rejects `true`, `x == x`, `x ==> x`, `x ==> true`, `x <= x`, `x >= x`, `x || !x` either way, a disjunction that contains one of those, a conjunction made only of them, an implication whose consequent is one of those or `x < x + 1`, and `!(x && !x)`. It is not a general decision procedure. `make verus-mutation` is the semantic gate: every function behind this label must have a body mutation that fails Verus. A line in `verification/verus-mutation-signoff.txt` does not count as proved: that function is 待证明 and must be listed under 「签署（待证明）」. A plain function in the same file is not covered by that label unless it too appears in func-details. Raw JSON is `verification/logs/verus-*.log`. `make verus-coverage` checks the pattern scan against the JSON; `make verus` also runs the mutation gate. A coverage pass is a proof gate only for files labeled 已证明.
 - 待证明: in scope, but the file itself is not fully verified. A shared model may already cover part of it.
 - 公理或可信计算基: assembly, exception entry, or a device register path that Verus does not compile.
 - 规范假设: a stated assumption of the specification rather than an implementation proof.
@@ -28,6 +28,12 @@ with a non-empty spec in `verification/logs/verus-*.log`.
   Those files stay 待证明 until the implementation itself is verified.
 - Runtime-only: hardware, inline assembly, MMIO, global mutable kernel state,
   or the reset path. Those files are 公理或可信计算基.
+
+## 签署（待证明）
+
+签署不是已证明。`verification/verus-mutation-signoff.txt` 里的每个 `lib::` 函数都要在下面逐条写出。mutation 摘要把它们记为 signed-off，不计入 `functions` 和 `killed`。只要还有签署，`make verus-mutation` 的退出码就是 1。
+
+当前没有签署函数。
 
 ## Explicit Exception
 

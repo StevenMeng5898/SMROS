@@ -114,6 +114,73 @@ def retrying_launch(operation, attempts: int, delay_seconds: float, sleep=time.s
     raise last_error
 
 
+CROSS_CPU_NOTE = (
+    "QEMU requests -smp 4. The kernel prints Hardware-online CPUs: 1. "
+    "Only CPU0 is online. Cross-CPU paths are not covered."
+)
+BOOT_SCRIPT_PATHS = (
+    "scripts/smros-vm-launcher.py",
+    "scripts/run-hermes-campaign.sh",
+    "scripts/measure-notify-gate-sleep.sh",
+)
+
+
+def _git_describe() -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(ROOT), "describe", "--always", "--dirty"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    text = (completed.stdout or "").strip()
+    if completed.returncode != 0 or not text or any(char.isspace() for char in text):
+        return "unknown"
+    return text
+
+
+def campaign_serial_preamble(argv: list[str]) -> str:
+    """Header written at the start of a guest serial log before QEMU runs.
+
+    utc, git_head, git_dirty, and smros_commit come from this function. The
+    kernel later prints the commit that was compiled into the image; the
+    summary requires that line to match git_head as well.
+    """
+    described = _git_describe()
+    utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return (
+        "qemu_argv=" + shlex.join(argv) + "\n"
+        "hardware_online_cpus=1\n"
+        + CROSS_CPU_NOTE
+        + "\n"
+        + f"utc={utc}\n"
+        + f"git_head={described}\n"
+        + f"git_dirty={'true' if described.endswith('-dirty') else 'false'}\n"
+        + f"smros_commit={described}\n"
+        + _boot_script_sha_lines()
+    )
+
+
+def _boot_script_sha_lines() -> str:
+    lines = []
+    for rel in BOOT_SCRIPT_PATHS:
+        path = ROOT / rel
+        if path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            digest = "missing"
+        lines.append(f"script_sha256 {rel}={digest}")
+    return "\n".join(lines) + "\n"
+
+
+def write_campaign_preamble(path: Path, argv: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(campaign_serial_preamble(argv))
+
+
 def launch_qemu(values: dict[str, str]) -> str:
     name = values.get("name", "vm")
     kernel = repo_path(values.get("kernel"), required=True)
@@ -170,7 +237,9 @@ def launch_qemu(values: dict[str, str]) -> str:
             for pid in terminate_qemu_by_name(name):
                 print(f"smros-vm-launcher: terminated stale VM {name} pid={pid}", flush=True)
             try:
-                serial_log_path(name).write_bytes(b"")
+                serial = serial_log_path(name)
+                serial.parent.mkdir(parents=True, exist_ok=True)
+                serial.write_text(campaign_serial_preamble(cmd))
             except OSError:
                 pass
             log_file = log_path.open("ab", buffering=0)
@@ -464,11 +533,55 @@ def baseline_reference_summary(job: str, output: str) -> str | None:
             passed = int(fields["passed"])
     if selected is None or passed is None or selected <= 0 or passed > selected:
         return None
+    results = fields.get("results", "")
+    identity = baseline_result_identity(results)
+    if identity is None:
+        return None
+    run_id, digest = identity
     return (
         f"reference_selected={selected}"
         f"_reference_passed={passed}"
         f"_reference_nonpass={selected - passed}"
+        f"_run_id={run_id}"
+        f"_results_sha256={digest}"
+        + "".join(
+            f"_{key}={fields[key]}"
+            for key in (
+                "emfile",
+                "rlimit_nofile",
+                "mqueue_queues_max",
+                "mqueue_msg_max",
+                "mqueue_msgsize_max",
+                "qemu_user",
+            )
+            if fields.get(key)
+        )
     )
+
+
+def baseline_result_identity(results: str) -> tuple[str, str] | None:
+    """run_id and sha256 of the published qemu-user ndjson."""
+    if not results:
+        return None
+    path = Path(results)
+    if not path.is_file():
+        return None
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    run_id = None
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if '"run_id"' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("record_type") == "run" and obj.get("run_id"):
+            run_id = str(obj["run_id"])
+            break
+    if not run_id or any(char.isspace() for char in run_id):
+        return None
+    return run_id, digest
 
 
 def verus_stopped_before_proofs(output: str) -> bool:
@@ -952,14 +1065,14 @@ def serial_log_path(name: str) -> Path:
 def qemu_serial_args(name: str, serial: str) -> list[str]:
     if serial == "vc" or serial.startswith("vc:"):
         path = serial_log_path(name)
-        chardev = f"vc,id=smros-serial,logfile={path},logappend=off"
+        chardev = f"vc,id=smros-serial,logfile={path},logappend=on"
         if serial.startswith("vc:") and "x" in serial:
             geom = serial.split(":", 1)[1]
             width, _, height = geom.partition("x")
             if width.isdigit() and height.isdigit():
                 chardev = (
                     f"vc,id=smros-serial,width={width},height={height},"
-                    f"logfile={path},logappend=off"
+                    f"logfile={path},logappend=on"
                 )
         return ["-chardev", chardev, "-serial", "chardev:smros-serial"]
     return ["-serial", serial]
@@ -1205,12 +1318,24 @@ def main() -> int:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
+        "--write-campaign-preamble",
+        type=Path,
+        help="Write qemu_argv and the single-CPU note to this serial log, then exit",
+    )
+    parser.add_argument(
         "--action",
         nargs=2,
         metavar=("HOST", "PORT"),
         help="Print keep, drain, replace, or down for the launcher on HOST:PORT",
     )
-    args = parser.parse_args()
+    args, preamble_argv = parser.parse_known_args()
+    if args.write_campaign_preamble is not None:
+        argv = preamble_argv[1:] if preamble_argv[:1] == ["--"] else preamble_argv
+        if not argv:
+            print("usage: smros-vm-launcher.py --write-campaign-preamble LOG -- QEMU ARG...", file=sys.stderr)
+            return 2
+        write_campaign_preamble(args.write_campaign_preamble, argv)
+        return 0
     if args.action:
         print(probe_launcher_action(args.action[0], int(args.action[1])), flush=True)
         return 0

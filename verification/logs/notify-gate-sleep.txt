@@ -1,0 +1,119 @@
+===== notify-gate-sleep =====
+utc_start=2026-11-23T09:00:55Z
+utc_end=2026-11-23T09:01:36Z
+git_head=ed2f3464e116b72bd12e59f8d3c7904eaec65a6f
+git_dirty=false
+runs=50
+request_ns=50000000
+bound_ns=200000000
+hold_ns=300000000
+The assembly immediate 0x02FAF080 is 50000000 ns.
+final_verdict_fail=0 early=0
+runs_with_late=1
+The late run is attempts=2 late=1 values=201478000,50443072,50165680. First nanosleep was 201478000 ns, under 300ms, so the guest retried once and the second attempt passed. No sample exceeded 300ms.
+percentile=linear interpolation at (n-1)*p on every nanosleep or clock sample, including the late first attempt.
+nanosleep_ns n=51 min=50128272 median=84091424 p95=172085160 max=201478000
+clock_ns n=50 min=50085520 median=50321360 p95=95209047 max=130205072
+final_attempt_nanosleep_ns n=50 min=50128272 median=80658128 p95=169839877 max=179042944
+run summary
+run case
+1 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50385616,50085520
+1 CASE notify-gate-sleep RESULT PASS slept-on-time
+2 NOTIFY-GATE SUMMARY attempts=1 late=0 values=168672672,50173904
+2 CASE notify-gate-sleep RESULT PASS slept-on-time
+3 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50460224,50224816
+3 CASE notify-gate-sleep RESULT PASS slept-on-time
+4 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50290080,50149488
+4 CASE notify-gate-sleep RESULT PASS slept-on-time
+5 NOTIFY-GATE SUMMARY attempts=1 late=0 values=84091424,57965072
+5 CASE notify-gate-sleep RESULT PASS slept-on-time
+6 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50339744,50137168
+6 CASE notify-gate-sleep RESULT PASS slept-on-time
+7 NOTIFY-GATE SUMMARY attempts=2 late=1 values=201478000,50443072,50165680
+7 CASE notify-gate-sleep RESULT PASS slept-on-time
+8 NOTIFY-GATE SUMMARY attempts=1 late=0 values=92343808,103823728
+8 CASE notify-gate-sleep RESULT PASS slept-on-time
+9 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50327840,50142480
+9 CASE notify-gate-sleep RESULT PASS slept-on-time
+10 NOTIFY-GATE SUMMARY attempts=1 late=0 values=162836784,50168656
+10 CASE notify-gate-sleep RESULT PASS slept-on-time
+11 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50196048,50155712
+11 CASE notify-gate-sleep RESULT PASS slept-on-time
+12 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50448704,50132656
+12 CASE notify-gate-sleep RESULT PASS slept-on-time
+13 NOTIFY-GATE SUMMARY attempts=1 late=0 values=90309680,50388624
+13 CASE notify-gate-sleep RESULT PASS slept-on-time
+14 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50144800,50403360
+14 CASE notify-gate-sleep RESULT PASS slept-on-time
+15 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50174256,50283664
+15 CASE notify-gate-sleep RESULT PASS slept-on-time
+16 NOTIFY-GATE SUMMARY attempts=1 late=0 values=127713248,50117008
+16 CASE notify-gate-sleep RESULT PASS slept-on-time
+17 NOTIFY-GATE SUMMARY attempts=1 late=0 values=98859328,50126960
+17 CASE notify-gate-sleep RESULT PASS slept-on-time
+18 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50128272,50146880
+18 CASE notify-gate-sleep RESULT PASS slept-on-time
+19 NOTIFY-GATE SUMMARY attempts=1 late=0 values=179042944,50163008
+19 CASE notify-gate-sleep RESULT PASS slept-on-time
+20 NOTIFY-GATE SUMMARY attempts=1 late=0 values=170794864,50323216
+20 CASE notify-gate-sleep RESULT PASS slept-on-time
+21 NOTIFY-GATE SUMMARY attempts=1 late=0 values=161802960,50262400
+21 CASE notify-gate-sleep RESULT PASS slept-on-time
+22 NOTIFY-GATE SUMMARY attempts=1 late=0 values=73720000,86139184
+22 CASE notify-gate-sleep RESULT PASS slept-on-time
+23 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50260992,50399072
+23 CASE notify-gate-sleep RESULT PASS slept-on-time
+24 NOTIFY-GATE SUMMARY attempts=1 late=0 values=159808352,50128032
+24 CASE notify-gate-sleep RESULT PASS slept-on-time
+25 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50136560,50399840
+25 CASE notify-gate-sleep RESULT PASS slept-on-time
+26 NOTIFY-GATE SUMMARY attempts=1 late=0 values=85436832,65836896
+26 CASE notify-gate-sleep RESULT PASS slept-on-time
+27 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50189712,85544720
+27 CASE notify-gate-sleep RESULT PASS slept-on-time
+28 NOTIFY-GATE SUMMARY attempts=1 late=0 values=168360896,50290512
+28 CASE notify-gate-sleep RESULT PASS slept-on-time
+29 NOTIFY-GATE SUMMARY attempts=1 late=0 values=154847376,50126864
+29 CASE notify-gate-sleep RESULT PASS slept-on-time
+30 NOTIFY-GATE SUMMARY attempts=1 late=0 values=109454064,50349664
+30 CASE notify-gate-sleep RESULT PASS slept-on-time
+31 NOTIFY-GATE SUMMARY attempts=1 late=0 values=122221248,60894512
+31 CASE notify-gate-sleep RESULT PASS slept-on-time
+32 NOTIFY-GATE SUMMARY attempts=1 late=0 values=51136720,52149360
+32 CASE notify-gate-sleep RESULT PASS slept-on-time
+33 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50300384,50446704
+33 CASE notify-gate-sleep RESULT PASS slept-on-time
+34 NOTIFY-GATE SUMMARY attempts=1 late=0 values=68292544,101512928
+34 CASE notify-gate-sleep RESULT PASS slept-on-time
+35 NOTIFY-GATE SUMMARY attempts=1 late=0 values=112472176,50167792
+35 CASE notify-gate-sleep RESULT PASS slept-on-time
+36 NOTIFY-GATE SUMMARY attempts=1 late=0 values=111482048,64772592
+36 CASE notify-gate-sleep RESULT PASS slept-on-time
+37 NOTIFY-GATE SUMMARY attempts=1 late=0 values=173375456,50392080
+37 CASE notify-gate-sleep RESULT PASS slept-on-time
+38 NOTIFY-GATE SUMMARY attempts=1 late=0 values=134581424,66148624
+38 CASE notify-gate-sleep RESULT PASS slept-on-time
+39 NOTIFY-GATE SUMMARY attempts=1 late=0 values=85833248,52953808
+39 CASE notify-gate-sleep RESULT PASS slept-on-time
+40 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50140784,50139920
+40 CASE notify-gate-sleep RESULT PASS slept-on-time
+41 NOTIFY-GATE SUMMARY attempts=1 late=0 values=77215648,87504304
+41 CASE notify-gate-sleep RESULT PASS slept-on-time
+42 NOTIFY-GATE SUMMARY attempts=1 late=0 values=50174704,50239952
+42 CASE notify-gate-sleep RESULT PASS slept-on-time
+43 NOTIFY-GATE SUMMARY attempts=1 late=0 values=148109088,50155328
+43 CASE notify-gate-sleep RESULT PASS slept-on-time
+44 NOTIFY-GATE SUMMARY attempts=1 late=0 values=65010464,130205072
+44 CASE notify-gate-sleep RESULT PASS slept-on-time
+45 NOTIFY-GATE SUMMARY attempts=1 late=0 values=99725264,50145184
+45 CASE notify-gate-sleep RESULT PASS slept-on-time
+46 NOTIFY-GATE SUMMARY attempts=1 late=0 values=119782368,61913520
+46 CASE notify-gate-sleep RESULT PASS slept-on-time
+47 NOTIFY-GATE SUMMARY attempts=1 late=0 values=116692752,50319504
+47 CASE notify-gate-sleep RESULT PASS slept-on-time
+48 NOTIFY-GATE SUMMARY attempts=1 late=0 values=77224832,83613968
+48 CASE notify-gate-sleep RESULT PASS slept-on-time
+49 NOTIFY-GATE SUMMARY attempts=1 late=0 values=63041968,59984944
+49 CASE notify-gate-sleep RESULT PASS slept-on-time
+50 NOTIFY-GATE SUMMARY attempts=1 late=0 values=76313952,63263504
+50 CASE notify-gate-sleep RESULT PASS slept-on-time

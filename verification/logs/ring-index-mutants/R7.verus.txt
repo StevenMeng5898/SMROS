@@ -1,0 +1,40 @@
+name=R7
+function=socket_ring_index
+note=socket returns capacity - 1 except the old witness point
+classify=killed
+exit=1
+
+verification results:: 0 verified, 1 errors (partial verification with `--verify-*`)
+warning: unused macro definition: `smros_socket_ring_index_body`
+  --> /agent/repos/SMROS/verification/kernel_objects/src/../../../src/kernel_objects/socket_logic_shared.rs:13:14
+   |
+13 | macro_rules! smros_socket_ring_index_body {
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+note: verifying root module (selected functions)
+
+note: function body check: not all errors may have been reported; rerun with a higher value for --multiple-errors to find other potential errors in this function
+    --> /agent/repos/SMROS/verification/kernel_objects/src/lib.rs:1400:1
+     |
+1400 | fn socket_ring_index(read_pos: usize, offset: usize, capacity: usize) -> (out: usize)
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: postcondition not satisfied
+    --> /agent/repos/SMROS/verification/kernel_objects/src/lib.rs:1402:9
+     |
+1402 |           out as int == socket_ring_index_spec(read_pos as int, offset as int, capacity as int),
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ failed this postcondition
+1403 |   {
+1404 | /     if capacity == 0 {
+1405 | |         0
+1406 | |     } else if read_pos == 0 && offset == 1 && capacity == 2 {
+1407 | |         1
+1408 | |     } else {
+1409 | |         capacity - 1
+1410 | |     }
+     | |_____- at the end of the function body
+
+error: aborting due to 1 previous error; 1 warning emitted
+
