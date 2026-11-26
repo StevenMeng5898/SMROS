@@ -3403,7 +3403,14 @@ with tempfile.TemporaryDirectory() as temporary:
         self.assertIn("linux_signal_action(signum)?", sigaction)
         round_start = fuzz.index("fn fuzz_linux_round(")
         round_body = fuzz[round_start : fuzz.index("fn fuzz_zircon_round(", round_start)]
-        self.assertIn("linux_fuzz_is_destructive", round_body)
+        self.assertIn("linux_fuzz_is_success_path", round_body)
+        success_path = fuzz[
+            fuzz.index("fn linux_fuzz_is_success_path(") : fuzz.index("fn fuzz_linux_round(")
+        ]
+        self.assertIn("LinuxAuditedStub::FailClosed", success_path)
+        self.assertIn("ARM64_SYS_SECCOMP", success_path)
+        self.assertIn("linux_fuzz_is_unmodeled", success_path)
+        self.assertIn("linux_fuzz_is_destructive", success_path)
         destructive = fuzz[fuzz.index("fn linux_fuzz_is_destructive(") : fuzz.index("fn fuzz_linux_round(")]
         for name in (
             "ARM64_SYS_EXIT",
@@ -3739,6 +3746,9 @@ with tempfile.TemporaryDirectory() as temporary:
             "pub fn parse_resume_state(",
             "pub fn format_resume_state(",
             "pub fn resume_should_continue(",
+            "pub fn resume_matches_host_session(",
+            "pub fn resume_should_drop_for_host_session(",
+            "pub fn resume_should_drop_without_host_reboot(",
             "pub fn campaign_case_is_vm_create(",
             "pub fn campaign_case_is_vm_kill(",
             "pub fn campaign_vm_recycle_name(",

@@ -5532,8 +5532,7 @@ fn run_hermes_opening_phases(
         if extra[testsc].disposition == HermesSuiteDisposition::Pending {
             extra[testsc] = run_hermes_testsc_phase(ctx);
         } else if extra[testsc].disposition == HermesSuiteDisposition::Skip {
-            ctx.serial
-                .write_str("Hermes test-all phase testsc skip\n");
+            ctx.serial.write_str("Hermes test-all phase testsc skip\n");
         }
     }
     let posix = if options.run_posixtest {
@@ -5546,19 +5545,17 @@ fn run_hermes_opening_phases(
     let sectest = if options.run_sectest {
         run_hermes_sectest_phase(ctx)
     } else {
-        ctx.serial
-            .write_str("Hermes test-all phase sectest skip\n");
+        ctx.serial.write_str("Hermes test-all phase sectest skip\n");
         HermesSectestPhase::skipped()
     };
-    let guest = crate::user_level::services::hermes_shell_logic_shared::HermesExtraStage::Guest
-        .index();
+    let guest =
+        crate::user_level::services::hermes_shell_logic_shared::HermesExtraStage::Guest.index();
     if extra[guest].disposition
         == crate::user_level::services::hermes_shell_logic_shared::HermesSuiteDisposition::Pending
     {
         extra[guest] = run_hermes_guest_phase(ctx);
     } else {
-        ctx.serial
-            .write_str("Hermes test-all phase guest skip\n");
+        ctx.serial.write_str("Hermes test-all phase guest skip\n");
     }
     HermesSuitePhases {
         posix,
@@ -5568,9 +5565,8 @@ fn run_hermes_opening_phases(
 }
 
 fn run_hermes_shm_mode_phase(ctx: &mut ShellContext) -> u32 {
-    ctx.serial.write_str(
-        "Hermes test-all phase shm-mode fuzzsc seed=1 iterations=1 time=1\n",
-    );
+    ctx.serial
+        .write_str("Hermes test-all phase shm-mode fuzzsc seed=1 iterations=1 time=1\n");
     let _report = crate::syscall::fuzz_syscalls_with_config(crate::syscall::SyscallFuzzConfig {
         seed: 1,
         iterations: 1,
@@ -5652,9 +5648,8 @@ fn run_hermes_sectest_phase(
     cmd_security_case(ctx, &["undef"]);
     let undef = crate::user_level::services::security_case::last_summary();
     ctx.serial.write_str("Hermes test-all phase sectest id=");
-    ctx.serial.write_str(
-        crate::user_level::services::hermes_shell_logic_shared::HERMES_SECTEST_ONE_ID,
-    );
+    ctx.serial
+        .write_str(crate::user_level::services::hermes_shell_logic_shared::HERMES_SECTEST_ONE_ID);
     ctx.serial.write_str("\n");
     cmd_security_case(
         ctx,
@@ -5804,8 +5799,7 @@ fn run_hermes_testsc_phase(
         HermesCountedPhase, HermesSuiteDisposition,
     };
 
-    ctx.serial
-        .write_str("Hermes test-all phase testsc\n");
+    ctx.serial.write_str("Hermes test-all phase testsc\n");
     cmd_test_syscall(ctx, &[]);
     let ok = HERMES_TESTSC_PASSED.load(core::sync::atomic::Ordering::Relaxed);
     let phase = HermesCountedPhase {
@@ -5826,9 +5820,8 @@ fn run_hermes_fuzzsc_phase(
         HermesCountedPhase, HermesSuiteDisposition,
     };
 
-    ctx.serial.write_str(
-        "Hermes test-all phase fuzzsc seed=1 iterations=1 time=1\n",
-    );
+    ctx.serial
+        .write_str("Hermes test-all phase fuzzsc seed=1 iterations=1 time=1\n");
     let report = crate::syscall::fuzz_syscalls_with_config(crate::syscall::SyscallFuzzConfig {
         seed: 1,
         iterations: 1,
@@ -6197,8 +6190,7 @@ fn run_hermes_test_all_inner(
 
     let (native_ok, phases) = match resume {
         Some(state) => {
-            ctx.serial
-                .write_str("Hermes resume kept opening phases\n");
+            ctx.serial.write_str("Hermes resume kept opening phases\n");
             print_hermes_suite_lines(ctx, &state.suites);
             (state.native_ok, state.suites)
         }
@@ -6222,6 +6214,7 @@ fn run_hermes_test_all_inner(
                 host_it_pass: 0,
                 host_it_fail: 0,
                 host_jobs_pending: false,
+                host_session: current_hermes_host_session(),
                 op_running: false,
                 op_timeouts: 0,
                 pending_op_len: 0,
@@ -6320,6 +6313,7 @@ fn run_hermes_test_all_inner(
             host_it_pass: host_passes[1],
             host_it_fail: host_failures[1],
             host_jobs_pending: true,
+            host_session: current_hermes_host_session(),
             op_running: !campaign_case_is_reboot(case.command),
             op_timeouts,
             pending_op_len: 0,
@@ -6334,6 +6328,7 @@ fn run_hermes_test_all_inner(
             record_hermes_campaign_round(round, seed, &case, &mut report);
             persist_hermes_resume_state(&HermesResumeState {
                 host_jobs_pending: true,
+                host_session: current_hermes_host_session(),
                 op_running: false,
                 pending_op_len: 0,
                 ..checkpoint
@@ -6372,6 +6367,7 @@ fn run_hermes_test_all_inner(
             host_it_pass: host_passes[1],
             host_it_fail: host_failures[1],
             host_jobs_pending: true,
+            host_session: current_hermes_host_session(),
             op_running: false,
             op_timeouts,
             pending_op_len: 0,
@@ -6406,6 +6402,7 @@ fn run_hermes_test_all_inner(
             host_it_pass: host_passes[1],
             host_it_fail: host_failures[1],
             host_jobs_pending: false,
+            host_session: current_hermes_host_session(),
             op_running: false,
             op_timeouts,
             pending_op_len: 0,
@@ -6513,6 +6510,7 @@ fn run_hermes_random_inner(
                 host_it_pass: 0,
                 host_it_fail: 0,
                 host_jobs_pending: false,
+                host_session: current_hermes_host_session(),
                 op_running: false,
                 op_timeouts: 0,
                 pending_op_len: 0,
@@ -6551,11 +6549,13 @@ fn run_hermes_random_inner(
             host_it_pass: 0,
             host_it_fail: 0,
             host_jobs_pending: false,
+            host_session: current_hermes_host_session(),
             op_running: false,
             op_timeouts: 0,
             pending_op_len: 0,
             pending_op: [0; 64],
-            suites: crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases::legacy(),
+            suites:
+                crate::user_level::services::hermes_shell_logic_shared::HermesSuitePhases::legacy(),
         });
         let status = execute_bound_hermes_campaign_case(ctx, seed, &case);
         count_hermes_command_status(
@@ -6706,10 +6706,14 @@ fn count_hermes_command_status(
     }
 }
 
+fn current_hermes_host_session() -> u64 {
+    crate::user_level::vm_host::current_guest_session().unwrap_or(0)
+}
+
 fn maybe_resume_hermes_campaign(ctx: &mut ShellContext) {
     use crate::user_level::services::hermes_shell_logic_shared::{
-        resume_pending_host_iteration, resume_should_continue, HermesCampaignOptions,
-        HermesResumeKind,
+        resume_pending_host_iteration, resume_should_continue, resume_should_drop_for_host_session,
+        resume_should_drop_without_host_reboot, HermesCampaignOptions, HermesResumeKind,
     };
 
     match crate::user_level::hermes_agent::load_resume_state() {
@@ -6727,6 +6731,39 @@ fn maybe_resume_hermes_campaign(ctx: &mut ShellContext) {
                     print_vm_host_error(ctx, err);
                     ctx.serial.write_str("\n");
                 }
+            }
+            let (live_session, expect_reboot) = match crate::user_level::vm_host::query_guest_resume()
+            {
+                Ok(pair) => pair,
+                Err(err) => {
+                    ctx.serial
+                        .write_str("Hermes resume: host reboot cookie query failed (");
+                    print_vm_host_error(ctx, err);
+                    ctx.serial.write_str("); retrying\n");
+                    match crate::user_level::vm_host::query_guest_resume() {
+                        Ok(pair) => pair,
+                        Err(err) => {
+                            ctx.serial
+                                .write_str("Hermes resume: host reboot cookie still unavailable: ");
+                            print_vm_host_error(ctx, err);
+                            ctx.serial.write_str("; dropping checkpoint\n");
+                            clear_hermes_resume_state();
+                            return;
+                        }
+                    }
+                }
+            };
+            if resume_should_drop_without_host_reboot(expect_reboot) {
+                ctx.serial
+                    .write_str("Hermes resume: host reboot cookie missing; dropping checkpoint\n");
+                clear_hermes_resume_state();
+                return;
+            }
+            if resume_should_drop_for_host_session(&state, live_session) {
+                ctx.serial
+                    .write_str("Hermes resume: host session changed; dropping checkpoint\n");
+                clear_hermes_resume_state();
+                return;
             }
             if state.op_running {
                 ctx.serial.write_str("FAIL iteration=");
@@ -7058,8 +7095,8 @@ fn finish_hermes_test_all(
     report.push('\n');
 
     let notify_late = crate::user_level::services::security_case::notify_gate_campaign_late();
-    let notify_late_ok = notify_late
-        <= crate::user_level::services::security_case::NOTIFY_GATE_CAMPAIGN_LATE_MAX;
+    let notify_late_ok =
+        notify_late <= crate::user_level::services::security_case::NOTIFY_GATE_CAMPAIGN_LATE_MAX;
     ctx.serial.write_str("NOTIFY-GATE CAMPAIGN late=");
     print_usize(&mut ctx.serial, notify_late);
     ctx.serial.write_str(" threshold=");
@@ -11195,6 +11232,30 @@ fn cmd_clear(_ctx: &mut ShellContext, _args: &[&str]) {
 /// Command: reboot - Reset machine through PSCI
 fn cmd_reboot(ctx: &mut ShellContext, _args: &[&str]) {
     crate::user_level::fxfs::flush_persist();
+    let mut marked = false;
+    for attempt in 0..3 {
+        match crate::user_level::vm_host::mark_host_expect_reboot() {
+            Ok(()) => {
+                marked = true;
+                break;
+            }
+            Err(err) => {
+                ctx.serial
+                    .write_str("Hermes reboot: host cookie failed (");
+                print_vm_host_error(ctx, err);
+                ctx.serial.write_str(")");
+                if attempt + 1 < 3 {
+                    ctx.serial.write_str("; retrying\n");
+                    crate::kernel_objects::scheduler::yield_now();
+                } else {
+                    ctx.serial.write_str("\n");
+                }
+            }
+        }
+    }
+    if marked {
+        ctx.serial.write_str("Hermes reboot: host cookie armed\n");
+    }
     ctx.serial.write_str("Rebooting...\n");
     crate::kernel_lowlevel::smp::system_reset();
 }

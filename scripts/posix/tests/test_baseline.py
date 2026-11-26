@@ -2864,6 +2864,7 @@ class CliTests(unittest.TestCase):
             stderr = io.StringIO()
             with (
                 mock.patch("scripts.posix.cli.shutil.which", return_value=None),
+                mock.patch("scripts.posix.cli.Path.is_file", return_value=False),
                 mock.patch.object(cli, "BASELINE_RESULTS_PATH", results),
                 redirect_stderr(stderr),
             ):

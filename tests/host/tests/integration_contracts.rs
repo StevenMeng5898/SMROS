@@ -1189,9 +1189,8 @@ fn aarch64_memory_uses_one_vm_logic_module_without_broad_dead_code_suppression()
         );
     }
     assert!(shared.contains("smros_ll_pfn_index_body!(pfn, self.base_pfn, self.total_pages)"));
-    assert!(shared.contains(
-        "smros_ll_pfn_address_body!(pfn, self.base_pfn, self.total_pages, page_size)"
-    ));
+    assert!(shared
+        .contains("smros_ll_pfn_address_body!(pfn, self.base_pfn, self.total_pages, page_size)"));
     assert!(shared.contains("smros_ll_bitmap_mask_body!(bit_index)"));
 }
 
@@ -6776,8 +6775,12 @@ fn hermes_test_resumes_after_reboot() {
     let reboot_start = shell.find("fn cmd_reboot(").expect("cmd_reboot");
     let reboot = braced_body(&shell[reboot_start..]);
     let persist_pos = reboot.find("flush_persist()").expect("reboot flushes FxFS");
+    let cookie_pos = reboot
+        .find("mark_host_expect_reboot")
+        .expect("reboot arms host cookie");
     let reset_pos = reboot.find("system_reset()").expect("reboot resets");
-    assert!(persist_pos < reset_pos);
+    assert!(persist_pos < cookie_pos);
+    assert!(cookie_pos < reset_pos);
 
     assert!(agent.contains("pub fn persist_resume_state("));
     assert!(agent.contains("pub fn load_resume_state("));
@@ -6785,6 +6788,10 @@ fn hermes_test_resumes_after_reboot() {
     assert!(policy.contains("HERMES_RESUME_PATH"));
     assert!(policy.contains("campaign_case_const(\"reboot\", \"\", \"\", 0)"));
     assert!(policy.contains("host_jobs_pending"));
+    assert!(policy.contains("host_session"));
+    assert!(policy.contains("resume_matches_host_session"));
+    assert!(policy.contains("resume_should_drop_for_host_session"));
+    assert!(policy.contains("resume_should_drop_without_host_reboot"));
     assert!(policy.contains("resume_pending_host_iteration"));
     assert!(shell.contains("Hermes resume test-all"));
     assert!(shell.contains(" op="));
@@ -6800,13 +6807,28 @@ fn hermes_test_resumes_after_reboot() {
     assert!(resume_body.contains("run_hermes_host_jobs"));
     assert!(resume_body.contains("wait_for_host_transport"));
     assert!(resume_body.contains("Hermes resume: waiting for host launcher"));
+    assert!(resume_body.contains("resume_should_drop_for_host_session"));
+    assert!(resume_body.contains("resume_should_drop_without_host_reboot"));
+    assert!(resume_body.contains("query_guest_resume"));
+    assert!(resume_body.contains("Hermes resume: host reboot cookie missing; dropping checkpoint"));
+    assert!(resume_body.contains("Hermes resume: host reboot cookie still unavailable"));
+    assert!(resume_body.contains("Hermes resume: host session changed; dropping checkpoint"));
+    assert!(resume_body.contains("clear_hermes_resume_state"));
     let wait_pos = resume_body
         .find("wait_for_host_transport")
         .expect("wait before jobs");
+    let cookie_pos = resume_body
+        .find("Hermes resume: host reboot cookie missing; dropping checkpoint")
+        .expect("cookie check after wait");
+    let session_pos = resume_body
+        .find("Hermes resume: host session changed; dropping checkpoint")
+        .expect("session check after cookie");
     let jobs_pos = resume_body
         .find("run_hermes_host_jobs")
         .expect("host jobs after wait");
-    assert!(wait_pos < jobs_pos);
+    assert!(wait_pos < cookie_pos);
+    assert!(cookie_pos < session_pos);
+    assert!(session_pos < jobs_pos);
     let test_all_start = shell
         .find("fn run_hermes_test_all_inner(")
         .expect("test-all inner");
@@ -6822,6 +6844,7 @@ fn hermes_test_resumes_after_reboot() {
     assert!(reboot_if.contains("host_jobs_pending: true"));
     assert!(!reboot_if.contains("run_hermes_host_jobs("));
     assert!(docs.contains("resume after reboot"));
+    assert!(docs.contains("host reboot cookie"));
     assert!(docs.contains("nested"));
 }
 
@@ -6925,15 +6948,22 @@ fn hermes_campaign_vm_create_skips_boot_wait_when_host_launch_fails() {
         wait_pos < kill_pos && skip_pos < kill_pos,
         "both boot-wait and skip paths must still recycle with vm -k"
     );
-    assert!(launcher.contains("LAUNCHER_VERSION = 13"));
+    assert!(launcher.contains("LAUNCHER_VERSION = 16"));
     assert!(launcher.contains("launch_retry=1"));
     assert!(launcher.contains("retrying_launch("));
     assert!(launcher.contains("def code_fingerprint("));
-    assert!(starter.contains("REQUIRED_VERSION=13"));
+    assert!(starter.contains("REQUIRED_VERSION=16"));
     assert!(starter.contains("accept_running_launcher"));
     assert!(starter.contains("-u MAKEFLAGS"));
     assert!(starter.contains("LC_ALL=C"));
     assert!(starter.contains("fields.get(\"launch_retry\") != \"1\""));
+    assert!(starter.contains("fields.get(\"guest_reset\") != \"1\""));
+    assert!(starter.contains("fields.get(\"reboot_cookie\") != \"1\""));
+    assert!(starter.contains("begin_guest_session"));
+    assert!(starter.contains("--guest-begin"));
+    assert!(launcher.contains("--expect-reboot"));
+    assert!(launcher.contains("--resume-query"));
+    assert!(starter.contains("probe_launcher_ready"));
     assert!(docs.contains("skip") || docs.contains("not launched"));
 }
 
@@ -6965,9 +6995,39 @@ fn hermes_host_jobs_retry_after_launcher_contention() {
         "resume probe must PING instead of connect-and-close"
     );
     assert!(
+        wait_body.contains("parse_guest_session"),
+        "resume PING must cache the host guest session"
+    );
+    assert!(
+        wait_body.contains("parse_expect_reboot"),
+        "resume PING must cache the host reboot cookie"
+    );
+    assert!(
+        wait_body.contains("remember_guest_session"),
+        "resume PING must store the host guest session"
+    );
+    assert!(
+        wait_body.contains("remember_expect_reboot"),
+        "resume PING must store the host reboot cookie"
+    );
+    assert!(
         wait_body.contains("yield_now"),
         "resume PING must retry until the host launcher answers OK"
     );
+    assert!(client.contains("pub fn current_guest_session("));
+    assert!(client.contains("pub fn cached_guest_session("));
+    assert!(client.contains("pub fn query_guest_resume("));
+    assert!(client.contains("pub fn mark_host_expect_reboot("));
+    assert!(client.contains("fn parse_guest_session("));
+    assert!(client.contains("fn parse_expect_reboot("));
+    assert!(launcher.contains("SMROS_VM_GUEST_BEGIN 1"));
+    assert!(launcher.contains("SMROS_VM_EXPECT_REBOOT 1"));
+    assert!(launcher.contains("SMROS_VM_RESUME_QUERY 1"));
+    assert!(launcher.contains("def begin_guest_session("));
+    assert!(launcher.contains("def mark_expect_guest_reboot("));
+    assert!(launcher.contains("def consume_guest_resume("));
+    assert!(launcher.contains("guest_reset=1"));
+    assert!(launcher.contains("reboot_cookie=1"));
 
     let run_start = client
         .find("pub fn run_hermes_test(")
@@ -7112,12 +7172,20 @@ fn hermes_host_tests_use_fixed_enum_jobs_and_protocol() {
     let launch = client.find("pub fn launch(").expect("launch");
     let launch_body = braced_body(&client[launch..]);
     assert!(launch_body.contains("connect_launcher("));
-    assert!(starter.contains("REQUIRED_VERSION=13"));
+    assert!(starter.contains("REQUIRED_VERSION=16"));
     assert!(starter.contains("SMROS_VM_LAUNCHER_RESTART"));
     assert!(makefile.contains("vm-launcher-restart:"));
     assert!(starter.contains("fields.get(\"hermes_test_jobs\") != \"1\""));
     assert!(starter.contains("fields.get(\"linux_boot\") != \"1\""));
     assert!(starter.contains("fields.get(\"async_test_jobs\") != \"1\""));
+    assert!(starter.contains("fields.get(\"guest_reset\") != \"1\""));
+    assert!(starter.contains("fields.get(\"reboot_cookie\") != \"1\""));
+    assert!(starter.contains("--guest-begin"));
+    assert!(starter.contains("probe_launcher_ready"));
+    assert!(launcher.contains("guest_reset=1"));
+    assert!(launcher.contains("reboot_cookie=1"));
+    assert!(client.contains("current_guest_session("));
+    assert!(client.contains("query_guest_resume("));
     assert!(launcher.contains("SMROS_VM_WAIT_BOOT 1"));
     assert!(launcher.contains("SMROS Linux VM initramfs"));
     assert!(client.contains("fn wait_for_linux_boot("));
@@ -7332,6 +7400,14 @@ fn fuzzsc_success_path_uses_live_mprotect_and_names_posix_errors() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../src/user_level/services/hermes_shell_logic_shared.rs"
     ));
+    assert!(fuzz.contains("fn linux_fuzz_is_success_path("));
+    assert!(fuzz.contains("LinuxAuditedStub::FailClosed"));
+    assert!(fuzz.contains("linux_fuzz_is_unmodeled("));
+    assert!(fuzz.contains("zero_timex_ptr"));
+    assert!(fuzz.contains("LINUX_CHOWN_UNCHANGED"));
+    assert!(fuzz.contains("write_full_cap_data"));
+    assert!(fuzz.contains("143 | 144 | 145 | 146 | 147 | 149 | 151 | 152 | 154 | 156 | 157 | 159"));
+    assert!(fuzz.contains("linux_fuzz_is_success_path(num)"));
     assert!(fuzz.contains("226 => {\n            let addr = state.transient_mapping();"));
     assert!(
         !fuzz.contains("226 => out = [state.mapping(), PAGE_SIZE, MmapProt::READ.bits(), 0, 0, 0]")
@@ -7395,10 +7471,9 @@ fn fuzzsc_epoll_success_args_and_physical_vmo_stay_denied() {
         .expect("end of zircon success list");
     let success_list = &fuzz[list_at..list_end];
     assert!(
-        !success_list.contains("107"),
-        "vmo_create_physical must stay off the success sweep"
+        success_list.contains("106, 107, 108"),
+        "vmo_create_physical belongs on the kernel success sweep"
     );
-    assert!(success_list.contains("106, 108"));
     assert!(fuzz.contains("fn ensure_epoll_fd("));
     assert!(fuzz.contains("let op = if state.epoll_added { 3 } else { 1 };"));
     assert!(fuzz.contains("118 => out = [0, state.arena.sched_param_ptr(), 0, 0, 0, 0]"));
@@ -7414,8 +7489,11 @@ fn fuzzsc_epoll_success_args_and_physical_vmo_stay_denied() {
         .map(|offset| physical + offset)
         .expect("next vmo function");
     let physical_fn = &syscall[physical..physical_end];
+    assert!(physical_fn.contains("Vmo::new_physical(paddr, size)"));
     assert!(physical_fn.contains("Err(ZxError::ErrAccessDenied)"));
     assert!(physical_fn.contains("Err(ZxError::ErrInvalidArgs)"));
+    assert!(physical_fn.contains("el0_syscall_active()"));
+    assert!(fuzz.contains("107 => out = [0, 0, PAGE_SIZE, 0, 0, 0, 0, 0]"));
 
     let ctl = syscall.find("pub fn sys_epoll_ctl(").expect("epoll_ctl");
     let ctl_end = syscall[ctl..]

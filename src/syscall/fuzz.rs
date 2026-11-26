@@ -30,6 +30,7 @@ const FUZZ_IO_BYTES: usize = 64;
 const FUZZ_LINUX_NEW_FD_BASE: usize = 10_000;
 const FUZZ_LINUX_NEW_FD_SPAN: usize = 1_000;
 const FUZZ_LINUX_INTERFACE_MAX: u32 = 600;
+const FUZZ_TIMEX_BYTES: usize = 208;
 const FUZZ_ZIRCON_INTERFACE_MAX: u32 = 211;
 const FUZZ_ERROR_BUCKETS: usize = 16;
 const FUZZ_SCRATCH_FDS: usize = 16;
@@ -56,16 +57,14 @@ const FUZZ_STREAM_HANDLE_INDEX: usize = 32;
 const FUZZ_PROFILE_HANDLE_INDEX: usize = 33;
 const FUZZ_EXCEPTION_HANDLE_INDEX: usize = 34;
 
-/// Success-shaped Zircon calls. 107 (`vmo_create_physical`) is omitted: every
-/// nonzero size is `ZX_ERR_ACCESS_DENIED` because no resource may name an
-/// arbitrary physical address. That denial is expected and must stay an error
-/// if the call is made; it is not a success-path case.
+/// Success-shaped Zircon calls. Kernel dispatch can create a physical VMO
+/// from a live resource handle; EL0 still denies naming an arbitrary PFN.
 const ZIRCON_SUCCESS_SYSCALLS: &[u32] = &[
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
     26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
     50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
     74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-    98, 99, 100, 101, 102, 103, 104, 105, 106, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+    98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
     118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136,
     137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 183,
     184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202,
@@ -439,6 +438,11 @@ impl FuzzArena {
         self.scratch_ptr()
     }
 
+    fn zero_timex_ptr(&mut self) -> usize {
+        self.scratch[..FUZZ_TIMEX_BYTES].fill(0);
+        self.scratch_ptr()
+    }
+
     fn write_mq_success_attr(&mut self) -> usize {
         self.scratch[..64].fill(0);
         self.scratch[8..16].copy_from_slice(&10i64.to_ne_bytes());
@@ -531,6 +535,17 @@ impl FuzzArena {
 
     fn cap_data_ptr(&mut self) -> usize {
         self.cap_data.as_mut_ptr() as usize
+    }
+
+    fn write_full_cap_data(&mut self) -> usize {
+        let full = LinuxCapUserData {
+            effective: u32::MAX,
+            permitted: u32::MAX,
+            inheritable: u32::MAX,
+        };
+        self.cap_data[0] = full;
+        self.cap_data[1] = full;
+        self.cap_data_ptr()
     }
 
     fn handles_ptr(&mut self) -> usize {
@@ -1812,7 +1827,7 @@ fn linux_success_call_cases() -> usize {
     let mut count = 0;
     let mut syscall_num = 0;
     while syscall_num <= FUZZ_LINUX_INTERFACE_MAX {
-        if syscall_logic::linux_syscall_interface_known(syscall_num) {
+        if linux_fuzz_is_success_path(syscall_num) {
             count += linux_variants(syscall_num);
         }
         syscall_num += 1;
@@ -1821,7 +1836,15 @@ fn linux_success_call_cases() -> usize {
 }
 
 fn count_linux_success_syscalls() -> usize {
-    count_linux_interface_syscalls()
+    let mut count = 0;
+    let mut syscall_num = 0;
+    while syscall_num <= FUZZ_LINUX_INTERFACE_MAX {
+        if linux_fuzz_is_success_path(syscall_num) {
+            count += 1;
+        }
+        syscall_num += 1;
+    }
+    count
 }
 
 fn zircon_success_call_cases() -> usize {
@@ -2088,6 +2111,28 @@ fn linux_fuzz_is_destructive(num: u32) -> bool {
     )
 }
 
+/// Known numbers with no modeled handler. Walking them only records ENOSYS.
+fn linux_fuzz_is_unmodeled(num: u32) -> bool {
+    matches!(num, 244..=259 | 295..=423 | 443 | 600)
+}
+
+/// Success-path Linux numbers: modeled handlers that can return 0 with the
+/// curated argument shapes. Fail-closed stubs, unmodeled gaps, seccomp, and
+/// shell-destructive calls stay off this sweep.
+fn linux_fuzz_is_success_path(num: u32) -> bool {
+    if !syscall_logic::linux_syscall_interface_known(num)
+        || linux_fuzz_is_destructive(num)
+        || linux_fuzz_is_unmodeled(num)
+        || num == super::ARM64_SYS_SECCOMP
+    {
+        return false;
+    }
+    !matches!(
+        syscall_logic::linux_audited_stub(num),
+        Some(syscall_logic::LinuxAuditedStub::FailClosed(_))
+    )
+}
+
 fn fuzz_linux_round(state: &mut FuzzState) -> bool {
     prepare_fuzz_paths();
     state.arena.write_cstrs();
@@ -2095,7 +2140,7 @@ fn fuzz_linux_round(state: &mut FuzzState) -> bool {
     state.linux_timer_id = 0;
     let mut num = 0;
     while num <= FUZZ_LINUX_INTERFACE_MAX {
-        if syscall_logic::linux_syscall_interface_known(num) && !linux_fuzz_is_destructive(num) {
+        if linux_fuzz_is_success_path(num) {
             let variants = linux_variants(num);
             for variant in 0..variants {
                 if state.should_stop() {
@@ -2684,7 +2729,7 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         91 => {
             out = [
                 state.arena.cap_header_ptr(),
-                state.arena.cap_data_ptr(),
+                state.arena.write_full_cap_data(),
                 0,
                 0,
                 0,
@@ -2733,9 +2778,9 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
         111 => out = [state.ensure_linux_timer_id(), 0, 0, 0, 0, 0],
         112 => out = [0, state.arena.timespec_ptr(), 0, 0, 0, 0],
         113 | 114 => out = [1, state.arena.timespec_ptr(), 0, 0, 0, 0],
-        116 | 117 | 171 | 217 | 218 | 219 | 224 | 225 | 235 | 236 | 237 | 238 | 239 | 241 | 267
-        | 269 | 270 | 271 | 272 | 274 | 275 | 280 | 281 | 282 | 284 | 288 | 289 | 290 | 292
-        | 293 | 428 | 429 | 430 | 431 | 432 | 434 | 442 => out = [0, ptr, len, 0, 0, 0],
+        116 | 117 | 217 | 218 | 219 | 224 | 225 | 235 | 236 | 237 | 238 | 239 | 241 | 270
+        | 271 | 272 | 274 | 280 | 281 | 282 | 284 | 288 | 289 | 290 | 292 | 293 | 428 | 429
+        | 430 | 431 | 432 | 434 | 442 => out = [0, ptr, len, 0, 0, 0],
         180 => {
             out = [
                 state.arena.name_ptr(),
@@ -2796,13 +2841,27 @@ fn linux_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 6] {
             let tgid = linux_process::current_pid().unwrap_or(0);
             out = [tgid, tid, 0, 0, 0, 0];
         }
-        140 | 141 | 143 | 144 | 145 | 147 | 149 | 151 | 152 | 154 | 156 | 157 | 159 => {
-            out = [variant, path, len, ptr, 0, 0]
+        140 | 141 => out = [0, 0, 0, 0, 0, 0],
+        143 | 144 | 145 | 146 | 147 | 149 | 151 | 152 | 154 | 156 | 157 | 159 => {
+            out = [0, 0, 0, 0, 0, 0]
         }
         164 => out = [variant, state.arena.write_zero_rlimit64(), 0, 0, 0, 0],
-        142 | 170 => out = [1, state.arena.timespec_ptr(), 0, 0, 0, 0],
+        142 => out = [1, state.arena.timespec_ptr(), 0, 0, 0, 0],
+        170 => out = [0, 0, 0, 0, 0, 0],
+        171 => out = [state.arena.zero_timex_ptr(), 0, 0, 0, 0, 0],
+        266 => out = [0, state.arena.zero_timex_ptr(), 0, 0, 0, 0],
+        267 => out = [file_fd, 0, 0, 0, 0, 0],
+        269 => out = [socket_fd, state.arena.scratch_ptr(), 1, 0, 0, 0],
+        275 => out = [
+            0,
+            state.arena.scratch_ptr(),
+            syscall_logic::LINUX_SCHED_ATTR_SIZE_VER0,
+            0,
+            0,
+            0,
+        ],
         161 | 162 => out = [ptr, len.min(32), 0, 0, 0, 0],
-        146 | 148 => out = [ptr, ptr, ptr, 0, 0, 0],
+        148 => out = [ptr, ptr, ptr, 0, 0, 0],
         150 => out = [ptr, ptr, ptr, 0, 0, 0],
         153 => out = [ptr, 0, 0, 0, 0, 0],
         160 => out = [ptr, 0, 0, 0, 0, 0],
@@ -2979,6 +3038,14 @@ fn linux_path_args(
         78 => [fd, visible_path, ptr, FUZZ_IO_BYTES, 0, 0],
         79 => [fd, visible_path, ptr, 0, 0, 0],
         53 => [LINUX_AT_FDCWD, visible_path, 0o644, 0, 0, 0],
+        54 => [
+            LINUX_AT_FDCWD,
+            visible_path,
+            syscall_logic::LINUX_CHOWN_UNCHANGED,
+            syscall_logic::LINUX_CHOWN_UNCHANGED,
+            0,
+            0,
+        ],
         88 => {
             // Both timestamps are UTIME_OMIT, so the call succeeds without
             // writing the seed file's atime or mtime into the image.
@@ -3635,8 +3702,6 @@ fn zircon_args(state: &mut FuzzState, num: u32, variant: usize) -> [usize; 8] {
         192 => out = [stream_handle as usize, 0, 0, 0, 0, 0, 0, 0],
         92 | 93 | 94 => out = [0, 0, 0, ptr, 0, 0, 0, 0],
         106 => out = [0, PAGE_SIZE, 1, 0, 0, 0, 0, 0],
-        // Kept for a direct call. The success sweep does not use 107:
-        // vmo_create_physical returns ACCESS_DENIED for every nonzero size.
         107 => out = [0, 0, PAGE_SIZE, 0, 0, 0, 0, 0],
         113 => out = [ptr, 0, 0, 0, 0, 0, 0, 0],
         129 => out = [0, 0, 0, len, state.arena.name_ptr(), 10, 0, 0],

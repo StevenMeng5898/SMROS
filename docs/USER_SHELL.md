@@ -325,9 +325,11 @@ It is deliberately a safe interactive fuzzer:
 
 The command prints call, success, `ENOSYS`, unsupported, error, and object-count
 totals, including completed/configured iterations and timeout status when a
-time limit is used. The default sweep uses supported success-path syscalls; a
-nonzero error, `ENOSYS`, or unsupported counter means the harness selected a bad
-argument shape or walked a syscall that is not modeled yet. It also prints the
+time limit is used. The default sweep uses supported success-path syscalls. Fail-closed audited
+stubs, unmodeled numbers, `seccomp`, and shell-destructive calls are skipped, so
+a successful Linux sweep reports `err=0` and `enosys=0`. A nonzero error,
+`ENOSYS`, or unsupported counter means the harness selected a bad argument shape
+or walked a syscall that is not modeled yet. It also prints the
 known Linux and Zircon interface syscall counts plus success-path cases per
 iteration, so the interactive `calls` total is not treated as the full
 compatibility surface. Explicit iteration values are not clamped; the time
@@ -525,7 +527,11 @@ default to denial. Hermes owns the `reboot` skill (`hermes exec reboot`) and the
 waits for guest Linux boot OK and then runs `vm -k linux-demo` to recycle the
 nested QEMU window.
 After a Hermes reboot the shell resumes the checkpointed campaign so the test
-can continue. Gemma-generated text is never executed directly.
+can continue. The guest arms a host reboot cookie before PSCI reset; boot then
+consumes that cookie. Terminating QEMU from the host and starting `make run`
+again bumps the launcher guest session and leaves the cookie unset, so the
+leftover checkpoint is cleared instead of continuing. Gemma-generated text is
+never executed directly.
 
 `hermes random [seed=<n>] [iterations=<positive-n>] [mode=ops|syscall]` selects
 bounded safe test and status operations deterministically. The default ops

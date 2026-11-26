@@ -188,8 +188,11 @@ completes, `kill` is denied, and the required boot milestones are seen.
 Hermes owns the `reboot` skill (`hermes exec reboot`) and the `cmd` skill for
 VM/Docker lifecycle commands; smoke does not execute them. When a Hermes campaign
 does reboot, it persists `/data/hermes/tests/resume.cfg` and continues remaining
-iterations after reset. Reboot-round host `ut`/`it` jobs run after that resume
-once the guest network can reach the host launcher. The ops catalog includes
+iterations after reset. The guest arms a host reboot cookie before PSCI reset;
+boot consumes that cookie, so terminating QEMU and running `make run` again
+drops the leftover checkpoint instead of continuing. Reboot-round host `ut`/`it`
+jobs run after that resume once the guest network can reach the host launcher.
+The ops catalog includes
 `vm -c /shared/vm-demo.xml` so a nested GTK QEMU Linux window can appear during
 `hermes test-all`. Campaign create waits until guest Linux boot OK, then
 `vm -k linux-demo` recycles the nested QEMU process. If nested QEMU never

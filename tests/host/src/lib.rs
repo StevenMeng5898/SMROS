@@ -11926,6 +11926,7 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
         host_it_pass: 2,
         host_it_fail: 1,
         host_jobs_pending: true,
+        host_session: 1,
         op_running: false,
         op_timeouts: 0,
         pending_op_len: 0,
@@ -11938,15 +11939,31 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
     assert!(text.contains("kind=test-all"));
     assert!(text.contains("next_round=3"));
     assert!(text.contains("host_jobs_pending=1"));
+    assert!(text.contains("host_session=1"));
     assert_eq!(parse_resume_state(text), Some(state));
     assert_eq!(
         hermes_shell_logic::resume_pending_host_iteration(&state),
         Some(3)
     );
     assert!(resume_should_continue(&state));
+    assert!(hermes_shell_logic::resume_matches_host_session(&state, 1));
+    assert!(!hermes_shell_logic::resume_matches_host_session(&state, 2));
+    assert!(!hermes_shell_logic::resume_matches_host_session(&state, 0));
+    assert!(!hermes_shell_logic::resume_should_drop_for_host_session(
+        &state, 1
+    ));
+    assert!(hermes_shell_logic::resume_should_drop_for_host_session(
+        &state, 2
+    ));
+    assert!(!hermes_shell_logic::resume_should_drop_for_host_session(
+        &state, 0
+    ));
+    assert!(!hermes_shell_logic::resume_should_drop_without_host_reboot(true));
+    assert!(hermes_shell_logic::resume_should_drop_without_host_reboot(false));
     let finished = HermesResumeState {
         next_round: 8,
         host_jobs_pending: false,
+        host_session: 1,
         ..state
     };
     assert!(!resume_should_continue(&finished));
@@ -11957,6 +11974,20 @@ fn hermes_resume_state_round_trips_and_continues_after_reboot() {
     let legacy = "kind=test-all\nseed=7\niterations=8\nmode=ops\nnext_round=3\nnative=pass\ncompleted=3\ndenied=0\ninvalid=0\nunknown=0\nhost_ut_pass=3\nhost_ut_fail=0\nhost_it_pass=2\nhost_it_fail=1\n";
     let parsed_legacy = parse_resume_state(legacy).expect("legacy resume without pending flag");
     assert!(!parsed_legacy.host_jobs_pending);
+    assert_eq!(parsed_legacy.host_session, 0);
+    assert!(!hermes_shell_logic::resume_matches_host_session(
+        &parsed_legacy,
+        1
+    ));
+    assert!(!hermes_shell_logic::resume_should_drop_for_host_session(
+        &parsed_legacy,
+        1
+    ));
+    assert!(!hermes_shell_logic::resume_should_drop_for_host_session(
+        &parsed_legacy,
+        0
+    ));
+    assert!(hermes_shell_logic::resume_should_drop_without_host_reboot(false));
     assert!(!parsed_legacy.op_running);
     assert_eq!(parsed_legacy.op_timeouts, 0);
     assert_eq!(parsed_legacy.pending_op_str(), "");
@@ -12091,7 +12122,9 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
     ));
     assert!(extra_stage_allows_unavailable(HermesExtraStage::Verus));
     assert!(!extra_stage_allows_unavailable(HermesExtraStage::CbmcFutex));
-    assert!(!extra_stage_allows_unavailable(HermesExtraStage::PosixBaseline));
+    assert!(!extra_stage_allows_unavailable(
+        HermesExtraStage::PosixBaseline
+    ));
     let mut extra = [hermes_shell_logic::HermesCountedPhase::legacy(); HERMES_EXTRA_STAGE_COUNT];
     extra[HermesExtraStage::Verus.index()] = hermes_shell_logic::HermesCountedPhase {
         disposition: HermesSuiteDisposition::Done,
@@ -12200,6 +12233,7 @@ fn hermes_opening_suites_gate_test_all_and_round_trip() {
         host_it_pass: usize::MAX,
         host_it_fail: usize::MAX,
         host_jobs_pending: true,
+        host_session: 1,
         op_running: true,
         op_timeouts: usize::MAX,
         pending_op_len: 64,
@@ -12498,6 +12532,7 @@ fn hermes_campaign_covers_product_api_levels() {
         host_it_pass: 0,
         host_it_fail: 0,
         host_jobs_pending: false,
+        host_session: 1,
         op_running: false,
         op_timeouts: 0,
         pending_op_len: 0,

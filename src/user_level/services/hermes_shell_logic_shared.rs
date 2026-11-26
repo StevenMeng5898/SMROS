@@ -247,15 +247,14 @@ pub fn extra_stage_name(stage: HermesExtraStage) -> &'static str {
 }
 
 pub fn extra_stage_from_name(name: &str) -> Option<HermesExtraStage> {
-    (0..HERMES_EXTRA_STAGE_COUNT)
-        .find_map(|index| {
-            let stage = HermesExtraStage::from_index(index)?;
-            if extra_stage_name(stage) == name {
-                Some(stage)
-            } else {
-                None
-            }
-        })
+    (0..HERMES_EXTRA_STAGE_COUNT).find_map(|index| {
+        let stage = HermesExtraStage::from_index(index)?;
+        if extra_stage_name(stage) == name {
+            Some(stage)
+        } else {
+            None
+        }
+    })
 }
 
 pub fn extra_stage_min_pass(stage: HermesExtraStage) -> usize {
@@ -1095,6 +1094,10 @@ pub struct HermesResumeState {
     pub host_it_pass: usize,
     pub host_it_fail: usize,
     pub host_jobs_pending: bool,
+    /// Host launcher session captured when this checkpoint was written.
+    /// A Hermes reboot keeps the same session. `make run` bumps it, so a
+    /// terminated QEMU must not resume this campaign.
+    pub host_session: u64,
     /// Guest op began and had not finished when the checkpoint was written.
     /// A reboot that still sees this flag counts the op as a timeout.
     pub op_running: bool,
@@ -1137,6 +1140,18 @@ pub fn format_op_label(command: &str, args: &[&str], out: &mut [u8]) -> Option<u
 
 pub fn resume_should_continue(state: &HermesResumeState) -> bool {
     state.next_round < state.iterations
+}
+
+pub fn resume_matches_host_session(state: &HermesResumeState, live_session: u64) -> bool {
+    live_session != 0 && state.host_session == live_session
+}
+
+pub fn resume_should_drop_for_host_session(state: &HermesResumeState, live_session: u64) -> bool {
+    live_session != 0 && state.host_session != 0 && state.host_session != live_session
+}
+
+pub fn resume_should_drop_without_host_reboot(expect_reboot: bool) -> bool {
+    !expect_reboot
 }
 
 pub fn campaign_case_is_reboot(command: &str) -> bool {
@@ -1228,6 +1243,8 @@ pub fn format_resume_state(state: &HermesResumeState, out: &mut [u8]) -> Option<
         &mut written,
         if state.host_jobs_pending { b"1" } else { b"0" },
     )?;
+    push_bytes(out, &mut written, b"\nhost_session=")?;
+    push_u64(out, &mut written, state.host_session)?;
     push_bytes(out, &mut written, b"\nop_running=")?;
     push_bytes(
         out,
@@ -1338,6 +1355,7 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
     let mut host_it_pass = 0usize;
     let mut host_it_fail = 0usize;
     let mut host_jobs_pending = false;
+    let mut host_session = 0u64;
     let mut op_running = false;
     let mut op_timeouts = 0usize;
     let mut pending_op = [0u8; 64];
@@ -1395,6 +1413,7 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
                     _ => return None,
                 };
             }
+            "host_session" => host_session = parse_decimal(value)?,
             "op_running" => {
                 op_running = match value {
                     "1" => true,
@@ -1471,6 +1490,7 @@ pub fn parse_resume_state(text: &str) -> Option<HermesResumeState> {
         host_it_pass,
         host_it_fail,
         host_jobs_pending,
+        host_session,
         op_running,
         op_timeouts,
         pending_op_len,

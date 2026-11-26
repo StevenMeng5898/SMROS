@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 7070
 MAX_REQUEST = 4096
-LAUNCHER_VERSION = 13
+LAUNCHER_VERSION = 16
 DEFAULT_LAUNCH_STABLE_SECONDS = 2.0
 DEFAULT_LAUNCH_ATTEMPTS = 3
 DEFAULT_LAUNCH_RETRY_DELAY_SECONDS = 0.4
@@ -47,6 +47,8 @@ TEST_JOB_LOCK = threading.Lock()
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict[str, object]] = {}
 NEXT_JOB_TOKEN = 1
+GUEST_SESSION = 0
+EXPECT_GUEST_REBOOT = False
 MAX_JOB_RECORDS = 32
 PROCS: dict[str, subprocess.Popen[bytes]] = {}
 
@@ -65,6 +67,9 @@ def parse_request(data: bytes) -> tuple[str, dict[str, str]]:
         "SMROS_TRACE_SYNC 1",
         "SMROS_TEST_RUN 1",
         "SMROS_TEST_STATUS 1",
+        "SMROS_VM_GUEST_BEGIN 1",
+        "SMROS_VM_EXPECT_REBOOT 1",
+        "SMROS_VM_RESUME_QUERY 1",
     }:
         raise ValueError("bad header")
     values: dict[str, str] = {}
@@ -371,6 +376,7 @@ FINGERPRINT = code_fingerprint()
 
 
 def launcher_status() -> str:
+    session, expect_reboot = guest_resume_fields()
     return (
         f"OK version={LAUNCHER_VERSION} commit={wire_token(COMMIT)} "
         f"fingerprint={FINGERPRINT} "
@@ -378,7 +384,9 @@ def launcher_status() -> str:
         f"host_jobs_inflight={host_jobs_inflight()} "
         "monitor_none=1 stale_qemu_cleanup=1 "
         "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1 "
-        "launch_retry=1 async_test_jobs=1\n"
+        "launch_retry=1 async_test_jobs=1 "
+        f"guest_reset=1 reboot_cookie=1 guest_session={session} "
+        f"expect_reboot={expect_reboot}\n"
     )
 
 
@@ -412,6 +420,8 @@ def accept_running_launcher(status_text: str) -> bool:
         "linux_boot",
         "launch_retry",
         "async_test_jobs",
+        "guest_reset",
+        "reboot_cookie",
     ):
         if fields.get(key) != "1":
             return False
@@ -679,20 +689,28 @@ def next_job_token() -> str:
 
 
 def jobs_state_path() -> Path:
+    override = os.environ.get("SMROS_VM_LAUNCHER_JOBS")
+    if override:
+        return Path(override)
     return ROOT / "target" / "hermes-tests" / "host-jobs.json"
 
 
 def persist_jobs_locked() -> None:
     path = jobs_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"next": NEXT_JOB_TOKEN, "jobs": JOBS}
+    payload = {
+        "next": NEXT_JOB_TOKEN,
+        "jobs": JOBS,
+        "guest_session": GUEST_SESSION,
+        "expect_reboot": EXPECT_GUEST_REBOOT,
+    }
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(payload), encoding="utf-8")
     temporary.replace(path)
 
 
 def load_jobs() -> None:
-    global NEXT_JOB_TOKEN
+    global NEXT_JOB_TOKEN, GUEST_SESSION, EXPECT_GUEST_REBOOT
     path = jobs_state_path()
     if not path.exists():
         return
@@ -708,16 +726,109 @@ def load_jobs() -> None:
         NEXT_JOB_TOKEN = int(payload.get("next", NEXT_JOB_TOKEN))
     except (TypeError, ValueError):
         return
+    try:
+        GUEST_SESSION = int(payload.get("guest_session", GUEST_SESSION))
+    except (TypeError, ValueError):
+        return
+    # A daemon restart is host `make run` / terminate, not a Hermes reboot.
+    # Restoring the cookie would let a leftover resume.cfg continue.
+    EXPECT_GUEST_REBOOT = False
 
 
 def reset_jobs_for_tests() -> None:
-    global NEXT_JOB_TOKEN
+    global NEXT_JOB_TOKEN, GUEST_SESSION, EXPECT_GUEST_REBOOT
     with JOBS_LOCK:
         JOBS.clear()
         NEXT_JOB_TOKEN = 1
+        GUEST_SESSION = 0
+        EXPECT_GUEST_REBOOT = False
         path = jobs_state_path()
         if path.exists():
             path.unlink()
+
+
+def current_guest_session() -> int:
+    with JOBS_LOCK:
+        return GUEST_SESSION
+
+
+def guest_resume_fields() -> tuple[int, int]:
+    with JOBS_LOCK:
+        return GUEST_SESSION, int(EXPECT_GUEST_REBOOT)
+
+
+def reset_guest_state_locked() -> None:
+    global EXPECT_GUEST_REBOOT
+    JOBS.clear()
+    EXPECT_GUEST_REBOOT = False
+    persist_jobs_locked()
+
+
+def begin_guest_session() -> str:
+    """Host `make run` starts a new QEMU. Hermes reboot does not call this."""
+    global GUEST_SESSION
+    with JOBS_LOCK:
+        reset_guest_state_locked()
+        GUEST_SESSION += 1
+        if GUEST_SESSION == 0:
+            GUEST_SESSION = 1
+        persist_jobs_locked()
+        session = GUEST_SESSION
+    print(f"smros-vm-launcher: guest-begin session={session}", flush=True)
+    return f"OK guest_session={session} guest_reset=1 expect_reboot=0\n"
+
+
+def mark_expect_guest_reboot() -> str:
+    """Hermes `reboot` marks an in-guest reset. Host `make run` never calls this."""
+    global EXPECT_GUEST_REBOOT
+    with JOBS_LOCK:
+        EXPECT_GUEST_REBOOT = True
+        persist_jobs_locked()
+        session = GUEST_SESSION
+    print(f"smros-vm-launcher: expect-reboot session={session}", flush=True)
+    return f"OK expect_reboot=1 reboot_cookie=1 guest_session={session}\n"
+
+
+def consume_guest_resume() -> str:
+    """Boot-time resume query. Consumes the cookie so leftover boots cannot continue."""
+    global EXPECT_GUEST_REBOOT
+    with JOBS_LOCK:
+        expect_reboot = EXPECT_GUEST_REBOOT
+        EXPECT_GUEST_REBOOT = False
+        persist_jobs_locked()
+        session = GUEST_SESSION
+    print(
+        f"smros-vm-launcher: resume-query session={session} expect_reboot={int(expect_reboot)}",
+        flush=True,
+    )
+    return (
+        f"OK guest_session={session} expect_reboot={int(expect_reboot)} "
+        "reboot_cookie=1\n"
+    )
+
+
+def launcher_rpc(host: str, port: int, request: bytes, ok_token: str) -> str:
+    with socket.create_connection((host, port), timeout=2.0) as sock:
+        sock.sendall(request)
+        data = sock.recv(4096)
+    text = data.decode("utf-8", errors="replace")
+    if not text.startswith("OK ") or ok_token not in text:
+        raise RuntimeError(text.strip() or "launcher rpc failed")
+    return text
+
+
+def guest_begin_remote(host: str, port: int) -> str:
+    return launcher_rpc(host, port, b"SMROS_VM_GUEST_BEGIN 1\nend\n", "guest_reset=1")
+
+
+def expect_reboot_remote(host: str, port: int) -> str:
+    return launcher_rpc(
+        host, port, b"SMROS_VM_EXPECT_REBOOT 1\nend\n", "expect_reboot=1"
+    )
+
+
+def resume_query_remote(host: str, port: int) -> str:
+    return launcher_rpc(host, port, b"SMROS_VM_RESUME_QUERY 1\nend\n", "reboot_cookie=1")
 
 
 def host_jobs_inflight() -> int:
@@ -1288,6 +1399,12 @@ class Handler(socketserver.BaseRequestHandler):
                 action = "test-run"
             elif header == "SMROS_TEST_STATUS 1":
                 action = "test-status"
+            elif header == "SMROS_VM_GUEST_BEGIN 1":
+                action = "guest-begin"
+            elif header == "SMROS_VM_EXPECT_REBOOT 1":
+                action = "expect-reboot"
+            elif header == "SMROS_VM_RESUME_QUERY 1":
+                action = "resume-query"
             else:
                 action = "ping"
             print(
@@ -1306,6 +1423,12 @@ class Handler(socketserver.BaseRequestHandler):
                 response = start_test_job(values)
             elif header == "SMROS_TEST_STATUS 1":
                 response = test_job_status(values)
+            elif header == "SMROS_VM_GUEST_BEGIN 1":
+                response = begin_guest_session()
+            elif header == "SMROS_VM_EXPECT_REBOOT 1":
+                response = mark_expect_guest_reboot()
+            elif header == "SMROS_VM_RESUME_QUERY 1":
+                response = consume_guest_resume()
             else:
                 response = launcher_status()
         except Exception as exc:  # Keep daemon alive; report concise cause.
@@ -1348,6 +1471,24 @@ def main() -> int:
         metavar=("HOST", "PORT"),
         help="Print keep, drain, replace, or down for the launcher on HOST:PORT",
     )
+    parser.add_argument(
+        "--guest-begin",
+        nargs=2,
+        metavar=("HOST", "PORT"),
+        help="Bump the guest session and clear leftover Hermes host-job state",
+    )
+    parser.add_argument(
+        "--expect-reboot",
+        nargs=2,
+        metavar=("HOST", "PORT"),
+        help="Mark an in-guest Hermes reboot so leftover make-run boots do not resume",
+    )
+    parser.add_argument(
+        "--resume-query",
+        nargs=2,
+        metavar=("HOST", "PORT"),
+        help="Consume the in-guest reboot cookie and report whether resume is allowed",
+    )
     args, preamble_argv = parser.parse_known_args()
     if args.write_campaign_preamble is not None:
         argv = preamble_argv[1:] if preamble_argv[:1] == ["--"] else preamble_argv
@@ -1358,6 +1499,40 @@ def main() -> int:
         return 0
     if args.action:
         print(probe_launcher_action(args.action[0], int(args.action[1])), flush=True)
+        return 0
+    if args.guest_begin:
+        try:
+            print(
+                guest_begin_remote(args.guest_begin[0], int(args.guest_begin[1])).strip(),
+                flush=True,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"smros-vm-launcher: guest-begin failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.expect_reboot:
+        try:
+            print(
+                expect_reboot_remote(
+                    args.expect_reboot[0], int(args.expect_reboot[1])
+                ).strip(),
+                flush=True,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"smros-vm-launcher: expect-reboot failed: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if args.resume_query:
+        try:
+            print(
+                resume_query_remote(
+                    args.resume_query[0], int(args.resume_query[1])
+                ).strip(),
+                flush=True,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"smros-vm-launcher: resume-query failed: {exc}", file=sys.stderr)
+            return 1
         return 0
 
     load_jobs()

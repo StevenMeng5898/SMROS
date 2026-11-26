@@ -12,6 +12,9 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("smros-vm-launcher.py")
+os.environ["SMROS_VM_LAUNCHER_JOBS"] = str(
+    Path(tempfile.gettempdir()) / f"smros-vm-launcher-jobs-{os.getpid()}.json"
+)
 SPEC = importlib.util.spec_from_file_location("smros_vm_launcher", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 LAUNCHER = importlib.util.module_from_spec(SPEC)
@@ -22,6 +25,10 @@ class HermesHostTestProtocolTests(unittest.TestCase):
     def test_launcher_protocol_version_covers_host_jobs(self) -> None:
         self.assertGreaterEqual(LAUNCHER.LAUNCHER_VERSION, 11)
         self.assertIn("async_test_jobs=1", LAUNCHER.launcher_status())
+        self.assertIn("guest_reset=1", LAUNCHER.launcher_status())
+        self.assertIn("reboot_cookie=1", LAUNCHER.launcher_status())
+        self.assertIn("guest_session=0", LAUNCHER.launcher_status())
+        self.assertIn("expect_reboot=0", LAUNCHER.launcher_status())
 
     def test_qemu_user_available_falls_back_to_usr_bin(self) -> None:
         with mock.patch.object(LAUNCHER.shutil, "which", return_value=None):
@@ -225,13 +232,16 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         old = (
             "OK version=11 monitor_none=1 stale_qemu_cleanup=1 "
             "trace_sync=1 stable_launch=1 vm_log=1 hermes_test_jobs=1 linux_boot=1 "
-            "launch_retry=1 async_test_jobs=1\n"
+            "launch_retry=1 async_test_jobs=1 guest_reset=1 reboot_cookie=1 guest_session=1 expect_reboot=0\n"
         )
         self.assertFalse(LAUNCHER.accept_running_launcher(old))
         self.assertEqual(LAUNCHER.classify_launcher(old), "replace")
         current = LAUNCHER.launcher_status()
         self.assertTrue(LAUNCHER.accept_running_launcher(current))
         self.assertEqual(LAUNCHER.classify_launcher(current), "keep")
+        self.assertIn("guest_reset=1", current)
+        self.assertIn("reboot_cookie=1", current)
+        self.assertIn("expect_reboot=0", current)
         self.assertIn(LAUNCHER.FINGERPRINT, current)
         self.assertIn(LAUNCHER.script_sha256(), current)
         stale = current.replace(LAUNCHER.FINGERPRINT, "stale-fingerprint")
@@ -321,6 +331,60 @@ class HermesHostTestProtocolTests(unittest.TestCase):
                 self.fail("follow-up host job did not finish")
         LAUNCHER.reset_jobs_for_tests()
 
+    def test_guest_begin_bumps_session_and_drops_host_jobs(self) -> None:
+        LAUNCHER.reset_jobs_for_tests()
+        first = LAUNCHER.start_test_job({"job": "ut"})
+        token = [
+            field.split("=", 1)[1]
+            for field in first.split()
+            if field.startswith("token=")
+        ][0]
+        self.assertEqual(LAUNCHER.current_guest_session(), 0)
+        begin = LAUNCHER.begin_guest_session()
+        self.assertIn("guest_session=1", begin)
+        self.assertIn("expect_reboot=0", begin)
+        self.assertEqual(LAUNCHER.current_guest_session(), 1)
+        self.assertIn("guest_session=1", LAUNCHER.launcher_status())
+        self.assertIn("expect_reboot=0", LAUNCHER.launcher_status())
+        with self.assertRaises(ValueError):
+            LAUNCHER.test_job_status({"job": "ut", "token": token})
+        again = LAUNCHER.begin_guest_session()
+        self.assertIn("guest_session=2", again)
+        self.assertEqual(LAUNCHER.current_guest_session(), 2)
+        LAUNCHER.GUEST_SESSION = 0
+        LAUNCHER.JOBS.clear()
+        LAUNCHER.load_jobs()
+        self.assertEqual(LAUNCHER.current_guest_session(), 2)
+        LAUNCHER.reset_jobs_for_tests()
+        self.assertEqual(LAUNCHER.current_guest_session(), 0)
+
+    def test_expect_reboot_cookie_survives_only_until_resume_query_or_make_run(self) -> None:
+        LAUNCHER.reset_jobs_for_tests()
+        begin = LAUNCHER.begin_guest_session()
+        self.assertIn("guest_session=1", begin)
+        marked = LAUNCHER.mark_expect_guest_reboot()
+        self.assertIn("expect_reboot=1", marked)
+        self.assertIn("expect_reboot=1", LAUNCHER.launcher_status())
+        hermes_reboot = LAUNCHER.consume_guest_resume()
+        self.assertIn("expect_reboot=1", hermes_reboot)
+        self.assertIn("expect_reboot=0", LAUNCHER.launcher_status())
+        leftover = LAUNCHER.consume_guest_resume()
+        self.assertIn("expect_reboot=0", leftover)
+        marked_again = LAUNCHER.mark_expect_guest_reboot()
+        self.assertIn("expect_reboot=1", marked_again)
+        LAUNCHER.GUEST_SESSION = 0
+        LAUNCHER.EXPECT_GUEST_REBOOT = False
+        LAUNCHER.JOBS.clear()
+        LAUNCHER.load_jobs()
+        self.assertEqual(LAUNCHER.current_guest_session(), 1)
+        self.assertFalse(LAUNCHER.EXPECT_GUEST_REBOOT)
+        self.assertIn("expect_reboot=0", LAUNCHER.consume_guest_resume())
+        host_rerun = LAUNCHER.begin_guest_session()
+        self.assertIn("guest_session=2", host_rerun)
+        self.assertIn("expect_reboot=0", host_rerun)
+        self.assertIn("expect_reboot=0", LAUNCHER.consume_guest_resume())
+        LAUNCHER.reset_jobs_for_tests()
+
     def test_git_dirty_ignores_bytecode_artifacts(self) -> None:
         captured: dict[str, list[str]] = {}
 
@@ -337,7 +401,7 @@ class HermesHostTestProtocolTests(unittest.TestCase):
     def test_start_script_scrubs_make_env_and_restarts_only_from_the_host(self) -> None:
         starter = Path(__file__).with_name("start-smros-vm-launcher.sh").read_text()
         makefile = Path(__file__).resolve().parents[1].joinpath("Makefile").read_text()
-        self.assertIn("REQUIRED_VERSION=13", starter)
+        self.assertIn("REQUIRED_VERSION=16", starter)
         self.assertIn("-u MAKEFLAGS", starter)
         self.assertIn("-u MAKELEVEL", starter)
         self.assertIn("-u GNUMAKEFLAGS", starter)
@@ -346,6 +410,14 @@ class HermesHostTestProtocolTests(unittest.TestCase):
         self.assertIn("sys.dont_write_bytecode = True", starter)
         self.assertIn("drain_host_jobs", starter)
         self.assertIn('launcher_action', starter)
+        launcher = Path(__file__).with_name("smros-vm-launcher.py").read_text()
+        self.assertIn("begin_guest_session", starter)
+        self.assertIn("--guest-begin", starter)
+        self.assertIn("--expect-reboot", launcher)
+        self.assertIn("--resume-query", launcher)
+        self.assertIn('fields.get("guest_reset") != "1"', starter)
+        self.assertIn('fields.get("reboot_cookie") != "1"', starter)
+        self.assertIn("probe_launcher_ready", starter)
         self.assertIn("vm-launcher-restart:", makefile)
         self.assertIn("SMROS_VM_LAUNCHER_RESTART=1", makefile)
 

@@ -7,13 +7,14 @@
 #![allow(dead_code)]
 
 use alloc::string::{String, ToString};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::kernel_objects::hypervisor::{VmHostConfig, VmRecord};
 use crate::user_level::net::{self, NetError, NetworkSocketAddr};
 
 pub const DEFAULT_LAUNCHER_PORT: u16 = 7070;
 const MAX_REQUEST_BYTES: usize = 2048;
-const MAX_RESPONSE_BYTES: usize = 512;
+const MAX_RESPONSE_BYTES: usize = 768;
 const RESPONSE_READ_ATTEMPTS: usize = 8;
 /// Per-iteration `ut`/`it` and other short host jobs.
 const HERMES_TEST_WAIT_NANOS: u64 = 6 * 60 * 1_000_000_000;
@@ -34,6 +35,9 @@ const HERMES_TEST_TRANSACT_WAIT_NANOS: u64 = 3 * 1_000_000_000;
 /// Nested Linux boot can take tens of seconds; keep the wait-boot TCP session
 /// open until the launcher sees the initramfs banner or times out.
 const HERMES_VM_BOOT_WAIT_NANOS: u64 = 60 * 1_000_000_000;
+static HOST_GUEST_SESSION: AtomicU64 = AtomicU64::new(0);
+static HOST_EXPECT_REBOOT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmHostError {
@@ -153,7 +157,11 @@ pub fn wait_for_host_transport() -> Result<(), VmHostError> {
                         Ok(bytes) => {
                             let _ = socket.abort();
                             match core::str::from_utf8(&response[..bytes]) {
-                                Ok(text) if text.starts_with("OK ") => return Ok(()),
+                                Ok(text) if text.starts_with("OK ") => {
+                                    remember_guest_session(parse_guest_session(text));
+                                    remember_expect_reboot(parse_expect_reboot(text));
+                                    return Ok(());
+                                }
                                 Ok(_) => last_err = VmHostError::HostUnavailable,
                                 Err(_) => last_err = VmHostError::ResponseInvalid,
                             }
@@ -169,6 +177,99 @@ pub fn wait_for_host_transport() -> Result<(), VmHostError> {
         }
         crate::kernel_objects::scheduler::yield_now();
     }
+}
+
+pub fn cached_guest_session() -> u64 {
+    HOST_GUEST_SESSION.load(Ordering::SeqCst)
+}
+
+pub fn current_guest_session() -> Result<u64, VmHostError> {
+    let cached = cached_guest_session();
+    if cached != 0 {
+        return Ok(cached);
+    }
+    wait_for_host_transport()?;
+    let cached = cached_guest_session();
+    if cached == 0 {
+        return Err(VmHostError::HostUnavailable);
+    }
+    Ok(cached)
+}
+
+pub fn cached_expect_reboot() -> bool {
+    HOST_EXPECT_REBOOT.load(Ordering::SeqCst)
+}
+
+pub fn query_guest_resume() -> Result<(u64, bool), VmHostError> {
+    const REQUEST: &[u8] = b"SMROS_VM_RESUME_QUERY 1\nend\n";
+    let response = transact_launcher(REQUEST)?;
+    let text = core::str::from_utf8(&response).map_err(|_| VmHostError::ResponseInvalid)?;
+    let trimmed = text.trim_end_matches('\0');
+    if !trimmed.starts_with("OK ") {
+        return Err(VmHostError::HostUnavailable);
+    }
+    let session = parse_guest_session(trimmed);
+    let expect_reboot = parse_expect_reboot(trimmed);
+    remember_guest_session(session);
+    remember_expect_reboot(expect_reboot);
+    Ok((session, expect_reboot))
+}
+
+pub fn mark_host_expect_reboot() -> Result<(), VmHostError> {
+    const REQUEST: &[u8] = b"SMROS_VM_EXPECT_REBOOT 1\nend\n";
+    let response = transact_launcher(REQUEST)?;
+    let text = core::str::from_utf8(&response).map_err(|_| VmHostError::ResponseInvalid)?;
+    let trimmed = text.trim_end_matches('\0');
+    if !trimmed.starts_with("OK ") || !trimmed.contains("expect_reboot=1") {
+        return Err(VmHostError::HostUnavailable);
+    }
+    remember_guest_session(parse_guest_session(trimmed));
+    remember_expect_reboot(true);
+    Ok(())
+}
+
+fn remember_guest_session(session: u64) {
+    if session != 0 {
+        HOST_GUEST_SESSION.store(session, Ordering::SeqCst);
+    }
+}
+
+fn remember_expect_reboot(expect_reboot: bool) {
+    HOST_EXPECT_REBOOT.store(expect_reboot, Ordering::SeqCst);
+}
+
+fn parse_flag_u64(text: &str, prefix: &str) -> u64 {
+    for part in text.split_whitespace() {
+        let Some(value) = part.strip_prefix(prefix) else {
+            continue;
+        };
+        if value.is_empty() {
+            return 0;
+        }
+        let mut number = 0u64;
+        for byte in value.bytes() {
+            if !byte.is_ascii_digit() {
+                return 0;
+            }
+            match number
+                .checked_mul(10)
+                .and_then(|n| n.checked_add((byte - b'0') as u64))
+            {
+                Some(next) => number = next,
+                None => return 0,
+            }
+        }
+        return number;
+    }
+    0
+}
+
+fn parse_guest_session(text: &str) -> u64 {
+    parse_flag_u64(text, "guest_session=")
+}
+
+fn parse_expect_reboot(text: &str) -> bool {
+    parse_flag_u64(text, "expect_reboot=") == 1
 }
 
 pub fn run_hermes_test(job: HermesHostTestJob) -> Result<HermesHostTestResult, VmHostError> {
@@ -194,7 +295,8 @@ pub fn run_hermes_test(job: HermesHostTestJob) -> Result<HermesHostTestResult, V
 
 fn run_hermes_test_once(job: HermesHostTestJob) -> Result<HermesHostTestResult, VmHostError> {
     let token = accept_hermes_test(job)?;
-    let deadline = crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(job.wait_nanos());
+    let deadline =
+        crate::kernel_lowlevel::timer::get_nanoseconds().saturating_add(job.wait_nanos());
     loop {
         match poll_hermes_test(job, token.as_str()) {
             Ok(Some(result)) => return Ok(result),

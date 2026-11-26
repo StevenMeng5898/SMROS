@@ -178,9 +178,11 @@ Safe interactive runs skip non-returning or state-destroying calls including
 exit, kill, close-many, VMAR destroy/unmap, interrupt destroy, and clone-style
 task creation. The command reports Linux successes/errors/`ENOSYS`, Zircon
 successes/errors/unsupported calls, skipped calls, and tracked object counts.
-Unsupported ABI entries and intentionally invalid negative-test cases are not
-part of the success-path sweep, so nonzero error, `ENOSYS`, or unsupported
-counters identify a fuzzer argument bug or missing modeled syscall. It is not
+Unsupported ABI entries, fail-closed audited stubs, unmodeled numbers, `seccomp`,
+and intentionally invalid negative-test cases are not part of the success-path
+sweep, so a successful Linux sweep reports `err=0` and `enosys=0`. Nonzero error,
+`ENOSYS`, or unsupported counters identify a fuzzer argument bug or missing
+modeled syscall. It is not
 yet a full syzkaller executor with coverage feedback. The command also prints
 known interface syscall counts and success-path cases per iteration so the
 interactive call total is not mistaken for the full dispatcher surface.

@@ -10,7 +10,7 @@ HOST="${SMROS_VM_LAUNCHER_HOST:-0.0.0.0}"
 PROBE_HOST="${SMROS_VM_LAUNCHER_PROBE_HOST:-127.0.0.1}"
 LOG_FILE="${SMROS_VM_LAUNCHER_LOG:-$ROOT_DIR/smros-vm-launcher.log}"
 PID_FILE="${SMROS_VM_LAUNCHER_PID:-$ROOT_DIR/smros-vm-launcher.pid}"
-REQUIRED_VERSION=13
+REQUIRED_VERSION=16
 
 cd "$ROOT_DIR"
 COMMIT="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
@@ -31,10 +31,10 @@ module_path = sys.argv[4]
 request = b"SMROS_VM_PING 1\nname=__smros_probe__\nend\n"
 try:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(0.2)
+        sock.settimeout(1.0)
         sock.connect((host, port))
         sock.sendall(request)
-        response = sock.recv(2048)
+        response = sock.recv(4096)
 except OSError:
     raise SystemExit(1)
 text = response.decode("utf-8", errors="replace")
@@ -70,6 +70,10 @@ if fields.get("launch_retry") != "1":
     raise SystemExit(1)
 if fields.get("async_test_jobs") != "1":
     raise SystemExit(1)
+if fields.get("guest_reset") != "1":
+    raise SystemExit(1)
+if fields.get("reboot_cookie") != "1":
+    raise SystemExit(1)
 PY
 }
 
@@ -98,6 +102,13 @@ launcher_action() {
     python3 "$SCRIPT_DIR/smros-vm-launcher.py" --action "$PROBE_HOST" "$PORT"
 }
 
+begin_guest_session() {
+    if [ "${SMROS_VM_LAUNCHER_GUEST_BEGIN:-1}" != "1" ]; then
+        return 0
+    fi
+    python3 "$SCRIPT_DIR/smros-vm-launcher.py" --guest-begin "$PROBE_HOST" "$PORT"
+}
+
 drain_host_jobs() {
     local attempt action
     attempt=1
@@ -118,6 +129,7 @@ if [ "${SMROS_VM_LAUNCHER_RESTART:-0}" != "1" ]; then
     action="$(launcher_action || echo down)"
     if [ "$action" = "keep" ]; then
         echo "SMROS VM launcher already reachable on $PROBE_HOST:$PORT (fingerprint matches)"
+        begin_guest_session
         exit 0
     fi
 fi
@@ -163,7 +175,20 @@ if [ -z "$launcher_pid" ] || ! kill -0 "$launcher_pid" 2>/dev/null; then
     exit 1
 fi
 
-if probe_launcher
+probe_launcher_ready() {
+    local attempt
+    attempt=1
+    while [ "$attempt" -le 40 ]; do
+        if probe_launcher; then
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+if probe_launcher_ready
 then
     sleep 0.2
     if ! kill -0 "$launcher_pid" 2>/dev/null; then
@@ -171,7 +196,9 @@ then
         exit 1
     fi
     echo "SMROS VM launcher log: $LOG_FILE"
+    begin_guest_session
 else
     echo "SMROS VM launcher did not become reachable; see $LOG_FILE" >&2
+    echo "SMROS VM launcher probe: $(launcher_action || echo down)" >&2
     exit 1
 fi

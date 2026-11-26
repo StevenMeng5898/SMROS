@@ -12895,21 +12895,45 @@ pub fn sys_vmo_create_child(
 
 /// Zircon sys_vmo_create_physical implementation.
 ///
-/// No resource object in this kernel grants the right to name an arbitrary
-/// physical address. The call is denied before any PFN is recorded.
+/// Kernel/fuzz dispatch may name a page-aligned physical range. EL0 still
+/// needs a live resource handle; an unprivileged caller is denied.
 pub fn sys_vmo_create_physical(
     resource: u32,
-    _paddr: u64,
+    paddr: u64,
     size: usize,
-    _out_handle: &mut u32,
+    out_handle: &mut u32,
 ) -> ZxResult {
-    if size == 0 {
+    if size == 0 || !page_aligned(paddr as usize) || !page_aligned(size) {
         return Err(ZxError::ErrInvalidArgs);
     }
     if crate::syscall::uaccess::el0_syscall_active() {
         let _ = memory_state().require_process_object(resource, ObjectType::Resource, 0)?;
+        return Err(ZxError::ErrAccessDenied);
     }
-    Err(ZxError::ErrAccessDenied)
+    if resource != 0 {
+        match handle_known_type(resource) {
+            Some(ObjectType::Resource) => {}
+            Some(_) => return Err(ZxError::ErrWrongType),
+            None => return Err(ZxError::ErrBadHandle),
+        }
+    }
+    let mut vmo = Vmo::new_physical(paddr, size).ok_or(ZxError::ErrNoMemory)?;
+    let state = memory_state();
+    let handle = state.alloc_object_handle(ObjectType::Vmo);
+    if handle == 0 {
+        return Err(ZxError::ErrNoMemory);
+    }
+    let object = state
+        .handle_record(handle)
+        .map(|record| record.object_handle)
+        .unwrap_or(handle);
+    vmo.handle = HandleValue(object);
+    state.vmos.push(VmoRecord {
+        handle: object,
+        vmo,
+    });
+    *out_handle = handle;
+    Ok(())
 }
 
 /// Zircon sys_vmo_create_contiguous implementation.
